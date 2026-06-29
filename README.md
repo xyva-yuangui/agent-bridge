@@ -95,6 +95,37 @@ agent-bridge.
 
 ---
 
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph A["AI coding agents · one machine"]
+        C["Claude Code<br/>UserPromptSubmit hook"]
+        Z["ZCode<br/>plugin hook"]
+        X["Codex<br/>AGENTS.md + MCP"]
+        R["Reasonix<br/>system_prompt + MCP"]
+    end
+    subgraph T["Transport · same actions, two ways in"]
+        CLI["bridge CLI"]
+        MCP["bridge_mcp<br/>MCP stdio server"]
+    end
+    BOARD["Shared board<br/>~/.agent-bridge/&lt;project&gt;/<br/>board.json · activity.jsonl<br/>flock + atomic writes"]
+
+    C --> CLI
+    Z --> CLI
+    X --> MCP
+    R --> MCP
+    C -.-> MCP
+    CLI --> BOARD
+    MCP --> BOARD
+    BOARD -. "push: desktop notify / wake" .-> A
+```
+
+The board is the single source of truth. Agents reach it through the `bridge`
+CLI or the MCP server; perception keeps them aware; the push layer nudges idle
+ones. Project isolation means an agent only sees the board of the workspace
+it's currently in.
+
 ## How it works
 
 Four layers, each as small as possible:
@@ -382,6 +413,16 @@ agent-bridge/
 Contributions welcome — please keep it dependency-free and small.
 
 ---
+
+## Acknowledgements
+
+roundtable is glue — it stands on the agents it connects. Thanks to the teams
+behind them:
+
+- [Claude Code](https://github.com/anthropics/claude-code) — Anthropic
+- [Codex](https://github.com/openai/codex) — OpenAI
+- [Reasonix (DeepSeek-Reasonix)](https://github.com/esengine/DeepSeek-Reasonix)
+- [ZCode](https://z.ai) — Z.ai (GLM)
 
 ## License
 

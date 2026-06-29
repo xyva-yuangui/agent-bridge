@@ -1,4 +1,4 @@
-# roundtable
+# Roundtable
 
 [English](README.md) | **简体中文**
 
@@ -88,6 +88,35 @@ bridge board
 | **Reasonix** | ✅ | ✅ | `system_prompt` 指令 + MCP 工具(尽力而为)+ headless 推送 |
 
 ---
+
+## 架构图
+
+```mermaid
+flowchart TB
+    subgraph A["AI 编程 agent · 同一台机器"]
+        C["Claude Code<br/>UserPromptSubmit 钩子"]
+        Z["ZCode<br/>插件钩子"]
+        X["Codex<br/>AGENTS.md + MCP"]
+        R["Reasonix<br/>system_prompt + MCP"]
+    end
+    subgraph T["传输层 · 同样的动作,两种入口"]
+        CLI["bridge CLI"]
+        MCP["bridge_mcp<br/>MCP stdio 服务器"]
+    end
+    BOARD["共享看板<br/>~/.agent-bridge/&lt;项目&gt;/<br/>board.json · activity.jsonl<br/>flock + 原子写"]
+
+    C --> CLI
+    Z --> CLI
+    X --> MCP
+    R --> MCP
+    C -.-> MCP
+    CLI --> BOARD
+    MCP --> BOARD
+    BOARD -. "推送:桌面通知 / 唤醒" .-> A
+```
+
+看板是唯一真相源。agent 通过 `bridge` CLI 或 MCP server 访问它;感知层让它们保持
+察觉;推送层去推空闲的那些。工程隔离意味着 agent 只能看到它当前所在工作区的看板。
 
 ## 工作原理
 
@@ -356,6 +385,15 @@ agent-bridge/
 欢迎贡献 —— 请保持零依赖、保持小。
 
 ---
+
+## 致谢
+
+roundtable 只是黏合层 —— 它依赖于它所连接的那些 agent。感谢它们背后的团队:
+
+- [Claude Code](https://github.com/anthropics/claude-code) —— Anthropic
+- [Codex](https://github.com/openai/codex) —— OpenAI
+- [Reasonix(DeepSeek-Reasonix)](https://github.com/esengine/DeepSeek-Reasonix)
+- [ZCode](https://z.ai) —— Z.ai(GLM)
 
 ## 许可证
 
