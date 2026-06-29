@@ -16,6 +16,8 @@ Roundtable 让**同一台电脑**上的 **Claude Code、Codex、Reasonix、ZCode
 
 ```bash
 # 1. 给本机检测到的所有支持应用一键安装
+#    用 npm(免克隆): npx @xyva-yuangui/roundtable install --auto
+#    或在本仓库里:
 ./install.sh --auto
 
 # 2. 从一个 agent 把任务派给另一个

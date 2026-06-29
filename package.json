@@ -1,0 +1,45 @@
+{
+  "name": "@xyva-yuangui/roundtable",
+  "version": "0.1.0",
+  "description": "Make the AI coding agents on your machine (Claude Code, Codex, Reasonix, ZCode) work as one team. Local, zero-dependency.",
+  "bin": {
+    "roundtable": "bin/roundtable.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "install.sh",
+    "SKILL.md",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=14"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "keywords": [
+    "ai-agents",
+    "multi-agent",
+    "claude-code",
+    "codex",
+    "reasonix",
+    "zcode",
+    "mcp",
+    "coding-agents",
+    "collaboration"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xyva-yuangui/roundtable.git"
+  },
+  "homepage": "https://github.com/xyva-yuangui/roundtable#readme",
+  "bugs": {
+    "url": "https://github.com/xyva-yuangui/roundtable/issues"
+  },
+  "author": "xyva-yuangui",
+  "license": "MIT"
+}

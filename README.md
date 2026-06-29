@@ -17,6 +17,8 @@ the terminal. One command to install. No servers, no cloud, no dependencies.
 
 ```bash
 # 1. Install for every supported app found on this machine
+#    via npm (no clone):  npx @xyva-yuangui/roundtable install --auto
+#    or from this repo:
 ./install.sh --auto
 
 # 2. From one agent, hand a task to another
