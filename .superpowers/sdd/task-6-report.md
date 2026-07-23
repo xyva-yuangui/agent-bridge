@@ -78,3 +78,53 @@ Result: `Ran 61 tests ... OK`; compilation and whitespace checks passed.
   claim task acknowledgement or completion.
 - Python 3.13 was the available launcher in this workspace. The production
   code remains Python 3.9 stdlib compatible.
+
+## Review-fix RED/GREEN (2026-07-24)
+
+### RED
+
+Added tests for concurrent direct wake, a crash after `Popen` but before launch
+evidence, manual-recipient routing while an auto launcher is configured, macOS
+structured terminal invocation, and shell-injection-safe instructions. Then
+ran:
+
+```powershell
+$env:PYTHONPATH=(Join-Path $PWD 'src')
+python -m unittest tests.unit.test_terminals tests.integration.test_launch_deduplication -v
+```
+
+Result: `FAILED (failures=3, errors=2)` as expected. The reservation table and
+`_record_started` function did not exist; manual work was retried; macOS used
+`open -a Terminal --args`; and plain instructions rendered `task; 123` as raw
+shell text.
+
+### GREEN
+
+Added migration `0002_launch_reservations.sql` and schema version 2. The table
+uses the task outbox idempotency key (or a deterministic direct-wake key),
+stores `reserved`/`started`/`failed`, PID, timestamps, and an expiry. A
+`BEGIN IMMEDIATE` reservation checks active reserved/started launches and
+cooldown in the same transaction before `Popen`. A `reserved` row is retained
+for 300 seconds minimum (or longer for profile cooldown), so a crash after
+`Popen` fails closed and retries return that existing reservation without a
+second process.
+
+Dispatcher routing now calls the launch channel's narrow applicability check
+before a delivery-attempt row is created: manual and prompt profiles are clean
+not-applicable work, while invalid auto configuration remains a real retryable
+error. The launch adapter remains a top-level pickleable object; the actual
+process effect remains inside Task 5's spawned, bounded worker.
+
+macOS now runs a constant `osascript` program with workspace and every command
+argument passed separately. The constant program uses AppleScript `quoted
+form`; task text is never interpolated into source. Plain instructions use
+`shlex.join` on POSIX and `subprocess.list2cmdline` on Windows.
+
+```powershell
+$env:PYTHONPATH=(Join-Path $PWD 'src')
+python -m unittest tests.unit.test_launchers tests.unit.test_terminals tests.integration.test_launch_deduplication tests.integration.test_dispatcher tests.integration.test_dispatcher_faults tests.integration.test_cli_v2 tests.integration.test_mcp_v2 tests.integration.test_service_workflows -v
+python -m compileall -q src tests
+git diff --check
+```
+
+Result: `Ran 64 tests ... OK`; compilation and whitespace checks passed.

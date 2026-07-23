@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -34,15 +35,13 @@ def open_task_terminal(adapter: Any, task_id: str, workspace: Union[Path, str]) 
         argv = ("wt.exe", "-d", str(cwd), "--", *command)
         return _open_process(argv, cwd, "windows-terminal")
     if _is_macos():
-        # ``open --args`` keeps task text as data.  Do not interpolate it into
-        # AppleScript source or a shell command.
-        argv = ("open", "-a", "Terminal", "--args", *command)
+        argv = ("osascript", "-e", _MACOS_TERMINAL_PROGRAM, str(cwd), *command)
         return _open_process(argv, cwd, "macos-terminal")
     return OpenResult(
         False,
         "instructions",
         command,
-        "Open a terminal in {0} and run: {1}".format(str(cwd), " ".join(command)),
+        "Open a terminal in {0} and run: {1}".format(_quoted(str(cwd)), _quoted_command(command)),
     )
 
 
@@ -88,3 +87,24 @@ def _is_windows() -> bool:
 
 def _is_macos() -> bool:
     return sys.platform == "darwin"
+
+
+def _quoted(value: str) -> str:
+    return subprocess.list2cmdline([value]) if _is_windows() else shlex.quote(value)
+
+
+def _quoted_command(argv: Tuple[str, ...]) -> str:
+    return subprocess.list2cmdline(list(argv)) if _is_windows() else shlex.join(argv)
+
+
+_MACOS_TERMINAL_PROGRAM = '''on run argv
+set workspace to item 1 of argv
+set commandText to ""
+repeat with argumentValue in items 2 through -1 of argv
+    set commandText to commandText & quoted form of (contents of argumentValue) & " "
+end repeat
+tell application "Terminal"
+    activate
+    do script "cd " & quoted form of workspace & " && " & commandText
+end tell
+end run'''

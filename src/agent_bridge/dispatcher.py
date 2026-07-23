@@ -190,12 +190,14 @@ class Dispatcher:
         if not self.channels:
             return self._retry_group(group, "unavailable", "no configured delivery channel", deadline_at)
         delivered = retried = failed = 0
+        representative = group[0]
         for channel, adapter in self.channels.items():
+            if not _is_applicable(adapter, representative):
+                continue
             for item in group:
                 if not self._mark_dispatching(item, channel, deadline_at):
                     self._lease_lost = True
                     return delivered, retried, failed
-            representative = group[0]
             remaining = deadline_at - time.monotonic()
             if remaining <= EFFECT_CLEANUP_RESERVE_SECONDS + SPAWN_RESERVE_SECONDS:
                 self._deadline_reached = True
@@ -455,6 +457,11 @@ def _invoke(adapter: DeliveryChannel, item: OutboxItem, idempotency_key: str, ti
     if callable(method):
         return method(item, idempotency_key, timeout_seconds)
     return adapter(item, idempotency_key, timeout_seconds)  # type: ignore[operator]
+
+
+def _is_applicable(adapter: DeliveryChannel, item: OutboxItem) -> bool:
+    method = getattr(adapter, "applicable", None)
+    return bool(method(item)) if callable(method) else True
 
 
 def _invoke_bounded(

@@ -64,16 +64,18 @@ class TerminalTests(unittest.TestCase):
         self.assertTrue(result.opened)
         self.assertEqual(result.method, "macos-terminal")
         argv = popen.call_args.args[0]
-        self.assertEqual(argv[:4], ["open", "-a", "Terminal", "--args"])
+        self.assertEqual(argv[:2], ["osascript", "-e"])
+        self.assertIn(str(self.workspace.resolve()), argv)
         self.assertIn("task; 123", argv)
         self.assertFalse(popen.call_args.kwargs["shell"])
 
     @patch("agent_bridge.terminals._is_macos", return_value=False)
     @patch("agent_bridge.terminals._is_windows", return_value=False)
     def test_plain_instructions_are_the_final_fallback(self, ignored_windows, ignored_macos) -> None:
-        result = open_task_terminal(None, "task-123", self.workspace)
+        result = open_task_terminal(None, "task; 123", self.workspace)
 
         self.assertFalse(result.opened)
         self.assertEqual(result.method, "instructions")
-        self.assertIn("task-123", result.instructions)
+        self.assertIn("'task; 123'", result.instructions)
+        self.assertNotIn("show task; 123", result.instructions)
         self.assertIn(str(self.workspace.resolve()), result.instructions)

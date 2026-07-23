@@ -146,7 +146,9 @@ def execute_command(
         ).fetchone()
         if row is None:
             raise KeyError("unknown project: {0}".format(project_id))
-        result = launch_stored_agent(service.store, agent, str(row["path"]))
+        result = launch_stored_agent(
+            service.store, agent, str(row["path"]), "wake:{0}:{1}".format(agent, project_id)
+        )
         return {"launch": {"started": result.started, "reason": result.reason, "pid": result.pid}}
     if command == "who-coordinates":
         return {"project_id": project_id, "coordinator": _metadata(service, "coordinator:" + project_id)}

@@ -6,15 +6,17 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence, Tuple, Union
 
 from .models import AgentProfile, DeliveryStatus, ExecutionPolicy
+from .outbox import utc_now
 from .store import Store
 
 
 _SHELL_METACHARACTERS = frozenset("|&;<>()$`\r\n%^!")
+RESERVATION_SECONDS = 300
 
 
 class LaunchPolicyError(ValueError):
@@ -37,6 +39,13 @@ class LaunchResult:
 
     started: bool
     reason: str = ""
+    pid: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class _Reservation:
+    existing: bool
+    decision: LaunchDecision
     pid: Optional[int] = None
 
 
@@ -108,27 +117,34 @@ class LaunchDeliveryChannel:
     def __init__(self, database_path: str) -> None:
         self.database_path = str(database_path)
 
+    def applicable(self, item: Any) -> bool:
+        """Skip manual/prompt targets before dispatcher creates an attempt row."""
+        recipient = item.payload.get("recipient")
+        if not isinstance(recipient, str) or not recipient:
+            return True
+        store = Store.open(Path(self.database_path))
+        try:
+            return load_agent_profile(store, recipient).execution_policy is ExecutionPolicy.AUTO
+        except (KeyError, LaunchPolicyError):
+            # Invalid routing/configuration is a real launch error, not an
+            # inapplicable manual target.
+            return True
+        finally:
+            store.close()
+
     def deliver(self, item: Any, idempotency_key: str, timeout_seconds: float) -> DeliveryStatus:
         """Launch the target once for a coalesced outbox representative."""
-        del idempotency_key, timeout_seconds
+        del timeout_seconds
         task_id = item.payload.get("task_id")
         recipient = item.payload.get("recipient")
         if not isinstance(task_id, str) or not task_id or not isinstance(recipient, str) or not recipient:
             raise RuntimeError("launch item requires task_id and recipient")
         store = Store.open(Path(self.database_path))
         try:
-            profile = load_agent_profile(store, recipient)
             workspace = _task_workspace(store, task_id)
-            running_count = int(store.scalar(
-                "SELECT COUNT(*) FROM tasks WHERE assignee = ? AND state = 'working'", (recipient,)
-            ) or 0)
-            last_launch = _last_launch(store, recipient)
+            result = launch_stored_agent(store, recipient, workspace, idempotency_key, task_id)
         finally:
             store.close()
-        decision = evaluate_launch(profile, workspace, running_count, last_launch, requested_auto=True)
-        if not decision.allowed:
-            raise RuntimeError(decision.reason)
-        result = launch_agent(decision)
         if not result.started:
             raise RuntimeError(result.reason)
         return DeliveryStatus.LAUNCH_STARTED
@@ -156,15 +172,28 @@ def load_agent_profile(store: Store, name: str) -> AgentProfile:
     )
 
 
-def launch_stored_agent(store: Store, name: str, workspace: Union[Path, str]) -> LaunchResult:
-    """Evaluate and launch one named target using only data in the local store."""
+def launch_stored_agent(
+    store: Store,
+    name: str,
+    workspace: Union[Path, str],
+    idempotency_key: Optional[str] = None,
+    task_id: Optional[str] = None,
+) -> LaunchResult:
+    """Reserve, then start one local target without an unprotected effect gap."""
     profile = load_agent_profile(store, name)
-    running_count = int(store.scalar(
-        "SELECT COUNT(*) FROM tasks WHERE assignee = ? AND state = 'working'", (name,)
-    ) or 0)
-    last_launch = _last_launch(store, name)
-    decision = evaluate_launch(profile, workspace, running_count, last_launch, requested_auto=True)
-    return launch_agent(decision)
+    resolved_workspace = str(_workspace(workspace))
+    key = idempotency_key or "wake:{0}:{1}".format(name, resolved_workspace)
+    reservation = _reserve_launch(store, profile, resolved_workspace, key, task_id)
+    if not reservation.decision.allowed:
+        return LaunchResult(False, reservation.decision.reason)
+    if reservation.existing:
+        return LaunchResult(True, "launch already reserved", reservation.pid)
+    result = launch_agent(reservation.decision)
+    if not result.started:
+        _record_failure(store, key, result.reason)
+        return result
+    _record_started(store, key, result.pid)
+    return result
 
 
 def _task_workspace(store: Store, task_id: str) -> str:
@@ -179,13 +208,73 @@ def _task_workspace(store: Store, task_id: str) -> str:
 
 def _last_launch(store: Store, name: str) -> Optional[str]:
     value = store.scalar(
-        "SELECT MAX(delivery_attempts.updated_at) FROM delivery_attempts "
-        "JOIN tasks ON tasks.id = delivery_attempts.task_id "
-        "WHERE tasks.assignee = ? AND delivery_attempts.channel = 'launcher' "
-        "AND delivery_attempts.status = 'launch_started'",
+        "SELECT MAX(COALESCE(started_at, reserved_at)) FROM launch_reservations "
+        "WHERE agent_name = ? AND status IN ('reserved', 'started')",
         (name,),
     )
     return str(value) if value is not None else None
+
+
+def _reserve_launch(
+    store: Store,
+    profile: AgentProfile,
+    workspace: str,
+    idempotency_key: str,
+    task_id: Optional[str],
+) -> _Reservation:
+    """Atomically reserve one effect before a process can be started."""
+    now = utc_now()
+    with store.transaction(immediate=True) as connection:
+        existing = connection.execute(
+            "SELECT status, pid, expires_at FROM launch_reservations WHERE idempotency_key = ?",
+            (idempotency_key,),
+        ).fetchone()
+        if existing is not None and str(existing["status"]) in ("reserved", "started") and str(existing["expires_at"]) > now:
+            return _Reservation(True, LaunchDecision(True, "", _safe_argv(profile.launch_argv), workspace), existing["pid"])
+        running_count = int(connection.execute(
+            "SELECT COUNT(*) FROM launch_reservations WHERE agent_name = ? "
+            "AND status IN ('reserved', 'started') AND expires_at > ?",
+            (profile.name, now),
+        ).fetchone()[0])
+        decision = evaluate_launch(profile, workspace, running_count, _last_launch(store, profile.name), requested_auto=True)
+        if not decision.allowed:
+            return _Reservation(False, decision)
+        expires_at = _reservation_expiry(profile.cooldown_seconds)
+        connection.execute(
+            "INSERT INTO launch_reservations("
+            "idempotency_key, agent_name, task_id, workspace, status, pid, reserved_at, started_at, expires_at, error"
+            ") VALUES (?, ?, ?, ?, 'reserved', NULL, ?, NULL, ?, NULL) "
+            "ON CONFLICT(idempotency_key) DO UPDATE SET "
+            "agent_name = excluded.agent_name, task_id = excluded.task_id, workspace = excluded.workspace, "
+            "status = 'reserved', pid = NULL, reserved_at = excluded.reserved_at, started_at = NULL, "
+            "expires_at = excluded.expires_at, error = NULL "
+            "WHERE launch_reservations.expires_at <= excluded.reserved_at "
+            "OR launch_reservations.status = 'failed'",
+            (idempotency_key, profile.name, task_id, workspace, now, expires_at),
+        )
+        return _Reservation(False, decision)
+
+
+def _record_started(store: Store, idempotency_key: str, pid: Optional[int]) -> None:
+    with store.transaction(immediate=True) as connection:
+        connection.execute(
+            "UPDATE launch_reservations SET status = 'started', pid = ?, started_at = ?, error = NULL "
+            "WHERE idempotency_key = ? AND status = 'reserved'",
+            (pid, utc_now(), idempotency_key),
+        )
+
+
+def _record_failure(store: Store, idempotency_key: str, error: str) -> None:
+    with store.transaction(immediate=True) as connection:
+        connection.execute(
+            "UPDATE launch_reservations SET status = 'failed', expires_at = ?, error = ? WHERE idempotency_key = ?",
+            (utc_now(), error[:1000], idempotency_key),
+        )
+
+
+def _reservation_expiry(cooldown_seconds: int) -> str:
+    seconds = max(RESERVATION_SECONDS, max(0, cooldown_seconds))
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _string_tuple(value: object) -> Tuple[str, ...]:
