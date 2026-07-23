@@ -5,10 +5,12 @@ from __future__ import annotations
 import os
 import multiprocessing
 import random
+import sqlite3
 import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Optional, Tuple
@@ -33,6 +35,11 @@ STATE_WRITE_RESERVE_SECONDS = 0.10
 EFFECT_CLEANUP_RESERVE_SECONDS = (
     WORKER_TERMINATE_SECONDS + WORKER_KILL_SECONDS + STATE_WRITE_RESERVE_SECONDS
 )
+SPAWN_RESERVE_SECONDS = 0.15
+
+
+class _DeadlineExceeded(RuntimeError):
+    """A dispatcher action cannot safely fit in its remaining burst budget."""
 
 
 @dataclass(frozen=True)
@@ -81,39 +88,46 @@ class Dispatcher:
         self._lease_lost = False
         self._deadline_reached = False
 
-    def acquire_lease(self) -> bool:
+    def acquire_lease(self, deadline_at: Optional[float] = None) -> bool:
         """Claim the expiring singleton lease without relying on PID liveness."""
         now = utc_now()
         expires_at = _after_seconds(self.lease_seconds)
-        with self.store.transaction(immediate=True) as connection:
-            inserted = connection.execute(
+        try:
+            with self._transaction(deadline_at) as connection:
+                inserted = connection.execute(
                 "INSERT OR IGNORE INTO dispatcher_leases(name, owner, acquired_at, expires_at) "
                 "VALUES (?, ?, ?, ?)",
                 (LEASE_NAME, self.owner, now, expires_at),
             ).rowcount
-            if inserted:
-                return True
-            reclaimed = connection.execute(
+                if inserted:
+                    return True
+                reclaimed = connection.execute(
                 "UPDATE dispatcher_leases SET owner = ?, acquired_at = ?, expires_at = ? "
                 "WHERE name = ? AND expires_at <= ?",
                 (self.owner, now, expires_at, LEASE_NAME, now),
             ).rowcount
-            return reclaimed == 1
+                return reclaimed == 1
+        except (_DeadlineExceeded, sqlite3.OperationalError):
+            self._deadline_reached = deadline_at is not None
+            return False
 
-    def release_lease(self) -> None:
+    def release_lease(self, deadline_at: Optional[float] = None) -> None:
         """Release only this dispatcher's lease; never delete a reclaimed lease."""
-        with self.store.transaction(immediate=True) as connection:
-            connection.execute(
-                "DELETE FROM dispatcher_leases WHERE name = ? AND owner = ?", (LEASE_NAME, self.owner)
-            )
+        try:
+            with self._transaction(deadline_at) as connection:
+                connection.execute(
+                    "DELETE FROM dispatcher_leases WHERE name = ? AND owner = ?", (LEASE_NAME, self.owner)
+                )
+        except (_DeadlineExceeded, sqlite3.OperationalError):
+            return
 
     def run_burst(self, deadline_seconds: float = MAX_BURST_SECONDS) -> DispatchReport:
         """Deliver due intents until idle or the hard thirty-second burst limit."""
         duration = min(MAX_BURST_SECONDS, max(0.0, float(deadline_seconds)))
-        if not self.acquire_lease():
-            return DispatchReport(acquired=False)
         started = time.monotonic()
         deadline_at = started + duration
+        if not self.acquire_lease(deadline_at):
+            return DispatchReport(acquired=False)
         processed = delivered = retried = failed = coalesced = 0
         timed_out = False
         try:
@@ -140,7 +154,7 @@ class Dispatcher:
                 if timed_out or self._lease_lost:
                     break
         finally:
-            self.release_lease()
+            self.release_lease(deadline_at)
         return DispatchReport(
             acquired=True,
             processed=processed,
@@ -151,26 +165,45 @@ class Dispatcher:
             timed_out=timed_out,
         )
 
+    @contextmanager
+    def _transaction(self, deadline_at: Optional[float]):
+        """Run one SQLite write transaction within the remaining burst budget."""
+        if deadline_at is not None and _remaining(deadline_at) <= STATE_WRITE_RESERVE_SECONDS:
+            raise _DeadlineExceeded()
+        previous_timeout = int(self.store.scalar("PRAGMA busy_timeout") or 0)
+        timeout_ms = previous_timeout
+        if deadline_at is not None:
+            timeout_ms = max(1, int((_remaining(deadline_at) - STATE_WRITE_RESERVE_SECONDS) * 1000))
+            timeout_ms = min(previous_timeout, timeout_ms)
+        self.store.connection.execute("PRAGMA busy_timeout = {0}".format(timeout_ms))
+        try:
+            with self.store.transaction(immediate=True) as connection:
+                yield connection
+        finally:
+            self.store.connection.execute("PRAGMA busy_timeout = {0}".format(previous_timeout))
+
     def tick(self) -> bool:
         """Request a detached burst only when one indexed due-work probe finds work."""
         return tick(self.store)
 
     def _deliver_group(self, group: tuple[OutboxItem, ...], deadline_at: float) -> tuple[int, int, int]:
         if not self.channels:
-            return self._retry_group(group, "unavailable", "no configured delivery channel")
+            return self._retry_group(group, "unavailable", "no configured delivery channel", deadline_at)
         delivered = retried = failed = 0
         for channel, adapter in self.channels.items():
             for item in group:
-                if not self._mark_dispatching(item, channel):
+                if not self._mark_dispatching(item, channel, deadline_at):
                     self._lease_lost = True
                     return delivered, retried, failed
             representative = group[0]
             remaining = deadline_at - time.monotonic()
-            if remaining <= EFFECT_CLEANUP_RESERVE_SECONDS:
+            if remaining <= EFFECT_CLEANUP_RESERVE_SECONDS + SPAWN_RESERVE_SECONDS:
                 self._deadline_reached = True
-                return self._retry_group(group, channel, "burst deadline leaves no safe effect budget")
-            timeout_seconds = remaining - EFFECT_CLEANUP_RESERVE_SECONDS
-            if not self._renew_lease(timeout_seconds + EFFECT_CLEANUP_RESERVE_SECONDS):
+                return self._retry_group(group, channel, "burst deadline leaves no safe effect budget", deadline_at)
+            timeout_seconds = remaining - EFFECT_CLEANUP_RESERVE_SECONDS - SPAWN_RESERVE_SECONDS
+            if not self._renew_lease(
+                timeout_seconds + EFFECT_CLEANUP_RESERVE_SECONDS + SPAWN_RESERVE_SECONDS, deadline_at
+            ):
                 self._lease_lost = True
                 return delivered, retried, failed
             try:
@@ -179,14 +212,12 @@ class Dispatcher:
                 )
                 if not completed:
                     self._deadline_reached = True
-                    return self._retry_group(
-                        group, channel, "channel exceeded bounded timeout"
-                    )
+                    return self._retry_group(group, channel, "channel exceeded bounded timeout", deadline_at)
                 status = _delivery_status(result)
                 if status not in EVIDENCE_RANK or EVIDENCE_RANK[status] < EVIDENCE_RANK[DeliveryStatus.OS_POSTED]:
                     raise RuntimeError("channel returned no delivery evidence")
             except Exception as error:
-                retry_result = self._retry_group(group, channel, str(error))
+                retry_result = self._retry_group(group, channel, str(error), deadline_at)
                 retried += retry_result[1]
                 failed += retry_result[2]
                 continue
@@ -194,46 +225,46 @@ class Dispatcher:
                 # This hook intentionally sits after the external effect and
                 # before durable completion so fault tests exercise that gap.
                 hook_remaining = deadline_at - time.monotonic()
-                if hook_remaining <= EFFECT_CLEANUP_RESERVE_SECONDS:
+                if hook_remaining <= EFFECT_CLEANUP_RESERVE_SECONDS + SPAWN_RESERVE_SECONDS:
                     self._deadline_reached = True
-                    return self._retry_group(
-                        group, channel, "burst deadline leaves no safe hook budget"
-                    )
+                    return self._retry_group(group, channel, "burst deadline leaves no safe hook budget", deadline_at)
                 hook_completed, ignored = _after_effect_bounded(
                     self.after_effect,
                     representative,
                     status,
-                    hook_remaining - EFFECT_CLEANUP_RESERVE_SECONDS,
+                    hook_remaining - EFFECT_CLEANUP_RESERVE_SECONDS - SPAWN_RESERVE_SECONDS,
                     deadline_at,
                 )
                 if not hook_completed:
                     self._deadline_reached = True
-                    return self._retry_group(group, channel, "after-effect hook exceeded bounded timeout")
+                    return self._retry_group(group, channel, "after-effect hook exceeded bounded timeout", deadline_at)
             for item in group:
-                if not self._record_evidence(item, channel, status):
+                if not self._record_evidence(item, channel, status, deadline_at):
                     self._lease_lost = True
                     return delivered, retried, failed
         if not retried and not failed:
             for item in group:
-                if not self._complete(item):
+                if not self._complete(item, deadline_at):
                     self._lease_lost = True
                     return delivered, retried, failed
             delivered = len(group)
         return delivered, retried, failed
 
-    def _mark_dispatching(self, item: OutboxItem, channel: str) -> bool:
+    def _mark_dispatching(self, item: OutboxItem, channel: str, deadline_at: float) -> bool:
         task_id = _task_id(item)
         if task_id is None:
             raise ValueError("outbox item has no task_id")
         now = utc_now()
-        with self.store.transaction(immediate=True) as connection:
-            if not _connection_can_mutate_item(connection, self.owner, item.id):
-                return False
-            if connection.execute(
-                "UPDATE outbox SET attempts = attempts + 1 WHERE id = ? AND completed_at IS NULL", (item.id,)
-            ).rowcount != 1:
-                return False
-            connection.execute(
+        try:
+            transaction = self._transaction(deadline_at)
+            with transaction as connection:
+                if not _connection_can_mutate_item(connection, self.owner, item.id):
+                    return False
+                if connection.execute(
+                    "UPDATE outbox SET attempts = attempts + 1 WHERE id = ? AND completed_at IS NULL", (item.id,)
+                ).rowcount != 1:
+                    return False
+                connection.execute(
                 "INSERT INTO delivery_attempts(task_id, channel, status, attempts, created_at, updated_at, error, idempotency_key) "
                 "VALUES (?, ?, ?, 1, ?, ?, NULL, ?) "
                 "ON CONFLICT(idempotency_key) DO UPDATE SET status = CASE "
@@ -242,36 +273,46 @@ class Dispatcher:
                 "ELSE excluded.status END, "
                 "attempts = delivery_attempts.attempts + 1, updated_at = excluded.updated_at, error = NULL",
                 (task_id, channel, DeliveryStatus.DISPATCHING.value, now, now, _attempt_key(item, channel)),
-            )
-            return True
+                )
+                return True
+        except (_DeadlineExceeded, sqlite3.OperationalError):
+            self._deadline_reached = True
+            return False
 
-    def _record_evidence(self, item: OutboxItem, channel: str, status: DeliveryStatus) -> bool:
-        with self.store.transaction(immediate=True) as connection:
-            if not _connection_can_mutate_item(connection, self.owner, item.id):
-                return False
-            row = connection.execute(
+    def _record_evidence(
+        self, item: OutboxItem, channel: str, status: DeliveryStatus, deadline_at: float
+    ) -> bool:
+        try:
+            with self._transaction(deadline_at) as connection:
+                if not _connection_can_mutate_item(connection, self.owner, item.id):
+                    return False
+                row = connection.execute(
                 "SELECT status FROM delivery_attempts WHERE idempotency_key = ?", (_attempt_key(item, channel),)
-            ).fetchone()
-            existing = DeliveryStatus(str(row["status"])) if row is not None else DeliveryStatus.QUEUED
-            strongest = status if EVIDENCE_RANK.get(status, -1) >= EVIDENCE_RANK.get(existing, -1) else existing
-            connection.execute(
+                ).fetchone()
+                existing = DeliveryStatus(str(row["status"])) if row is not None else DeliveryStatus.QUEUED
+                strongest = status if EVIDENCE_RANK.get(status, -1) >= EVIDENCE_RANK.get(existing, -1) else existing
+                connection.execute(
                 "UPDATE delivery_attempts SET status = ?, updated_at = ?, error = NULL "
                 "WHERE idempotency_key = ?",
                 (strongest.value, utc_now(), _attempt_key(item, channel)),
-            )
-            return True
+                )
+                return True
+        except (_DeadlineExceeded, sqlite3.OperationalError):
+            self._deadline_reached = True
+            return False
 
     def _retry_group(
-        self, group: tuple[OutboxItem, ...], channel: str, error: str, minimum_delay: float = 0.0
+        self, group: tuple[OutboxItem, ...], channel: str, error: str, deadline_at: float,
+        minimum_delay: float = 0.0,
     ) -> tuple[int, int, int]:
         retried = failed = 0
         for item in group:
             # An unavailable channel did not have a dispatching record yet.
             if channel == "unavailable":
-                if not self._mark_dispatching(item, channel):
+                if not self._mark_dispatching(item, channel, deadline_at):
                     self._lease_lost = True
                     continue
-            final = self._retry_or_fail(item, channel, error, minimum_delay)
+            final = self._retry_or_fail(item, channel, error, deadline_at, minimum_delay)
             if final is None:
                 self._lease_lost = True
                 continue
@@ -280,59 +321,72 @@ class Dispatcher:
         return 0, retried, failed
 
     def _retry_or_fail(
-        self, item: OutboxItem, channel: str, error: str, minimum_delay: float = 0.0
+        self, item: OutboxItem, channel: str, error: str, deadline_at: float,
+        minimum_delay: float = 0.0,
     ) -> Optional[bool]:
         now = utc_now()
-        with self.store.transaction(immediate=True) as connection:
-            if not _connection_can_mutate_item(connection, self.owner, item.id):
-                return None
-            row = connection.execute(
+        try:
+            with self._transaction(deadline_at) as connection:
+                if not _connection_can_mutate_item(connection, self.owner, item.id):
+                    return None
+                row = connection.execute(
                 "SELECT attempts FROM outbox WHERE id = ? AND completed_at IS NULL", (item.id,)
-            ).fetchone()
-            if row is None:
-                return None
-            attempts = int(row["attempts"])
-            terminal = attempts >= self.max_attempts
-            status = DeliveryStatus.FAILED if terminal else DeliveryStatus.RETRY_WAIT
-            evidence = connection.execute(
+                ).fetchone()
+                if row is None:
+                    return None
+                attempts = int(row["attempts"])
+                terminal = attempts >= self.max_attempts
+                status = DeliveryStatus.FAILED if terminal else DeliveryStatus.RETRY_WAIT
+                evidence = connection.execute(
                 "SELECT status FROM delivery_attempts WHERE idempotency_key = ?", (_attempt_key(item, channel),)
-            ).fetchone()
-            if evidence is not None:
-                existing = DeliveryStatus(str(evidence["status"]))
-                if EVIDENCE_RANK.get(existing, -1) >= EVIDENCE_RANK[DeliveryStatus.OS_POSTED]:
-                    status = existing
-            connection.execute(
+                ).fetchone()
+                if evidence is not None:
+                    existing = DeliveryStatus(str(evidence["status"]))
+                    if EVIDENCE_RANK.get(existing, -1) >= EVIDENCE_RANK[DeliveryStatus.OS_POSTED]:
+                        status = existing
+                connection.execute(
                 "UPDATE delivery_attempts SET status = ?, updated_at = ?, error = ? WHERE idempotency_key = ?",
                 (status.value, now, error[:1000], _attempt_key(item, channel)),
-            )
-            if terminal:
-                connection.execute("UPDATE outbox SET completed_at = ? WHERE id = ?", (now, item.id))
-            else:
-                connection.execute(
+                )
+                if terminal:
+                    connection.execute("UPDATE outbox SET completed_at = ? WHERE id = ?", (now, item.id))
+                else:
+                    connection.execute(
                     "UPDATE outbox SET due_at = ? WHERE id = ?",
                     (_retry_due_at(attempts, minimum_delay), item.id),
-                )
-            return terminal
+                    )
+                return terminal
+        except (_DeadlineExceeded, sqlite3.OperationalError):
+            self._deadline_reached = True
+            return None
 
-    def _renew_lease(self, required_seconds: float) -> bool:
+    def _renew_lease(self, required_seconds: float, deadline_at: float) -> bool:
         """Fence each external effect with a live owner-checked lease renewal."""
         now = utc_now()
         expires_at = _after_seconds(max(self.lease_seconds, required_seconds))
-        with self.store.transaction(immediate=True) as connection:
-            return connection.execute(
+        try:
+            with self._transaction(deadline_at) as connection:
+                return connection.execute(
                 "UPDATE dispatcher_leases SET acquired_at = ?, expires_at = ? "
                 "WHERE name = ? AND owner = ? AND expires_at > ?",
                 (now, expires_at, LEASE_NAME, self.owner, now),
-            ).rowcount == 1
+                ).rowcount == 1
+        except (_DeadlineExceeded, sqlite3.OperationalError):
+            self._deadline_reached = True
+            return False
 
-    def _complete(self, item: OutboxItem) -> bool:
-        with self.store.transaction(immediate=True) as connection:
-            if not _connection_can_mutate_item(connection, self.owner, item.id):
-                return False
-            connection.execute(
+    def _complete(self, item: OutboxItem, deadline_at: float) -> bool:
+        try:
+            with self._transaction(deadline_at) as connection:
+                if not _connection_can_mutate_item(connection, self.owner, item.id):
+                    return False
+                connection.execute(
                 "UPDATE outbox SET completed_at = ? WHERE id = ? AND completed_at IS NULL", (utc_now(), item.id)
-            )
-            return True
+                )
+                return True
+        except (_DeadlineExceeded, sqlite3.OperationalError):
+            self._deadline_reached = True
+            return False
 
 
 def request_dispatch() -> bool:
@@ -420,13 +474,19 @@ def _invoke_bounded(
     receiver, sender = context.Pipe(duplex=False)
     worker = context.Process(
         target=_adapter_worker,
-        args=(adapter, item, idempotency_key, timeout_seconds, sender),
+        args=(adapter, item, idempotency_key, timeout_seconds, deadline_at, sender),
         name="agent-bridge-delivery",
     )
     started = False
     try:
-        worker.start()
+        if _remaining(deadline_at) <= EFFECT_CLEANUP_RESERVE_SECONDS + SPAWN_RESERVE_SECONDS:
+            return False, None
+        _start_worker(worker, deadline_at)
         started = True
+        if _remaining(deadline_at) <= EFFECT_CLEANUP_RESERVE_SECONDS:
+            if not _terminate_worker(worker, deadline_at):
+                raise RuntimeError("delivery worker started too late and did not terminate")
+            return False, None
         wait_seconds = min(timeout_seconds, _effect_wait_budget(deadline_at))
         if wait_seconds <= 0.0 or not receiver.poll(wait_seconds):
             if not _terminate_worker(worker, deadline_at):
@@ -462,13 +522,19 @@ def _after_effect_bounded(
     receiver, sender = context.Pipe(duplex=False)
     worker = context.Process(
         target=_after_effect_worker,
-        args=(hook, item, status, sender),
+        args=(hook, item, status, deadline_at, sender),
         name="agent-bridge-delivery-hook",
     )
     started = False
     try:
-        worker.start()
+        if _remaining(deadline_at) <= EFFECT_CLEANUP_RESERVE_SECONDS + SPAWN_RESERVE_SECONDS:
+            return False, None
+        _start_worker(worker, deadline_at)
         started = True
+        if _remaining(deadline_at) <= EFFECT_CLEANUP_RESERVE_SECONDS:
+            if not _terminate_worker(worker, deadline_at):
+                raise RuntimeError("delivery hook worker started too late and did not terminate")
+            return False, None
         wait_seconds = min(timeout_seconds, _effect_wait_budget(deadline_at))
         if wait_seconds <= 0.0 or not receiver.poll(wait_seconds):
             if not _terminate_worker(worker, deadline_at):
@@ -498,9 +564,13 @@ def _adapter_worker(
     item: OutboxItem,
     idempotency_key: str,
     timeout_seconds: float,
+    deadline_at: float,
     sender: Any,
 ) -> None:
     try:
+        if _remaining(deadline_at) <= EFFECT_CLEANUP_RESERVE_SECONDS:
+            sender.send(("late", None))
+            return
         sender.send(("ok", _invoke(adapter, item, idempotency_key, timeout_seconds)))
     except BaseException as error:
         sender.send(("error", "{0}: {1}".format(type(error).__name__, error)))
@@ -512,9 +582,13 @@ def _after_effect_worker(
     hook: Callable[[OutboxItem, DeliveryStatus], None],
     item: OutboxItem,
     status: DeliveryStatus,
+    deadline_at: float,
     sender: Any,
 ) -> None:
     try:
+        if _remaining(deadline_at) <= EFFECT_CLEANUP_RESERVE_SECONDS:
+            sender.send(("late", None))
+            return
         hook(item, status)
         sender.send(("ok", None))
     except BaseException as error:
@@ -530,6 +604,13 @@ def _terminate_worker(worker: Any, deadline_at: float) -> bool:
         worker.kill()
         worker.join(min(WORKER_KILL_SECONDS, _remaining(deadline_at)))
     return not worker.is_alive()
+
+
+def _start_worker(worker: Any, deadline_at: float) -> None:
+    """Start only with enough time left for a child-side late-start guard."""
+    if _remaining(deadline_at) <= EFFECT_CLEANUP_RESERVE_SECONDS + SPAWN_RESERVE_SECONDS:
+        raise _DeadlineExceeded()
+    worker.start()
 
 
 def _remaining(deadline_at: float) -> float:

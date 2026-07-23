@@ -115,7 +115,7 @@ class DispatcherTests(unittest.TestCase):
 
         report = Dispatcher(self.store, {"notification": channel}).run_burst(deadline_seconds=0.0)
 
-        self.assertTrue(report.timed_out)
+        self.assertFalse(report.acquired)
         self.assertEqual(list(channel.effects), [])
         self.assertLess(time.monotonic() - started, 0.25)
 
@@ -163,6 +163,49 @@ class DispatcherTests(unittest.TestCase):
             ))
             with self.store.transaction(immediate=True) as connection:
                 connection.execute("UPDATE outbox SET due_at = ?", (utc_now(),))
+
+    def test_sqlite_lock_contention_cannot_extend_burst_deadline(self) -> None:
+        self._outbox_item()
+        lock_store = Store.open(self.path)
+        started = time.monotonic()
+        try:
+            with lock_store.transaction(immediate=True):
+                report = Dispatcher(self.store, {"notification": self._recording()}).run_burst(0.2)
+        finally:
+            lock_store.close()
+
+        self.assertFalse(report.acquired)
+        self.assertLess(time.monotonic() - started, 0.3)
+
+    def test_insufficient_spawn_budget_does_not_start_a_worker(self) -> None:
+        self._outbox_item()
+        channel = self._recording()
+
+        report = Dispatcher(self.store, {"notification": channel}).run_burst(0.4)
+
+        self.assertTrue(report.timed_out)
+        self.assertEqual(list(channel.effects), [])
+        self.assertFalse(any(
+            child.name == "agent-bridge-delivery" and child.is_alive()
+            for child in multiprocessing.active_children()
+        ))
+
+    def test_slow_worker_start_fails_closed_without_adapter_effect(self) -> None:
+        self._outbox_item()
+        channel = self._recording()
+
+        def slow_start(worker, deadline_at):
+            time.sleep(0.35)
+            worker.start()
+
+        with patch("agent_bridge.dispatcher._start_worker", side_effect=slow_start):
+            Dispatcher(self.store, {"notification": channel}).run_burst(0.6)
+
+        self.assertEqual(list(channel.effects), [])
+        self.assertFalse(any(
+            child.name == "agent-bridge-delivery" and child.is_alive()
+            for child in multiprocessing.active_children()
+        ))
 
     def test_retry_preserves_existing_channel_evidence(self) -> None:
         self._outbox_item()

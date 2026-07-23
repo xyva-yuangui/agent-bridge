@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import multiprocessing
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -82,8 +83,9 @@ class DispatcherFaultTests(unittest.TestCase):
             "SELECT attempts, due_at, completed_at FROM outbox WHERE id = ?", (item.id,)
         ).fetchone())
 
-        self.assertFalse(stale._mark_dispatching(item, "notification"))
-        self.assertIsNone(stale._retry_or_fail(item, "notification", "stale"))
+        deadline = time.monotonic() + 1.0
+        self.assertFalse(stale._mark_dispatching(item, "notification", deadline))
+        self.assertIsNone(stale._retry_or_fail(item, "notification", "stale", deadline))
 
         after = tuple(self.store.connection.execute(
             "SELECT attempts, due_at, completed_at FROM outbox WHERE id = ?", (item.id,)
