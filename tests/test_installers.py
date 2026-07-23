@@ -71,6 +71,13 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(powershell)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            (root / "AGENTS.md").write_text("", encoding="utf-8")
+            stale_profile = root / ".agent-bridge" / "agents" / "old-test" / "agent.json"
+            stale_profile.parent.mkdir(parents=True)
+            stale_profile.write_text(
+                '{"name":"old-test","last_seen":"2000-01-01T00:00:00Z"}',
+                encoding="utf-8",
+            )
             install = subprocess.run(
                 [
                     powershell,
@@ -237,3 +244,31 @@ class NotificationTests(unittest.TestCase):
             "BurntToast",
             WINDOWS_NOTIFY.read_text(encoding="utf-8"),
         )
+
+
+class DocumentationTests(unittest.TestCase):
+    def test_docs_match_installers_delivery_and_lifecycle(self):
+        english = (ROOT / "README.md").read_text(encoding="utf-8")
+        chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        combined = english + chinese
+        for token in (
+            ".\\install.ps1 -Auto",
+            "./install.sh --auto",
+            "Python 3.9+",
+            "queued",
+            "wake_launched",
+            "acknowledged",
+            "unavailable",
+            "failed",
+            "input_required",
+            "changes_requested",
+            "python -m unittest discover -s tests -v",
+            "macOS",
+        ):
+            self.assertIn(token, combined)
+        self.assertIn("pending -> working", skill)
+        self.assertIn("input_required -> pending", skill)
+        self.assertIn("review_requested -> completed", skill)
+        self.assertIn("status or inbox", skill)
+        self.assertIn("not an acknowledgment", skill)

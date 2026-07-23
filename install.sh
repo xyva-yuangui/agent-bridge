@@ -195,17 +195,82 @@ configure_reasonix() {
   directive="${install_root}/.reasonix/agent-bridge-directive.md"
   mkdir -p "$(dirname "$directive")"
   printf '%s\n' "At the start of every turn, run agent-bridge status and inbox." > "$directive"
-  body="[agent]
-system_prompt_file = '${directive}'
+  "$python_path" - "${install_root}/.reasonix/config.toml" "$directive" "$bridge_home" "$python_path" "${skill_home}/scripts/bridge_mcp.py" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
 
-[[plugins]]
-name = 'agent-bridge'
-command = '${python_path}'
-args = ['${skill_home}/scripts/bridge_mcp.py', '--as', 'reasonix']
+path = Path(sys.argv[1])
+directive, bridge_home, python, mcp = sys.argv[2:]
+text = path.read_text(encoding="utf-8") if path.exists() else ""
+text = re.sub(
+    r"(?ms)^# >>> agent-bridge:reasonix >>>.*?^# <<< agent-bridge:reasonix <<<\s*",
+    "",
+    text,
+)
 
-[sandbox]
-allow_write = ['${bridge_home}']"
-  set_managed_block "${install_root}/.reasonix/config.toml" "reasonix" "$body" "$python_path"
+def upsert_scalar(source, section, key, value):
+    pattern = re.compile(
+        rf"(?ms)(^\[{re.escape(section)}\]\s*\r?\n)(.*?)(?=^\[|\Z)"
+    )
+    match = pattern.search(source)
+    line = f"{key} = {json.dumps(value)}"
+    if not match:
+        return source.rstrip() + f"\n\n[{section}]\n{line}\n"
+    body = match.group(2)
+    key_pattern = re.compile(rf"(?m)^{re.escape(key)}\s*=.*$")
+    body = (
+        key_pattern.sub(line, body, count=1)
+        if key_pattern.search(body)
+        else body.rstrip() + "\n" + line + "\n"
+    )
+    return source[:match.start(2)] + body + source[match.end(2):]
+
+def ensure_array_value(source, section, key, value):
+    pattern = re.compile(
+        rf"(?ms)(^\[{re.escape(section)}\]\s*\r?\n)(.*?)(?=^\[|\Z)"
+    )
+    match = pattern.search(source)
+    value_json = json.dumps(value)
+    if not match:
+        return source.rstrip() + f"\n\n[{section}]\n{key} = [{value_json}]\n"
+    body = match.group(2)
+    line_pattern = re.compile(rf"(?m)^({re.escape(key)}\s*=\s*)\[(.*?)\]\s*$")
+    line_match = line_pattern.search(body)
+    if not line_match:
+        body = body.rstrip() + f"\n{key} = [{value_json}]\n"
+    elif value not in line_match.group(2):
+        values = line_match.group(2).strip()
+        replacement = line_match.group(1) + "[" + (
+            values + ", " if values else ""
+        ) + value_json + "]"
+        body = body[:line_match.start()] + replacement + body[line_match.end():]
+    return source[:match.start(2)] + body + source[match.end(2):]
+
+plugin_pattern = re.compile(
+    r"(?ms)^\[\[plugins\]\]\s*\r?\n.*?(?=^\[\[?[A-Za-z0-9_.-]+\]\]?\s*$|\Z)"
+)
+text = plugin_pattern.sub(
+    lambda match: "" if re.search(
+        r"(?m)^name\s*=\s*['\"]agent-bridge['\"]\s*$",
+        match.group(0),
+    ) else match.group(0),
+    text,
+)
+text = upsert_scalar(text, "agent", "system_prompt_file", directive)
+text = ensure_array_value(text, "sandbox", "allow_write", bridge_home)
+plugin = (
+    "# >>> agent-bridge:reasonix >>>\n"
+    "[[plugins]]\n"
+    "name = \"agent-bridge\"\n"
+    f"command = {json.dumps(python)}\n"
+    f"args = [{json.dumps(mcp)}, \"--as\", \"reasonix\"]\n"
+    "# <<< agent-bridge:reasonix <<<\n"
+)
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(text.rstrip() + "\n\n" + plugin, encoding="utf-8")
+PY
 }
 
 configure_zcode() {

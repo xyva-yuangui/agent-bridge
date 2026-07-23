@@ -63,6 +63,9 @@ function Set-ManagedBlock {
     $content = ""
     if (Test-Path -LiteralPath $Path) {
         $content = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path
+        if ($null -eq $content) {
+            $content = ""
+        }
     }
     $pattern = "(?ms)^" + [regex]::Escape($start) + ".*?^" + [regex]::Escape($end) + "\s*"
     $content = [regex]::Replace($content, $pattern, "")
@@ -82,6 +85,9 @@ function Remove-ManagedBlock {
     $start = "# >>> agent-bridge:$Name >>>"
     $end = "# <<< agent-bridge:$Name <<<"
     $content = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path
+    if ($null -eq $content) {
+        $content = ""
+    }
     $pattern = "(?ms)^" + [regex]::Escape($start) + ".*?^" + [regex]::Escape($end) + "\s*"
     $content = [regex]::Replace($content, $pattern, "")
     [IO.File]::WriteAllText($Path, $content.TrimEnd() + "`n", (New-Object Text.UTF8Encoding($false)))
@@ -307,30 +313,94 @@ function Configure-Reasonix {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $directivePath) | Out-Null
     [IO.File]::WriteAllText($directivePath, $directive + "`n", (New-Object Text.UTF8Encoding($false)))
     $mcp = Join-Path $script:SkillHome "scripts\bridge_mcp.py"
-    $body = @"
-[agent]
-system_prompt_file = $(ConvertTo-TomlLiteral $directivePath)
-
-[[plugins]]
-name = 'agent-bridge'
-command = $(ConvertTo-TomlLiteral $PythonPath)
-args = [$(ConvertTo-TomlLiteral $mcp), '--as', 'reasonix']
-
-[sandbox]
-allow_write = [$(ConvertTo-TomlLiteral $script:BridgeHome)]
-"@
     $config = Join-Path $script:UserRoot ".reasonix\config.toml"
-    $existing = ""
-    if (Test-Path -LiteralPath $config) {
-        $existing = Get-Content -Raw -Encoding UTF8 -LiteralPath $config
-        if ($existing -notmatch [regex]::Escape("# >>> agent-bridge:reasonix >>>")) {
-            $existing = [regex]::Replace($existing, "(?ms)^\[agent\].*?(?=^\[|\z)", "")
-            $existing = [regex]::Replace($existing, "(?ms)^\[\[plugins\]\]\s*\r?\nname\s*=\s*['`"]agent-bridge['`"].*?(?=^\[|\z)", "")
-            $existing = [regex]::Replace($existing, "(?ms)^\[sandbox\].*?(?=^\[|\z)", "")
-            [IO.File]::WriteAllText($config, $existing, (New-Object Text.UTF8Encoding($false)))
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $config) | Out-Null
+    $editor = @'
+import json
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+directive, bridge_home, python, mcp = sys.argv[2:]
+text = path.read_text(encoding="utf-8") if path.exists() else ""
+text = re.sub(
+    r"(?ms)^# >>> agent-bridge:reasonix >>>.*?^# <<< agent-bridge:reasonix <<<\s*",
+    "",
+    text,
+)
+
+def upsert_scalar(source, section, key, value):
+    pattern = re.compile(
+        rf"(?ms)(^\[{re.escape(section)}\]\s*\r?\n)(.*?)(?=^\[|\Z)"
+    )
+    match = pattern.search(source)
+    line = f"{key} = {json.dumps(value)}"
+    if not match:
+        return source.rstrip() + f"\n\n[{section}]\n{line}\n"
+    body = match.group(2)
+    key_pattern = re.compile(rf"(?m)^{re.escape(key)}\s*=.*$")
+    if key_pattern.search(body):
+        body = key_pattern.sub(line, body, count=1)
+    else:
+        body = body.rstrip() + "\n" + line + "\n"
+    return source[:match.start(2)] + body + source[match.end(2):]
+
+def ensure_array_value(source, section, key, value):
+    pattern = re.compile(
+        rf"(?ms)(^\[{re.escape(section)}\]\s*\r?\n)(.*?)(?=^\[|\Z)"
+    )
+    match = pattern.search(source)
+    value_json = json.dumps(value)
+    if not match:
+        return source.rstrip() + f"\n\n[{section}]\n{key} = [{value_json}]\n"
+    body = match.group(2)
+    line_pattern = re.compile(rf"(?m)^({re.escape(key)}\s*=\s*)\[(.*?)\]\s*$")
+    line_match = line_pattern.search(body)
+    if not line_match:
+        body = body.rstrip() + f"\n{key} = [{value_json}]\n"
+    elif value not in line_match.group(2):
+        values = line_match.group(2).strip()
+        replacement = line_match.group(1) + "[" + (
+            values + ", " if values else ""
+        ) + value_json + "]"
+        body = body[:line_match.start()] + replacement + body[line_match.end():]
+    return source[:match.start(2)] + body + source[match.end(2):]
+
+plugin_pattern = re.compile(
+    r"(?ms)^\[\[plugins\]\]\s*\r?\n.*?(?=^\[\[?[A-Za-z0-9_.-]+\]\]?\s*$|\Z)"
+)
+text = plugin_pattern.sub(
+    lambda match: "" if re.search(
+        r"(?m)^name\s*=\s*['\"]agent-bridge['\"]\s*$",
+        match.group(0),
+    ) else match.group(0),
+    text,
+)
+text = upsert_scalar(text, "agent", "system_prompt_file", directive)
+text = ensure_array_value(text, "sandbox", "allow_write", bridge_home)
+plugin = (
+    "# >>> agent-bridge:reasonix >>>\n"
+    "[[plugins]]\n"
+    "name = \"agent-bridge\"\n"
+    f"command = {json.dumps(python)}\n"
+    f"args = [{json.dumps(mcp)}, \"--as\", \"reasonix\"]\n"
+    "# <<< agent-bridge:reasonix <<<\n"
+)
+path.write_text(text.rstrip() + "\n\n" + plugin, encoding="utf-8")
+'@
+    $editorPath = Join-Path $script:BridgeHome (".reasonix-config-" + $PID + ".py")
+    [IO.File]::WriteAllText($editorPath, $editor, (New-Object Text.UTF8Encoding($false)))
+    try {
+        & $PythonPath $editorPath $config $directivePath $script:BridgeHome $PythonPath $mcp
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to update Reasonix config."
+        }
+    } finally {
+        if (Test-Path -LiteralPath $editorPath) {
+            Remove-Item -LiteralPath $editorPath -Force
         }
     }
-    Set-ManagedBlock -Path $config -Name "reasonix" -Body $body
 }
 
 function Configure-ZCode {
@@ -409,7 +479,28 @@ function Uninstall-Agent {
                 Remove-JsonPromptHook -Path (Join-Path $script:UserRoot ".claude\settings.json")
             }
             "reasonix" {
-                Remove-ManagedBlock -Path (Join-Path $script:UserRoot ".reasonix\config.toml") -Name "reasonix"
+                $reasonixConfig = Join-Path $script:UserRoot ".reasonix\config.toml"
+                Remove-ManagedBlock -Path $reasonixConfig -Name "reasonix"
+                if (Test-Path -LiteralPath $reasonixConfig) {
+                    $reasonixText = Get-Content -Raw -Encoding UTF8 -LiteralPath $reasonixConfig
+                    if ($null -eq $reasonixText) { $reasonixText = "" }
+                    $reasonixText = [regex]::Replace(
+                        $reasonixText,
+                        "(?m)^\s*system_prompt_file\s*=\s*['`"][^'`"]*agent-bridge-directive\.md['`"]\s*\r?\n?",
+                        ""
+                    )
+                    $reasonixText = [regex]::Replace(
+                        $reasonixText,
+                        "['`"][^'`"]*\.agent-bridge[^'`"]*['`"]\s*,?\s*",
+                        ""
+                    )
+                    $reasonixText = $reasonixText -replace "\[\s*,", "[" -replace ",\s*\]", "]"
+                    [IO.File]::WriteAllText(
+                        $reasonixConfig,
+                        $reasonixText.TrimEnd() + "`n",
+                        (New-Object Text.UTF8Encoding($false))
+                    )
+                }
                 $directive = Join-Path $script:UserRoot ".reasonix\agent-bridge-directive.md"
                 if (Test-Path -LiteralPath $directive) {
                     Remove-Item -LiteralPath $directive -Force

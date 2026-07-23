@@ -803,7 +803,7 @@ def cmd_clean(args):
     pid = _project(args)
     bp = board_path(pid)
     if not bp.exists():
-        print("📭 board is empty")
+        print("[empty] board is empty")
         return
     if not args.clean_all and args.days is None:
         print("error: specify --all or --days N", file=sys.stderr)
@@ -814,7 +814,7 @@ def cmd_clean(args):
         clean_statuses = set(s.strip() for s in args.status.split(","))
         invalid = clean_statuses - VALID_STATES
         if invalid:
-            print(f"❌ invalid statuses: {', '.join(invalid)}", file=sys.stderr)
+            print(f"[error] invalid statuses: {', '.join(invalid)}", file=sys.stderr)
             sys.exit(1)
 
     cutoff = None
@@ -838,7 +838,7 @@ def cmd_clean(args):
                     pass
             removed.append(t)
         if not removed:
-            print("📭 nothing to clean")
+            print("[empty] nothing to clean")
         else:
             print(f"🔍 dry-run: {len(removed)} task(s) would be removed:")
             for t in removed:
@@ -862,7 +862,7 @@ def cmd_clean(args):
                     pass
             removed.append(t)
         if not removed:
-            print("📭 nothing to clean")
+            print("[empty] nothing to clean")
             return
         # write back
         def _write(board):
@@ -875,7 +875,7 @@ def cmd_clean(args):
             "subject": f"cleaned {len(removed)} task(s)",
         })
         ap = bp.parent / "archive.json"
-        print(f"✅ cleaned {len(removed)} task(s), archived to {ap}")
+        print(f"[ok] cleaned {len(removed)} task(s), archived to {ap}")
 
 
 # ── commands ──────────────────────────────────────────────────────────────────
@@ -896,14 +896,15 @@ def cmd_doctor(args):
     name = _get_name(args)
     ok = True
     warnings = 0
-    print(f"✅ identity: {name}")
+    readiness_warnings = 0
+    print(f"[ok] identity: {name}")
 
     ensure_dirs()
     for label, p in [("base dir", BASE_DIR), ("agents dir", AGENTS_DIR), ("projects dir", PROJECTS_DIR)]:
         if os.access(p, os.W_OK):
-            print(f"✅ {label}: {p} (writable)")
+            print(f"[ok] {label}: {p} (writable)")
         else:
-            print(f"❌ {label}: {p} (not writable)")
+            print(f"[error] {label}: {p} (not writable)")
             ok = False
 
     # board.json version
@@ -911,12 +912,13 @@ def cmd_doctor(args):
     if bp.exists():
         board = read_board(bp)
         if board.get("version") == BOARD_VERSION:
-            print(f"✅ board.json: version {BOARD_VERSION}")
+            print(f"[ok] board.json: version {BOARD_VERSION}")
         else:
-            print(f"⚠️  board.json: version {board.get('version')} (expected {BOARD_VERSION})")
+            print(f"[warn]  board.json: version {board.get('version')} (expected {BOARD_VERSION})")
             warnings += 1
+            readiness_warnings += 1
     else:
-        print("ℹ️  board.json: not yet created")
+        print("[info]  board.json: not yet created")
 
     # agent identity uniqueness
     agents = list(AGENTS_DIR.glob("*/agent.json"))
@@ -927,14 +929,15 @@ def cmd_doctor(args):
             ad = json.load(open(af))
             aname = ad.get("name", af.parent.name)
             if aname in seen:
-                print(f"⚠️  duplicate agent name: {aname} ({af} and {seen[aname]})")
+                print(f"[warn]  duplicate agent name: {aname} ({af} and {seen[aname]})")
                 dup = True
                 warnings += 1
+                readiness_warnings += 1
             seen[aname] = af
         except Exception:
             pass
     if not dup and agents:
-        print(f"✅ agent identities unique ({len(agents)} agents)")
+        print(f"[ok] agent identities unique ({len(agents)} agents)")
 
     # heartbeat recency (default 30 min)
     hb_deadline = time.time() - 1800
@@ -947,18 +950,18 @@ def cmd_doctor(args):
             if ts:
                 t = calendar.timegm(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))  # ts is UTC
                 if t < hb_deadline:
-                    print(f"⚠️  {aname}: last seen {ts} (stale >30min)")
+                    print(f"[warn]  {aname}: last seen {ts} (stale >30min)")
                     stale += 1
                     warnings += 1
                 else:
-                    print(f"✅ {aname}: heartbeat OK ({ts})")
+                    print(f"[ok] {aname}: heartbeat OK ({ts})")
             else:
-                print(f"⚠️  {aname}: no heartbeat data")
+                print(f"[warn]  {aname}: no heartbeat data")
                 warnings += 1
         except Exception:
             pass
     if stale == 0 and agents:
-        print("✅ all agents have recent heartbeats")
+        print("[ok] all agents have recent heartbeats")
 
     # Reasonix-specific: check system_prompt_file for directive
     _check_reasonix_config(name, ok, warnings)
@@ -966,26 +969,34 @@ def cmd_doctor(args):
     # skill path exclusion check
     excluded = _check_skill_excluded()
     if excluded:
-        print(f"⚠️  skill path excluded: {excluded}")
+        print(f"[warn]  skill path excluded: {excluded}")
         warnings += 1
+        readiness_warnings += 1
     else:
-        print("✅ skill path not excluded")
+        print("[ok] skill path not excluded")
 
     # hook script
     hook_path = Path(__file__).resolve()
     if hook_path.exists() and (
         sys.platform == "win32" or os.access(hook_path, os.X_OK)
     ):
-        print(f"✅ hook script: {hook_path}")
+        print(f"[ok] hook script: {hook_path}")
     else:
-        print(f"⚠️  hook script not executable: {hook_path}")
+        print(f"[warn]  hook script not executable: {hook_path}")
         warnings += 1
+        readiness_warnings += 1
 
     if ok and warnings == 0:
-        print("✅ agent-bridge is ready")
+        print("[ok] agent-bridge is ready")
     elif ok:
-        print(f"⚠️  agent-bridge: {warnings} warning(s) — see above")
-        if args.strict:
+        if readiness_warnings:
+            print(f"[warn]  agent-bridge: {warnings} warning(s) — see above")
+        else:
+            print(
+                f"[ok] agent-bridge is ready "
+                f"({warnings} operational warning(s) shown above)"
+            )
+        if args.strict and readiness_warnings:
             sys.exit(1)
     else:
         sys.exit(1)
@@ -1000,7 +1011,7 @@ def _check_reasonix_config(name: str, ok: bool, warnings: int):
     try:
         content = reasonix_config.read_text()
         if "agent-bridge" not in content and "bridge status" not in content:
-            print(f"⚠️  Reasonix: system_prompt_file may not contain agent-bridge directive")
+            print(f"[warn]  Reasonix: system_prompt_file may not contain agent-bridge directive")
             warnings += 1
     except Exception:
         pass
@@ -1041,7 +1052,7 @@ def cmd_status(args):
     tag = "" if pid == "default" else f" [{pid}]"
     if args.oneliner:
         if n == 0:
-            print(f"📭 agent-bridge{tag}: no pending tasks for {name}")
+            print(f"[empty] agent-bridge{tag}: no pending tasks for {name}")
         else:
             senders = {t["from"] for t in pending}
             print(f"📥 agent-bridge{tag}: {n} pending (from {', '.join(sorted(senders))}) — run bridge inbox")
@@ -1060,11 +1071,11 @@ def cmd_send(args):
     if args.skill and not target:
         target = route_task(args.skill, exclude=name)
         if not target:
-            print(f"❌ no agent tagged '{args.skill}'. Use --to <agent>, or read `bridge agents` and decide.", file=sys.stderr)
+            print(f"[error] no agent tagged '{args.skill}'. Use --to <agent>, or read `bridge agents` and decide.", file=sys.stderr)
             sys.exit(1)
-        print(f"🎯 fallback-routed to {target} (skill: {args.skill}) — override with --to if the project needs someone else")
+        print(f"[route] fallback-routed to {target} (skill: {args.skill}) — override with --to if the project needs someone else")
     if not target:
-        print("❌ must specify --to <agent> or --skill <tag>", file=sys.stderr)
+        print("[error] must specify --to <agent> or --skill <tag>", file=sys.stderr)
         sys.exit(1)
     registered_profiles = list(AGENTS_DIR.glob("*/agent.json"))
     if registered_profiles and not (AGENTS_DIR / target / "agent.json").exists():
@@ -1089,7 +1100,7 @@ def cmd_send(args):
         board["tasks"].append(task)
         return board
     atomic_update_board(bp, _append)
-    print(f"✅ sent task {task['id']} to {target}: {args.subject}")
+    print(f"[ok] sent task {task['id']} to {target}: {args.subject}")
     no_wake = getattr(args, "no_wake", False)
     delivery = _attempt_delivery(
         pid,
@@ -1120,9 +1131,9 @@ def cmd_who_coordinates(args):
     pid = _project(args)
     coord = get_coordinator(pid)
     if coord:
-        print(f"🎯 {coord} coordinates project '{pid}'")
+        print(f"[route] {coord} coordinates project '{pid}'")
     else:
-        print(f"📭 no coordinator yet for '{pid}' — first agent to send a task becomes coordinator")
+        print(f"[empty] no coordinator yet for '{pid}' — first agent to send a task becomes coordinator")
 
 
 def load_agents() -> dict:
@@ -1142,7 +1153,7 @@ def cmd_agents(args):
     ensure_dirs()
     agents = load_agents()
     if not agents:
-        print("📭 no agents registered")
+        print("[empty] no agents registered")
         print("💡 register at install: install.sh ... --strengths \"hard reasoning, architecture (GPT-5.5)\"")
         return
     # Descriptive matrix. Routing is NOT a fixed table — the coordinator reads this
@@ -1168,7 +1179,7 @@ def cmd_inbox(args):
     board = read_board(bp)
     mine = [t for t in board["tasks"] if _inbox_filter(t, name)]
     if not mine:
-        print("📭 no pending tasks")
+        print("[empty] no pending tasks")
         return
     for t in sorted(mine, key=lambda x: x["created"]):
         print(f"  [{t['id']}] [{t['status']}] {t['subject']} (from {t['from']})")
@@ -1182,7 +1193,7 @@ def cmd_inbox(args):
         if t.get("answer"):
             print(f"        💬 answer: {t['answer']}")
         if t.get("review_comment"):
-            print(f"        🔄 review: {t['review_comment']}")
+            print(f"        [changes] review: {t['review_comment']}")
 
 
 def cmd_show(args):
@@ -1191,7 +1202,7 @@ def cmd_show(args):
     board = read_board(board_path(_project(args)))
     t = _find_task(board, args.task_id)
     if not t:
-        print(f"❌ task {args.task_id} not found", file=sys.stderr)
+        print(f"[error] task {args.task_id} not found", file=sys.stderr)
         sys.exit(1)
     for k in ("id", "subject", "status", "from", "to", "body", "files",
               "question", "answer", "result", "review_verdict", "review_comment",
@@ -1216,10 +1227,10 @@ def cmd_claim(args):
                 delivery["detail"] = f"claimed by {name}"
                 t["delivery"] = delivery
                 return board
-        raise SystemExit(f"❌ task {args.task_id} not found")
+        raise SystemExit(f"[error] task {args.task_id} not found")
     try:
         atomic_update_board(bp, _claim)
-        print(f"✅ claimed {args.task_id}")
+        print(f"[ok] claimed {args.task_id}")
     except SystemExit as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
@@ -1241,7 +1252,7 @@ def cmd_done(args):
                 if args.files:
                     t["files"] = args.files.split(",")
                 return board
-        raise SystemExit(f"❌ task {args.task_id} not found")
+        raise SystemExit(f"[error] task {args.task_id} not found")
     try:
         atomic_update_board(bp, _done)
         # ponytail: auto-log activity after successful write
@@ -1251,7 +1262,7 @@ def cmd_done(args):
         })
         # ponytail: auto-archive if completed tasks exceed threshold
         _auto_archive(pid, name)
-        print(f"✅ completed {args.task_id}: {subject}")
+        print(f"[ok] completed {args.task_id}: {subject}")
     except SystemExit as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
@@ -1263,7 +1274,7 @@ def cmd_board(args):
     bp = board_path(_project(args))
     board = read_board(bp)
     if not board["tasks"]:
-        print("📭 board is empty")
+        print("[empty] board is empty")
         return
     print(f"{'ID':<14} {'STATUS':<18} {'OWNER':<10} {'SUBJECT'}")
     print("-" * 80)
@@ -1282,7 +1293,7 @@ def _find_task(board: dict, task_id: str):
 
 def _check_owner(task: dict, name: str, task_id: str):
     if task["to"] != name:
-        print(f"❌ task {task_id} is not assigned to you", file=sys.stderr)
+        print(f"[error] task {task_id} is not assigned to you", file=sys.stderr)
         sys.exit(1)
 
 
@@ -1303,7 +1314,7 @@ def cmd_question(args):
                 subject = t["subject"]
                 _queue_delivery(t, target, "question awaiting sender")
                 return board
-        raise SystemExit(f"❌ task {args.task_id} not found")
+        raise SystemExit(f"[error] task {args.task_id} not found")
     try:
         atomic_update_board(bp, _q)
         _attempt_delivery(pid, args.task_id, target, f"Question: {subject}")
@@ -1330,11 +1341,11 @@ def cmd_answer(args):
                 subject = t["subject"]
                 _queue_delivery(t, target, "answer ready for assignee")
                 return board
-        raise SystemExit(f"❌ task {args.task_id} not found")
+        raise SystemExit(f"[error] task {args.task_id} not found")
     try:
         atomic_update_board(bp, _a)
         _attempt_delivery(pid, args.task_id, target, f"Answer ready: {subject}")
-        print(f"✅ answered {args.task_id}, task unblocked")
+        print(f"[ok] answered {args.task_id}, task unblocked")
     except SystemExit as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
@@ -1357,7 +1368,7 @@ def cmd_review(args):
                     subject = t["subject"]
                     _queue_delivery(t, target, "review requested")
                     return board
-            raise SystemExit(f"❌ task {args.task_id} not found")
+            raise SystemExit(f"[error] task {args.task_id} not found")
         try:
             atomic_update_board(bp, _req)
             _attempt_delivery(pid, args.task_id, target, f"Review requested: {subject}")
@@ -1378,7 +1389,7 @@ def cmd_review(args):
         bp = board_path(pid)
         verdict = args.verdict
         if verdict not in ("approve", "changes"):
-            print("❌ verdict must be 'approve' or 'changes'", file=sys.stderr)
+            print("[error] verdict must be 'approve' or 'changes'", file=sys.stderr)
             sys.exit(1)
         target = ""
         subject = ""
@@ -1396,7 +1407,7 @@ def cmd_review(args):
                         subject = t["subject"]
                         _queue_delivery(t, target, "review changes requested")
                     return board
-            raise SystemExit(f"❌ task {args.task_id} not found")
+            raise SystemExit(f"[error] task {args.task_id} not found")
         try:
             atomic_update_board(bp, _verdict)
             if verdict == "changes":
@@ -1406,7 +1417,7 @@ def cmd_review(args):
                     target,
                     f"Review changes requested: {subject}",
                 )
-            print(f"{'✅' if verdict=='approve' else '🔄'} review {verdict} on {args.task_id}")
+            print(f"{'[ok]' if verdict=='approve' else '[changes]'} review {verdict} on {args.task_id}")
         except SystemExit as e:
             print(str(e), file=sys.stderr)
             sys.exit(1)
@@ -1417,7 +1428,7 @@ def cmd_activity(args):
     ensure_dirs()
     ap = activity_path(_project(args))
     if not ap.exists():
-        print("📭 no activity yet")
+        print("[empty] no activity yet")
         return
     since = args.since
     with open(ap, "r") as f:
@@ -1442,7 +1453,7 @@ def cmd_log(args):
     append_activity(_project(args), {
         "agent": name, "action": "log", "what": args.what,
     })
-    print(f"✅ logged")
+    print(f"[ok] logged")
 
 
 def cmd_project(args):
@@ -1462,13 +1473,13 @@ def cmd_project(args):
         pmd = pdir / "PROJECT.md"
         if not pmd.exists():
             pmd.write_text(f"# {pid}\n\nWorkspace: {workspace}\nGoal: {args.goal or 'N/A'}\n")
-            print(f"✅ project {pid} created, bound to {workspace}")
+            print(f"[ok] project {pid} created, bound to {workspace}")
         else:
-            print(f"ℹ️  project {pid} already exists (bound to {project_workspace(pid) or workspace})")
+            print(f"[info]  project {pid} already exists (bound to {project_workspace(pid) or workspace})")
     elif args.action == "list":
         projects = [d.name for d in PROJECTS_DIR.iterdir() if d.is_dir()]
         if not projects:
-            print("📭 no projects")
+            print("[empty] no projects")
         else:
             for p in sorted(projects):
                 print(f"  {p}")
@@ -1478,7 +1489,7 @@ def cmd_project(args):
         if pmd.exists():
             print(pmd.read_text())
         else:
-            print(f"❌ project {pid} not found", file=sys.stderr)
+            print(f"[error] project {pid} not found", file=sys.stderr)
             sys.exit(1)
 
 
@@ -1493,13 +1504,13 @@ def cmd_context(args):
         if cm.exists():
             print(cm.read_text())
         else:
-            print("📭 no context yet")
+            print("[empty] no context yet")
     elif args.add:
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         entry = f"\n[{ts}] {name}: {args.add}\n"
         with open(cm, "a") as f:
             f.write(entry)
-        print(f"✅ context added")
+        print(f"[ok] context added")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
