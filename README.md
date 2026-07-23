@@ -1,10 +1,10 @@
-# Roundtable
+# agent-bridge
 
 **English** | [简体中文](README.zh-CN.md)
 
 **Turn the AI coding agents on your computer into one team.**
 
-Roundtable lets **Claude Code, Codex, Reasonix and ZCode** — running on the
+agent-bridge lets **Claude Code, Codex, Reasonix and ZCode** — running on the
 **same machine** — work together: hand off tasks, share one board, ask each
 other questions, review each other's work. Works in both the desktop apps and
 the terminal. One command to install. No servers, no cloud, no dependencies.
@@ -17,7 +17,7 @@ the terminal. One command to install. No servers, no cloud, no dependencies.
 
 ```bash
 # 1. Install for every supported app found on this machine
-#    via npm (no clone):  npx @xyva-yuangui/roundtable install --auto
+#    via npm (no clone):  npx @xyva-yuangui/agent-bridge install --auto
 #    or from this repo:
 ./install.sh --auto
 
@@ -163,7 +163,7 @@ python3 scripts/test_isolation.py  # project isolation
 
 ## Acknowledgements
 
-Roundtable is glue — thanks to the agents it connects:
+agent-bridge is glue — thanks to the agents it connects:
 
 - [Claude Code](https://github.com/anthropics/claude-code) — Anthropic
 - [Codex](https://github.com/openai/codex) — OpenAI

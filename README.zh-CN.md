@@ -1,10 +1,10 @@
-# Roundtable
+# agent-bridge
 
 [English](README.md) | **简体中文**
 
 **把你电脑上的多个 AI 编程 agent 变成一个团队。**
 
-Roundtable 让**同一台电脑**上的 **Claude Code、Codex、Reasonix、ZCode** 一起干活:
+agent-bridge 让**同一台电脑**上的 **Claude Code、Codex、Reasonix、ZCode** 一起干活:
 互相派任务、共享一块看板、互相提问、互相做代码审查。桌面应用和终端都能用,一条命令
 安装。无服务器、无云、零依赖。
 
@@ -16,7 +16,7 @@ Roundtable 让**同一台电脑**上的 **Claude Code、Codex、Reasonix、ZCode
 
 ```bash
 # 1. 给本机检测到的所有支持应用一键安装
-#    用 npm(免克隆): npx @xyva-yuangui/roundtable install --auto
+#    用 npm(免克隆): npx @xyva-yuangui/agent-bridge install --auto
 #    或在本仓库里:
 ./install.sh --auto
 
@@ -155,7 +155,7 @@ python3 scripts/test_isolation.py  # 工程隔离
 
 ## 致谢
 
-Roundtable 只是黏合层 —— 感谢它所连接的这些 agent:
+agent-bridge 只是黏合层 —— 感谢它所连接的这些 agent:
 
 - [Claude Code](https://github.com/anthropics/claude-code) —— Anthropic
 - [Codex](https://github.com/openai/codex) —— OpenAI

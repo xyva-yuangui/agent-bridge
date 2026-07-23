@@ -30,8 +30,8 @@ if (args.length === 0) {
   console.log(`Roundtable — make the AI coding agents on your machine work as one team.
 
 Setup:
-  npx @xyva-yuangui/roundtable install --auto            wire every installed agent
-  npx @xyva-yuangui/roundtable install --agent codex --as codex
+  npx @xyva-yuangui/agent-bridge install --auto            wire every installed agent
+  npx @xyva-yuangui/agent-bridge install --agent codex --as codex
 
 Use (after install the 'bridge' command is on your PATH; or proxy via this CLI):
   roundtable send --to codex --subject "Design the auth module"

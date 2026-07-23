@@ -1,9 +1,9 @@
 {
-  "name": "@xyva-yuangui/roundtable",
+  "name": "@xyva-yuangui/agent-bridge",
   "version": "0.1.0",
   "description": "Make the AI coding agents on your machine (Claude Code, Codex, Reasonix, ZCode) work as one team. Local, zero-dependency.",
   "bin": {
-    "roundtable": "bin/roundtable.js"
+    "agent-bridge": "bin/agent-bridge.js"
   },
   "files": [
     "bin/",
@@ -34,11 +34,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xyva-yuangui/roundtable.git"
+    "url": "git+https://github.com/xyva-yuangui/agent-bridge.git"
   },
-  "homepage": "https://github.com/xyva-yuangui/roundtable#readme",
+  "homepage": "https://github.com/xyva-yuangui/agent-bridge#readme",
   "bugs": {
-    "url": "https://github.com/xyva-yuangui/roundtable/issues"
+    "url": "https://github.com/xyva-yuangui/agent-bridge/issues"
   },
   "author": "xyva-yuangui",
   "license": "MIT"
