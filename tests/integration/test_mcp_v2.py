@@ -58,6 +58,39 @@ class McpV2Tests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertNotIn("IndexError", result.stderr)
 
+    def test_mcp_validates_malformed_requests_and_continues(self):
+        with tempfile.TemporaryDirectory() as directory:
+            responses = self.exchange(Path(directory), [
+                [],
+                3,
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": []},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "bridge_whoami", "arguments": {}}},
+            ])
+        self.assertEqual([response["error"]["code"] for response in responses[:3]], [-32600, -32600, -32602])
+        self.assertIn("codex", responses[3]["result"]["content"][0]["text"])
+
+    def test_mcp_advertises_and_enforces_tool_schemas(self):
+        with tempfile.TemporaryDirectory() as directory:
+            responses = self.exchange(Path(directory), [
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "bridge_send", "arguments": {"subject": "Missing target"}}},
+            ])
+        tools = {tool["name"]: tool for tool in responses[0]["result"]["tools"]}
+        schema = tools["bridge_send"]["inputSchema"]
+        self.assertEqual(schema["required"], ["to", "subject"])
+        self.assertEqual(schema["properties"]["to"]["type"], "string")
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(responses[1]["error"]["code"], -32602)
+
+    def test_mcp_project_init_default_and_wake_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            responses = self.exchange(Path(directory), [
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "bridge_project", "arguments": {"action": "init", "name": "current"}}},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "bridge_wake", "arguments": {"agent": "zcode"}}},
+            ])
+        self.assertIn("project", responses[0]["result"]["content"][0]["text"])
+        self.assertTrue(responses[1]["result"]["isError"])
+
 
 if __name__ == "__main__":
     unittest.main()

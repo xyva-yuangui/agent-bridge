@@ -14,7 +14,7 @@ from .paths import get_data_root
 from .presentation import configure_streams, error_view, render, task_page, task_view, tasks_view
 from .service import BridgeService
 from .store import Store
-from .version import BRIDGE_VERSION
+from .version import BRIDGE_VERSION, SCHEMA_VERSION
 
 
 MCP_EXCLUDED_COMMANDS = frozenset(("dispatch", "tui", "setup", "uninstall", "open-action"))
@@ -81,7 +81,13 @@ def execute_command(
     if command == "claim":
         return {"task": task_view(service.claim(str(_argument(arguments, "task_id")), str(_argument(arguments, "actor", identity)), str(_argument(arguments, "body", ""))))}
     if command == "done":
-        return {"task": task_view(service.done(str(_argument(arguments, "task_id")), str(_argument(arguments, "actor", identity)), str(_argument(arguments, "result", _argument(arguments, "body", "")))))}
+        files = _argument(arguments, "files") or ""
+        task = service.done(
+            str(_argument(arguments, "task_id")), str(_argument(arguments, "actor", identity)),
+            str(_argument(arguments, "result", _argument(arguments, "body", ""))),
+            artifacts=tuple(str(files).split(",")),
+        )
+        return {"task": task_view(task)}
     if command == "question":
         return {"task": task_view(service.question(str(_argument(arguments, "task_id")), str(_argument(arguments, "actor", identity)), str(_argument(arguments, "body", ""))))}
     if command == "answer":
@@ -106,11 +112,7 @@ def execute_command(
         rows = service.store.connection.execute("SELECT * FROM agents ORDER BY name").fetchall()
         return {"agents": [dict(row) for row in rows]}
     if command == "wake":
-        name = str(_argument(arguments, "agent"))
-        row = service.store.connection.execute("SELECT launch_argv_json FROM agents WHERE name = ?", (name,)).fetchone()
-        if row is None:
-            raise KeyError("unknown agent: {0}".format(name))
-        return {"agent": name, "wake": {"configured": bool(json.loads(row["launch_argv_json"]))}}
+        raise CommandUnavailable("wake is unavailable until launcher support is installed")
     if command == "who-coordinates":
         return {"project_id": project_id, "coordinator": _metadata(service, "coordinator:" + project_id)}
     if command == "context":
@@ -132,7 +134,20 @@ def execute_command(
         return {"events": [dict(row) for row in rows]}
     if command == "doctor":
         report = service.store.integrity_report()
-        return {"ok": report.ok, "message": report.message, "database": str(service.store.path)}
+        actual_version = service.store.scalar("SELECT MAX(version) FROM schema_migrations")
+        checks = {
+            "data_root": service.store.path.parent.is_dir(),
+            "schema_version": actual_version == SCHEMA_VERSION,
+            "integrity": report.ok,
+        }
+        strict = bool(_argument(arguments, "strict"))
+        return {
+            "ok": all(checks.values()) if strict else report.ok,
+            "message": report.message,
+            "database": str(service.store.path),
+            "checks": checks,
+            "strict": strict,
+        }
     if command == "project":
         action = str(_argument(arguments, "action"))
         if action == "list":
@@ -140,7 +155,7 @@ def execute_command(
             return {"projects": [dict(row) for row in rows]}
         name = str(_argument(arguments, "name", project_id) or project_id)
         if action == "init":
-            workspace = str(Path(_argument(arguments, "workspace", Path.cwd())).resolve())
+            workspace = str(Path(_argument(arguments, "workspace") or Path.cwd()).resolve())
             with service.store.transaction(immediate=True) as connection:
                 connection.execute("INSERT OR IGNORE INTO projects(id, path) VALUES (?, ?)", (name, workspace))
             if _argument(arguments, "goal") is not None:
@@ -157,17 +172,33 @@ def execute_command(
             raise ValueError("clean requires --all or --days")
         states = tuple(str(_argument(arguments, "status") or "completed,failed").split(","))
         placeholders = ",".join("?" for state in states)
-        query = "DELETE FROM tasks WHERE project_id = ? AND state IN ({0})".format(placeholders)
+        where = "project_id = ? AND state IN ({0})".format(placeholders)
         parameters = [project_id] + list(states)
         if _argument(arguments, "days") is not None:
-            query += " AND updated_at < datetime('now', ?)"
+            where += " AND updated_at < datetime('now', ?)"
             parameters.append("-{0} days".format(int(_argument(arguments, "days"))))
         if _argument(arguments, "dry_run"):
-            query = query.replace("DELETE FROM tasks", "SELECT COUNT(*) FROM tasks")
-            count = int(service.store.scalar(query, parameters) or 0)
+            count = int(service.store.scalar("SELECT COUNT(*) FROM tasks WHERE " + where, parameters) or 0)
         else:
             with service.store.transaction(immediate=True) as connection:
-                count = connection.execute(query, parameters).rowcount
+                task_ids = [row["id"] for row in connection.execute("SELECT id FROM tasks WHERE " + where, parameters)]
+                if task_ids:
+                    cancelled = []
+                    for row in connection.execute("SELECT id, payload_json FROM outbox"):
+                        try:
+                            payload = json.loads(row["payload_json"])
+                        except (TypeError, ValueError):
+                            continue
+                        if isinstance(payload, dict) and payload.get("task_id") in task_ids:
+                            cancelled.append(row["id"])
+                    if cancelled:
+                        connection.execute(
+                            "DELETE FROM outbox WHERE id IN ({0})".format(
+                                ",".join("?" for ignored in cancelled)
+                            ),
+                            cancelled,
+                        )
+                count = connection.execute("DELETE FROM tasks WHERE " + where, parameters).rowcount
         return {"ok": True, "removed": count, "dry_run": bool(_argument(arguments, "dry_run"))}
     if command == "migrate":
         report = import_v1(service.store, Path(str(_argument(arguments, "source"))))
@@ -224,6 +255,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("agent-bridge {0}: {1} assigned task(s)".format(arguments.identity, len(result["tasks"])))
         else:
             print(render(result, arguments.as_json))
+        if arguments.command == "doctor" and arguments.strict and not result["ok"]:
+            return 1
         return 0
     except (CommandUnavailable, KeyError, PermissionError, ValueError, RuntimeError) as error:
         print(render(error_view(error), arguments.as_json), file=os.sys.stderr)

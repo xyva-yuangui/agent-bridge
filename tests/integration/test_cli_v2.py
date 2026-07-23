@@ -6,10 +6,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 from typing import Optional
 
 from agent_bridge.models import TaskState
+from agent_bridge.cli import execute_command
+from agent_bridge.service import BridgeService
+from agent_bridge.store import Store
 from tests.support import BRIDGE_PATH
 
 
@@ -84,6 +88,64 @@ class CliV2Tests(unittest.TestCase):
             if "->" in line:
                 documented.update(part.strip() for part in line.split("->"))
         self.assertEqual(documented, {state.value for state in TaskState})
+
+    def test_project_init_defaults_to_the_current_working_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_module(
+                "agent_bridge.cli", "--json", "project", "init", "--name", "current", home=Path(directory),
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["project"]["path"], str(Path.cwd().resolve()))
+
+    def test_done_files_round_trip_and_clean_removes_delivery_intents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            sent = run_module(
+                "agent_bridge.cli", "--as", "codex", "--json", "send", "--to", "zcode", "--subject", "Files", home=home,
+            )
+            task_id = json.loads(sent.stdout)["task"]["id"]
+            self.assertEqual(run_module("agent_bridge.cli", "--as", "zcode", "claim", task_id, home=home).returncode, 0)
+            done = run_module(
+                "agent_bridge.cli", "--as", "zcode", "--json", "done", task_id, "--result", "done",
+                "--files", "src/a.py, docs/b.md,src/a.py", home=home,
+            )
+            self.assertEqual(done.returncode, 0, done.stderr)
+            shown = run_module("agent_bridge.cli", "--json", "show", task_id, home=home)
+            self.assertEqual(json.loads(shown.stdout)["task"]["artifacts"], ["docs/b.md", "src/a.py"])
+            cleaned = run_module("agent_bridge.cli", "--json", "clean", "--all", home=home)
+            self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
+            connection = sqlite3.connect(str(home / "agent-bridge.sqlite3"))
+            try:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
+            finally:
+                connection.close()
+
+    def test_wake_is_explicitly_unavailable_until_launcher_exists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            run_module("agent_bridge.cli", "--as", "codex", "send", "--to", "zcode", "--subject", "Wake", home=home)
+            result = run_module("agent_bridge.cli", "wake", "zcode", home=home)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unavailable", result.stderr)
+
+    def test_doctor_strict_reports_schema_version_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store.open(Path(directory) / "agent-bridge.sqlite3")
+            service = BridgeService(store)
+            try:
+                with store.transaction(immediate=True) as connection:
+                    connection.execute("DELETE FROM schema_migrations")
+                report = execute_command(service, "codex", "doctor", {"strict": True})
+            finally:
+                store.close()
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["checks"]["schema_version"])
+
+    def test_readmes_use_canonical_delivery_statuses(self):
+        for name in ("README.md", "README.zh-CN.md"):
+            content = (Path(__file__).parents[2] / name).read_text(encoding="utf-8")
+            for obsolete in ("`wake_launched`", "`acknowledged`", "`unavailable`"):
+                self.assertNotIn(obsolete, content)
 
 
 if __name__ == "__main__":

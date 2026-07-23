@@ -158,3 +158,25 @@ class ServiceWorkflowTests(unittest.TestCase):
 
         self.assertEqual(len(page), 100)
         self.assertIsNotNone(page.next_cursor)
+
+    def test_done_persists_normalized_artifacts_with_the_transition(self):
+        task = self.service.send_task("codex", "zcode", "Files", "Body")
+        self.service.claim(task.id, "zcode")
+
+        self.service.done(task.id, "zcode", "complete", artifacts=("src/a.py", " docs/b.md ", "src/a.py"))
+
+        rows = self.store.connection.execute(
+            "SELECT path FROM task_artifacts WHERE task_id = ? ORDER BY path", (task.id,)
+        ).fetchall()
+        self.assertEqual([row["path"] for row in rows], ["docs/b.md", "src/a.py"])
+
+    def test_done_artifacts_roll_back_when_delivery_enqueue_fails(self):
+        task = self.service.send_task("codex", "zcode", "Files", "Body")
+        self.service.claim(task.id, "zcode")
+
+        with patch("agent_bridge.service.enqueue", side_effect=RuntimeError("outbox failed")):
+            with self.assertRaisesRegex(RuntimeError, "outbox failed"):
+                self.service.done(task.id, "zcode", artifacts=("src/a.py",))
+
+        self.assertEqual(self.service.show(task.id).state, TaskState.WORKING)
+        self.assertEqual(self.store.scalar("SELECT COUNT(*) FROM task_artifacts WHERE task_id = ?", (task.id,)), 0)

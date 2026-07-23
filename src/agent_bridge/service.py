@@ -30,6 +30,7 @@ class TaskView:
     revision: int
     created_at: str
     updated_at: str
+    artifacts: Tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -118,9 +119,14 @@ class BridgeService:
         return self._mutate(task_id, actor, verdict, body, expected_revision)
 
     def done(
-        self, task_id: str, actor: str, body: str = "", expected_revision: Optional[int] = None,
+        self,
+        task_id: str,
+        actor: str,
+        body: str = "",
+        expected_revision: Optional[int] = None,
+        artifacts: Tuple[str, ...] = (),
     ) -> TaskView:
-        return self._mutate(task_id, actor, "done", body, expected_revision)
+        return self._mutate(task_id, actor, "done", body, expected_revision, artifacts)
 
     def fail(
         self, task_id: str, actor: str, body: str = "", expected_revision: Optional[int] = None,
@@ -152,10 +158,16 @@ class BridgeService:
         ).fetchone()
         if row is None:
             raise KeyError("unknown task: {0}".format(task_id))
-        return _task_view(row)
+        return _task_view(row, self._artifact_paths(task_id))
 
     def board(self, project_id: str) -> List[TaskView]:
         return self._query_tasks("project_id = ?", (project_id,))
+
+    def _artifact_paths(self, task_id: str) -> Tuple[str, ...]:
+        rows = self.store.connection.execute(
+            "SELECT path FROM task_artifacts WHERE task_id = ? ORDER BY path", (task_id,)
+        ).fetchall()
+        return tuple(str(row["path"]) for row in rows)
 
     def _mutate(
         self,
@@ -164,6 +176,7 @@ class BridgeService:
         action: str,
         body: str,
         expected_revision: Optional[int],
+        artifacts: Tuple[str, ...] = (),
     ) -> TaskView:
         with self.store.transaction(immediate=True) as connection:
             row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -186,6 +199,12 @@ class BridgeService:
             ).rowcount
             if changed != 1:
                 raise RuntimeError("task revision changed before update")
+            for path in _normalize_artifacts(artifacts):
+                connection.execute(
+                    "INSERT OR IGNORE INTO task_artifacts(task_id, kind, path, metadata_json, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (task.id, "file", path, "{}", timestamp),
+                )
             self._append_event(
                 connection, task.id, new_revision, "task.{0}".format(action), actor,
                 {"body": body, "from": task.state.value, "to": target_state.value}, timestamp,
@@ -194,8 +213,7 @@ class BridgeService:
             self._enqueue_delivery(
                 connection, task.id, new_revision, "task.{0}".format(action), recipient, actor, timestamp
             )
-            updated = connection.execute("SELECT * FROM tasks WHERE id = ?", (task.id,)).fetchone()
-        return _task_view(updated)
+        return self.show(task.id)
 
     @staticmethod
     def _ensure_participants(
@@ -275,7 +293,7 @@ class BridgeService:
         return TaskPage(tasks=tasks, next_cursor=next_cursor)
 
 
-def _task_view(row: sqlite3.Row) -> TaskView:
+def _task_view(row: sqlite3.Row, artifacts: Tuple[str, ...] = ()) -> TaskView:
     return TaskView(
         id=row["id"],
         project_id=row["project_id"],
@@ -288,7 +306,14 @@ def _task_view(row: sqlite3.Row) -> TaskView:
         revision=row["revision"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        artifacts=artifacts,
     )
+
+
+def _normalize_artifacts(paths: Tuple[str, ...]) -> Tuple[str, ...]:
+    """Return stable, deduplicated file references suitable for durable storage."""
+    normalized = {path.strip().replace("\\", "/") for path in paths if path.strip()}
+    return tuple(sorted(normalized))
 
 
 def _encode_cursor(updated_at: str, task_id: str) -> str:

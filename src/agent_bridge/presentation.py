@@ -30,6 +30,7 @@ def task_view(task: TaskView) -> Dict[str, Any]:
         "revision": task.revision,
         "created_at": task.created_at,
         "updated_at": task.updated_at,
+        "artifacts": list(task.artifacts),
     }
 
 

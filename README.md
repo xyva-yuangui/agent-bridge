@@ -69,9 +69,14 @@ bridge done <task-id> --result "Implemented and tested"
 Every notification attempt is observable in `task.delivery.status`:
 
 - `queued`: stored and waiting for a delivery attempt.
-- `wake_launched`: a wake process started; this is not proof the agent read it.
-- `acknowledged`: the target called `status`, `inbox`, or claimed the task.
-- `unavailable`: no usable notification or wake channel was available.
+- `dispatching`: a dispatcher currently owns the attempt.
+- `os_posted` / `plugin_delivered`: a delivery channel accepted the notification;
+  the task is not acknowledged yet.
+- `viewed`: the target opened the delivery surface.
+- `launch_started`: a wake process started; it is not proof the agent read it.
+- `agent_acknowledged`: the target checked `status` or `inbox`.
+- `claimed`: the assignee claimed the task.
+- `retry_wait`: a failed attempt is scheduled for retry.
 - `failed`: the delivery attempt itself failed.
 
 `bridge send` never reports a launched process as an acknowledgment. Unknown
@@ -104,7 +109,7 @@ bridge status --oneliner
 bridge agents
 ```
 
-If a task remains `wake_launched`, the application was started but has not
+If a task remains `launch_started`, the application was started but has not
 checked in yet. Restart the target application, verify its hook/MCP config, and
 run `bridge inbox`. Configuration paths are native to the host OS, so Windows
 configs never depend on `/c/...` paths.

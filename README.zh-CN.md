@@ -67,9 +67,13 @@ bridge done <task-id> --result "已实现并测试"
 每次通知尝试都记录在 `task.delivery.status`：
 
 - `queued`：任务已保存，等待尝试送达。
-- `wake_launched`：已启动唤醒进程，但不表示对方已经读到。
-- `acknowledged`：目标调用了 `status`、`inbox` 或认领了任务。
-- `unavailable`：当前没有可用通知或唤醒通道。
+- `dispatching`：分发器当前正在处理此次尝试。
+- `os_posted` / `plugin_delivered`：送达通道已接受通知，但任务尚未被确认。
+- `viewed`：目标已打开送达界面。
+- `launch_started`：已启动唤醒进程，但不表示对方已经读到。
+- `agent_acknowledged`：目标调用了 `status` 或 `inbox`。
+- `claimed`：受理人已认领任务。
+- `retry_wait`：失败尝试已安排重试。
 - `failed`：送达尝试本身失败。
 
 `bridge send` 不会把“进程已启动”误报成“已确认”。存在 agent 档案时，拼错或
@@ -99,7 +103,7 @@ bridge status --oneliner
 bridge agents
 ```
 
-任务停在 `wake_launched` 表示应用已被启动，但尚未检查收件箱。请重启目标应用、
+任务停在 `launch_started` 表示应用已被启动，但尚未检查收件箱。请重启目标应用、
 检查钩子或 MCP 配置，再运行 `bridge inbox`。配置始终使用当前系统的原生路径，
 Windows 不再依赖 `/c/...` 路径。
 
