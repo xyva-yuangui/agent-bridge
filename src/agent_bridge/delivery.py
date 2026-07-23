@@ -34,8 +34,10 @@ class DeliveryAttempt:
 class DeliveryChannel(Protocol):
     """A pluggable channel invoked by the dispatcher for an outbox item."""
 
-    def deliver(self, item: OutboxItem) -> DeliveryStatus:
-        """Deliver *item* and return only evidence actually established."""
+    def deliver(
+        self, item: OutboxItem, idempotency_key: str, timeout_seconds: float
+    ) -> DeliveryStatus:
+        """Deliver bounded work and return only evidence actually established."""
 
 
 AttemptLike = Union[DeliveryAttempt, Mapping[str, Any]]

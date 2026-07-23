@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -19,7 +20,8 @@ class RecordingChannel:
     def __init__(self) -> None:
         self.effects: list[str] = []
 
-    def deliver(self, item):
+    def deliver(self, item, idempotency_key, timeout_seconds):
+        self.asserted_arguments = (idempotency_key, timeout_seconds)
         if item.idempotency_key not in self.effects:
             self.effects.append(item.idempotency_key)
         return DeliveryStatus.OS_POSTED
@@ -111,6 +113,44 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(channel.effects, [])
         self.assertLess(time.monotonic() - started, 0.25)
 
+    def test_blocking_adapter_cannot_extend_burst_or_admit_a_competing_effect(self) -> None:
+        self._outbox_item()
+        blocking = BlockingChannel()
+        dispatcher = Dispatcher(
+            self.store,
+            {"notification": blocking},
+            lease_seconds=0.1,
+        )
+        started = time.monotonic()
+
+        report = dispatcher.run_burst(deadline_seconds=0.15)
+
+        self.assertTrue(blocking.started.wait(0.1))
+        self.assertTrue(report.timed_out)
+        self.assertLess(time.monotonic() - started, 0.4)
+        second_store = Store.open(self.path)
+        self.second_store = second_store
+        competing = RecordingChannel()
+        second = Dispatcher(second_store, {"notification": competing}, lease_seconds=0.1)
+        self.assertFalse(second.run_burst(deadline_seconds=0.1).acquired)
+        self.assertEqual(competing.effects, [])
+        self.assertEqual(blocking.keys, [self.store.scalar("SELECT idempotency_key FROM outbox")])
+        blocking.release.set()
+
+    def test_retry_preserves_existing_channel_evidence(self) -> None:
+        self._outbox_item()
+        Dispatcher(self.store, {"notification": RecordingChannel()}).run_burst()
+        with self.store.transaction(immediate=True) as connection:
+            connection.execute("UPDATE outbox SET completed_at = NULL, due_at = ?", (utc_now(),))
+
+        Dispatcher(self.store, {"notification": FailingChannel()}).run_burst()
+
+        row = self.store.connection.execute(
+            "SELECT status, error FROM delivery_attempts WHERE channel = 'notification'"
+        ).fetchone()
+        self.assertEqual(row["status"], DeliveryStatus.OS_POSTED.value)
+        self.assertIn("temporary", row["error"])
+
     def test_dispatch_command_executes_a_real_burst(self) -> None:
         self._outbox_item()
 
@@ -143,3 +183,21 @@ class DispatcherTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BlockingChannel:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.keys: list[str] = []
+
+    def deliver(self, item, idempotency_key, timeout_seconds):
+        self.keys.append(idempotency_key)
+        self.started.set()
+        self.release.wait(5.0)
+        return DeliveryStatus.OS_POSTED
+
+
+class FailingChannel:
+    def deliver(self, item, idempotency_key, timeout_seconds):
+        raise OSError("temporary notifier failure")

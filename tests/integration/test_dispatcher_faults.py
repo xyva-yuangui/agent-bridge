@@ -13,9 +13,11 @@ from agent_bridge.store import Store
 class IdempotentChannel:
     def __init__(self) -> None:
         self.effects: set[str] = set()
+        self.keys: list[str] = []
 
-    def deliver(self, item):
-        self.effects.add(item.idempotency_key)
+    def deliver(self, item, idempotency_key, timeout_seconds):
+        self.keys.append(idempotency_key)
+        self.effects.add(idempotency_key)
         return DeliveryStatus.OS_POSTED
 
 
@@ -46,6 +48,8 @@ class DispatcherFaultTests(unittest.TestCase):
 
         self.assertEqual(report.delivered, 1)
         self.assertEqual(len(channel.effects), 1)
+        key = self.store.scalar("SELECT idempotency_key FROM outbox")
+        self.assertEqual(channel.keys, [key, key])
         self.assertIsNotNone(self.store.scalar("SELECT completed_at FROM outbox"))
 
     def test_transient_failure_is_retained_for_bounded_retry(self) -> None:
@@ -60,7 +64,7 @@ class DispatcherFaultTests(unittest.TestCase):
 
 
 class FailingChannel:
-    def deliver(self, item):
+    def deliver(self, item, idempotency_key, timeout_seconds):
         raise OSError("temporary notifier failure")
 
 
