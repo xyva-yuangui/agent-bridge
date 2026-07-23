@@ -202,3 +202,38 @@ python -m unittest tests.integration.test_launch_deduplication tests.integration
 ```
 
 Result: `Ran 24 tests ... OK`.
+
+## Pending-reservation availability RED/GREEN (2026-07-24)
+
+### RED
+
+Added an end-to-end, time-controlled regression that reserves a task before
+`Popen`, gives it a future expiry, dispatches with `max_attempts=1`, verifies
+no launch before expiry, then advances the durable expiry and due time. Ran:
+
+```powershell
+$env:PYTHONPATH=(Join-Path $PWD 'src')
+python -m unittest tests.integration.test_launch_deduplication.LaunchDeduplicationTests.test_pending_reservation_defers_without_exhausting_attempts_then_launches_after_expiry -v
+```
+
+Result: expected failure: the pending launch consumed its first ordinary
+attempt, terminally completed the outbox, and never reached recovery.
+
+### GREEN
+
+Added the top-level pickleable `DeferredDelivery(due_at, reason)` result. A
+live `reserved` launch returns this typed pending-until value from the spawned
+adapter worker. Dispatcher deferral now updates the outbox due time to the
+reservation expiry and reverses only the just-recorded dispatch attempt, so it
+does not consume the ordinary failure budget or manufacture launch evidence.
+
+The expiry regression proves: no process before expiry, no terminal completion
+with `max_attempts=1`, no consumed ordinary attempt, and exactly one successful
+launch after expiry.
+
+```powershell
+$env:PYTHONPATH=(Join-Path $PWD 'src')
+python -m unittest tests.integration.test_launch_deduplication -v
+```
+
+Result: `Ran 6 tests ... OK`.

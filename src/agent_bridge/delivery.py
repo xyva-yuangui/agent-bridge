@@ -31,6 +31,14 @@ class DeliveryAttempt:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class DeferredDelivery:
+    """A safe, typed request to retry without consuming delivery attempts."""
+
+    due_at: str
+    reason: str
+
+
 class DeliveryChannel(Protocol):
     """A pluggable channel invoked by the dispatcher for an outbox item."""
 

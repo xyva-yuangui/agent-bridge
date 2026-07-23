@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Optional, Tuple
 
-from .delivery import DeliveryChannel, EVIDENCE_RANK
+from .delivery import DeferredDelivery, DeliveryChannel, EVIDENCE_RANK
 from .models import DeliveryStatus
 from .outbox import OutboxItem, due_items, utc_now
 from .paths import get_data_root
@@ -215,6 +215,8 @@ class Dispatcher:
                 if not completed:
                     self._deadline_reached = True
                     return self._retry_group(group, channel, "channel exceeded bounded timeout", deadline_at)
+                if isinstance(result, DeferredDelivery):
+                    return self._defer_group(group, channel, result, deadline_at)
                 status = _delivery_status(result)
                 if status not in EVIDENCE_RANK or EVIDENCE_RANK[status] < EVIDENCE_RANK[DeliveryStatus.OS_POSTED]:
                     raise RuntimeError("channel returned no delivery evidence")
@@ -321,6 +323,43 @@ class Dispatcher:
             failed += int(final)
             retried += int(not final)
         return 0, retried, failed
+
+    def _defer_group(
+        self, group: tuple[OutboxItem, ...], channel: str, deferred: DeferredDelivery, deadline_at: float
+    ) -> tuple[int, int, int]:
+        """Schedule a known-safe pending effect without burning retry attempts."""
+        if deferred.due_at <= utc_now():
+            raise ValueError("deferred delivery must have a future due time")
+        deferred_count = 0
+        for item in group:
+            if not self._defer(item, channel, deferred, deadline_at):
+                self._lease_lost = True
+                continue
+            deferred_count += 1
+        return 0, deferred_count, 0
+
+    def _defer(
+        self, item: OutboxItem, channel: str, deferred: DeferredDelivery, deadline_at: float
+    ) -> bool:
+        try:
+            with self._transaction(deadline_at) as connection:
+                if not _connection_can_mutate_item(connection, self.owner, item.id):
+                    return False
+                if connection.execute(
+                    "UPDATE outbox SET attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END, due_at = ? "
+                    "WHERE id = ? AND completed_at IS NULL",
+                    (deferred.due_at, item.id),
+                ).rowcount != 1:
+                    return False
+                connection.execute(
+                    "UPDATE delivery_attempts SET status = ?, attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END, "
+                    "updated_at = ?, error = ? WHERE idempotency_key = ?",
+                    (DeliveryStatus.RETRY_WAIT.value, utc_now(), deferred.reason[:1000], _attempt_key(item, channel)),
+                )
+                return True
+        except (_DeadlineExceeded, sqlite3.OperationalError):
+            self._deadline_reached = True
+            return False
 
     def _retry_or_fail(
         self, item: OutboxItem, channel: str, error: str, deadline_at: float,

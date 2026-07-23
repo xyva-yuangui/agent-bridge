@@ -113,6 +113,53 @@ class LaunchDeduplicationTests(unittest.TestCase):
         self.assertEqual(self.store.scalar("SELECT status FROM delivery_attempts"), "retry_wait")
         self.assertEqual(self.store.scalar("SELECT COUNT(*) FROM delivery_attempts WHERE status = 'launch_started'"), 0)
 
+    def test_pending_reservation_defers_without_exhausting_attempts_then_launches_after_expiry(self) -> None:
+        self._configure_auto_profile()
+        marker = Path(self.directory.name) / "recovered-launch.txt"
+        script = Path(self.directory.name) / "record_recovered_launch.py"
+        script.write_text(
+            "import pathlib, sys\npathlib.Path(sys.argv[1]).write_text('started')\n",
+            encoding="utf-8",
+        )
+        with self.store.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE agents SET launch_argv_json = ? WHERE name = 'zcode'",
+                (json.dumps([sys.executable, str(script), str(marker)]),),
+            )
+        task = self.service.send_task("sender", "zcode", "subject", "body", "project")
+        item = tuple(due_items(self.store.connection))[0]
+        profile = load_agent_profile(self.store, "zcode")
+        _reserve_launch(self.store, profile, str(self.workspace), item.idempotency_key, task.id)
+        future_expiry = "2099-01-01T00:00:00Z"
+        with self.store.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE launch_reservations SET expires_at = ? WHERE idempotency_key = ?",
+                (future_expiry, item.idempotency_key),
+            )
+
+        channel = LaunchDeliveryChannel(str(self.store.path))
+        pending = Dispatcher(self.store, {"launcher": channel}, max_attempts=1).run_burst()
+
+        self.assertEqual(pending.delivered, 0)
+        self.assertEqual(pending.retried, 1)
+        self.assertIsNone(self.store.scalar("SELECT completed_at FROM outbox"))
+        self.assertEqual(self.store.scalar("SELECT attempts FROM outbox"), 0)
+        self.assertEqual(self.store.scalar("SELECT due_at FROM outbox"), future_expiry)
+        self.assertFalse(marker.exists())
+        self.assertEqual(Dispatcher(self.store, {"launcher": channel}, max_attempts=1).run_burst().processed, 0)
+
+        with self.store.transaction(immediate=True) as connection:
+            connection.execute("UPDATE launch_reservations SET expires_at = '2000-01-01T00:00:00Z'")
+            connection.execute("UPDATE outbox SET due_at = '2000-01-01T00:00:00Z'")
+        recovered = Dispatcher(self.store, {"launcher": channel}, max_attempts=1).run_burst()
+
+        self.assertEqual(recovered.delivered, 1)
+        deadline = time.monotonic() + 2.0
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "started")
+        self.assertIsNotNone(self.store.scalar("SELECT completed_at FROM outbox"))
+
     def test_manual_recipient_is_not_a_retry_when_auto_channel_is_enabled(self) -> None:
         self._configure_auto_profile()
         task = self.service.send_task("sender", "manual", "manual", "body", "project")

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence, Tuple, Union
 
+from .delivery import DeferredDelivery
 from .models import AgentProfile, DeliveryStatus, ExecutionPolicy
 from .outbox import utc_now
 from .store import Store
@@ -40,6 +41,7 @@ class LaunchResult:
     started: bool
     reason: str = ""
     pid: Optional[int] = None
+    pending_until: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,7 @@ class _Reservation:
     decision: LaunchDecision
     pid: Optional[int] = None
     status: str = ""
+    expires_at: Optional[str] = None
 
 
 LastLaunch = Optional[Union[datetime, float, int, str]]
@@ -133,7 +136,7 @@ class LaunchDeliveryChannel:
         finally:
             store.close()
 
-    def deliver(self, item: Any, idempotency_key: str, timeout_seconds: float) -> DeliveryStatus:
+    def deliver(self, item: Any, idempotency_key: str, timeout_seconds: float) -> Union[DeliveryStatus, DeferredDelivery]:
         """Launch the target once for a coalesced outbox representative."""
         del timeout_seconds
         task_id = item.payload.get("task_id")
@@ -147,6 +150,8 @@ class LaunchDeliveryChannel:
         finally:
             store.close()
         if not result.started:
+            if result.pending_until is not None:
+                return DeferredDelivery(result.pending_until, result.reason)
             raise RuntimeError(result.reason)
         return DeliveryStatus.LAUNCH_STARTED
 
@@ -194,7 +199,7 @@ def launch_stored_agent(
     if reservation.existing:
         if reservation.status == "started":
             return LaunchResult(True, "launch already started", reservation.pid)
-        return LaunchResult(False, "launch reservation is pending")
+        return LaunchResult(False, "launch reservation is pending", pending_until=reservation.expires_at)
     result = launch_agent(reservation.decision)
     if not result.started:
         _record_failure(store, key, result.reason)
@@ -242,6 +247,7 @@ def _reserve_launch(
                 LaunchDecision(True, "", _safe_argv(profile.launch_argv), workspace),
                 existing["pid"],
                 str(existing["status"]),
+                str(existing["expires_at"]),
             )
         running_count = int(connection.execute(
             "SELECT COUNT(*) FROM launch_reservations WHERE agent_name = ? "
