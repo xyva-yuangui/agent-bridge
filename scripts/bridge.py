@@ -626,8 +626,15 @@ def _attempt_delivery(
         status = "queued"
     elif wake.launched:
         status = "wake_launched"
-    else:
+    elif notification.ok:
+        status = "queued"
+    elif any(
+        marker in notification.detail.lower()
+        for marker in ("disabled", "not available", "not supported")
+    ):
         status = "unavailable"
+    else:
+        status = "failed"
     detail_parts = [
         f"notification: {notification.detail}",
         f"wake: {wake.detail}",

@@ -297,6 +297,40 @@ class PlatformTests(BridgeTestCase):
         self.assertFalse(result.ok)
         self.assertIn("notification disabled", result.detail)
 
+    def test_notification_only_delivery_waits_for_acknowledgment(self):
+        self.write_board([{"id": "task-1", "delivery": {"status": "queued"}}])
+        with mock.patch.object(
+            self.bridge,
+            "_desktop_notify",
+            return_value=self.bridge.NotificationResult(True, "notification shown"),
+        ), mock.patch.object(
+            self.bridge,
+            "_wake_agent",
+            return_value=self.bridge.WakeResult(False, "no wake command"),
+        ):
+            delivery = self.bridge._attempt_delivery(
+                "default", "task-1", "zcode", "review"
+            )
+
+        self.assertEqual(delivery["status"], "queued")
+
+    def test_delivery_failure_is_distinct_from_unavailable(self):
+        self.write_board([{"id": "task-1", "delivery": {"status": "queued"}}])
+        with mock.patch.object(
+            self.bridge,
+            "_desktop_notify",
+            return_value=self.bridge.NotificationResult(False, "notification exited 1"),
+        ), mock.patch.object(
+            self.bridge,
+            "_wake_agent",
+            return_value=self.bridge.WakeResult(False, "wake executable missing"),
+        ):
+            delivery = self.bridge._attempt_delivery(
+                "default", "task-1", "zcode", "review"
+            )
+
+        self.assertEqual(delivery["status"], "failed")
+
     def test_send_rejects_unregistered_target(self):
         write_agent(self.home, "alice", skills=["planning"])
 
