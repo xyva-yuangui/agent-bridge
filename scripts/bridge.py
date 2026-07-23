@@ -71,9 +71,7 @@ def _desktop_notify(title: str, msg: str):
                             f"display notification {json.dumps(msg)} with title {json.dumps(title)}"],
                            capture_output=True, timeout=5)
         elif sys.platform == "win32":
-            subprocess.run(["powershell", "-Command",
-                            f"New-BurntToastNotification -Text '{title}','{msg}'"],
-                           capture_output=True, timeout=5)
+            subprocess.run(["msg", "*", f"{title}: {msg}"], capture_output=True, timeout=5)
         else:
             subprocess.run(["notify-send", title, msg], capture_output=True, timeout=5)
     except Exception:
@@ -309,10 +307,12 @@ def append_activity(project_id: str, entry: dict):
     ap = activity_path(project_id)
     ap.parent.mkdir(parents=True, exist_ok=True)
     entry["ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    with open(ap, "a") as f:
+    with _locked_file(str(ap), "a") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         f.flush()
         os.fsync(f.fileno())
+    # ponytail: rotate if over limit
+    _maybe_rotate(ap)
 
 
 def _maybe_rotate(ap: Path):
