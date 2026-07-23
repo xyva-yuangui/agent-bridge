@@ -125,8 +125,9 @@ TOOLS = {
     },
     "bridge_doctor": {
         "description": "Check agent-bridge storage, profiles, hooks, and application integration readiness.",
-        "sub": "doctor", "pos": [], "flags": [],
-        "schema": {"type": "object", "properties": {}},
+        "sub": "doctor", "pos": [], "flags": ["strict"],
+        "schema": {"type": "object", "properties": {
+            "strict": {"type": "boolean"}}},
     },
     "bridge_project": {
         "description": "Initialize, list, or show an agent-bridge project.",

@@ -263,6 +263,7 @@ def agent_dir(name: str) -> Path:
 # ── shared state ──────────────────────────────────────────────────────────────
 
 BASE_DIR = Path(os.environ.get("AGENT_BRIDGE_HOME", Path.home() / ".agent-bridge"))
+CONFIG_HOME = Path(os.environ.get("AGENT_BRIDGE_CONFIG_HOME", Path.home()))
 AGENTS_DIR = BASE_DIR / "agents"
 PROJECTS_DIR = BASE_DIR / "projects"
 
@@ -972,7 +973,9 @@ def cmd_doctor(args):
 
     # hook script
     hook_path = Path(__file__).resolve()
-    if hook_path.exists() and os.access(hook_path, os.X_OK):
+    if hook_path.exists() and (
+        sys.platform == "win32" or os.access(hook_path, os.X_OK)
+    ):
         print(f"✅ hook script: {hook_path}")
     else:
         print(f"⚠️  hook script not executable: {hook_path}")
@@ -982,6 +985,8 @@ def cmd_doctor(args):
         print("✅ agent-bridge is ready")
     elif ok:
         print(f"⚠️  agent-bridge: {warnings} warning(s) — see above")
+        if args.strict:
+            sys.exit(1)
     else:
         sys.exit(1)
 
@@ -989,7 +994,7 @@ def cmd_doctor(args):
 def _check_reasonix_config(name: str, ok: bool, warnings: int):
     """Check Reasonix-specific config if this is a Reasonix agent."""
     # ponytail: only check if reasonix config exists — skip otherwise
-    reasonix_config = Path.home() / ".reasonix" / "config.toml"
+    reasonix_config = CONFIG_HOME / ".reasonix" / "config.toml"
     if not reasonix_config.exists():
         return
     try:
@@ -1003,7 +1008,7 @@ def _check_reasonix_config(name: str, ok: bool, warnings: int):
 
 def _check_skill_excluded():
     """Check if agent-bridge skill path is excluded in Reasonix config."""
-    reasonix_config = Path.home() / ".reasonix" / "config.toml"
+    reasonix_config = CONFIG_HOME / ".reasonix" / "config.toml"
     if not reasonix_config.exists():
         return None
     try:
@@ -1506,7 +1511,12 @@ def main():
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("whoami", help="print current agent identity")
-    sub.add_parser("doctor", help="check agent-bridge readiness")
+    sp = sub.add_parser("doctor", help="check agent-bridge readiness")
+    sp.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit nonzero when readiness warnings are present",
+    )
 
     sp = sub.add_parser("status", help="show inbox summary")
     sp.add_argument("--oneliner", action="store_true", help="single-line output for hooks")
