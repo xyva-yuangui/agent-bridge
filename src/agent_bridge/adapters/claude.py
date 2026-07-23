@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from .base import HostCapabilities, ManagedJsonAdapter, Surface
+import sys
+
+from .base import HostCapabilities, ManagedJsonAdapter, Surface, _read_json_object, _write_json_object
 from ..version import PROTOCOL_VERSION
 
 
@@ -18,3 +20,24 @@ class ClaudeAdapter(ManagedJsonAdapter):
 
     def _managed_config(self, root: dict) -> None:
         root.setdefault("hooks", {})
+
+    def _install_config(self) -> None:
+        root = _read_json_object(self.config_path)
+        hooks = root.setdefault("hooks", {})
+        hooks["SessionStart"] = [{"matcher": "", "hooks": [{"type": "command", "command": sys.executable, "args": self._entrypoint()[1:]}]}]
+        _write_json_object(self.config_path, root)
+
+    def _uninstall_config(self) -> None:
+        root = _read_json_object(self.config_path)
+        hooks = root.get("hooks")
+        if isinstance(hooks, dict):
+            hooks.pop("SessionStart", None)
+        _write_json_object(self.config_path, root)
+
+    def _consumer_is_installed(self) -> bool:
+        try:
+            root = _read_json_object(self.config_path)
+            hook = root["hooks"]["SessionStart"][0]["hooks"][0]
+        except (KeyError, IndexError, TypeError, ValueError):
+            return False
+        return hook == {"type": "command", "command": sys.executable, "args": self._entrypoint()[1:]}

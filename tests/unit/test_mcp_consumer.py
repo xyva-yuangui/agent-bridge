@@ -8,6 +8,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None
+
 from agent_bridge.adapters import ADAPTER_TYPES
 from agent_bridge.adapters.base import TaskCard
 from agent_bridge.service import BridgeService
@@ -43,9 +48,9 @@ class HostMcpConsumerTests(unittest.TestCase):
                 card = json.loads(adapter.task_card_path(task.id).read_text(encoding="utf-8"))
                 env = os.environ.copy()
                 env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+                command = self._registered_command(adapter)
                 process = subprocess.Popen(
-                    [sys.executable, "-m", "agent_bridge.adapters.integration", "serve", "--host", adapter.name,
-                     "--home", str(self.home), "--data-root", str(self.data_root)],
+                    command,
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env,
                 )
                 try:
@@ -71,3 +76,20 @@ class HostMcpConsumerTests(unittest.TestCase):
                     self.assertEqual(verify.scalar("SELECT COUNT(*) FROM delivery_attempts WHERE task_id = ? AND status = 'agent_acknowledged'", (task.id,)), 1)
                 finally:
                     verify.close()
+
+    def _registered_command(self, adapter):
+        if adapter.name == "codex":
+            config = tomllib.loads(adapter.config_path.read_text(encoding="utf-8"))
+            entry = config["mcp_servers"]["agent_bridge"]
+            return [entry["command"], *entry["args"]]
+        if adapter.name == "reasonix":
+            config = tomllib.loads(adapter.config_path.read_text(encoding="utf-8"))
+            entry = next(item for item in config["plugins"] if item["name"] == "agent-bridge")
+            return [entry["command"], *entry["args"]]
+        config = json.loads(adapter.config_path.read_text(encoding="utf-8"))
+        if adapter.name == "claude":
+            hook = config["hooks"]["SessionStart"][0]["hooks"][0]
+            return [hook["command"], *hook["args"]]
+        bundle = Path(config["plugins"]["localPlugins"]["agent-bridge@local"])
+        plugin = json.loads((bundle / "plugin.json").read_text(encoding="utf-8"))
+        return [plugin["command"], *plugin["args"]]

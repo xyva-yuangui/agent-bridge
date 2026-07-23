@@ -64,7 +64,7 @@ class HostConfigurationRoundTripTests(unittest.TestCase):
                     self.assertIn("agent_bridge", parsed["mcp_servers"])
                     self.assertEqual(parsed["mcp_servers"]["unrelated"], {"command": "C:\\Tools\\普通\\server.exe"})
                 else:
-                    self.assertIn("agent_bridge", parsed)
+                    self.assertTrue(any(item["name"] == "agent-bridge" for item in parsed["plugins"]))
                     self.assertEqual(parsed["agent"], {"model": "普通模型"})
 
     def test_toml_uninstall_preserves_unrelated_bytes(self) -> None:
