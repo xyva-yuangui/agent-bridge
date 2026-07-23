@@ -8,6 +8,9 @@ import json
 import os
 import re
 import secrets
+import tempfile
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
@@ -169,7 +172,8 @@ class HostAdapter(abc.ABC):
         return self.home / ".agent-bridge" / "session-cards" / self.name
 
     def task_card_path(self, task_id: str) -> Path:
-        _bounded_text("task_id", task_id, 128, required=True)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", task_id):
+            raise ValueError("task_id must be a safe bounded identifier")
         return self.inbox_path / (task_id + ".json")
 
     @abc.abstractmethod
@@ -205,13 +209,16 @@ class HostAdapter(abc.ABC):
         if not self.detect().found:
             return OperationResult(self.name, False, DeliveryStatus.FAILED, "host is not detected; integration was not installed")
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        self._install_config()
+        with _config_lock(self.config_path):
+            self._install_config()
         return OperationResult(self.name, True, DeliveryStatus.QUEUED, "managed session-card consumer installed")
 
     def uninstall(self) -> OperationResult:
         if not self.config_path.exists():
             return OperationResult(self.name, True, DeliveryStatus.QUEUED, "no managed integration was installed")
-        self._uninstall_config()
+        with _config_lock(self.config_path):
+            self._uninstall_config()
+        self._cleanup_pending_cards()
         return OperationResult(self.name, True, DeliveryStatus.QUEUED, "managed integration removed")
 
     def health_check(self) -> HealthCheck:
@@ -304,6 +311,22 @@ class HostAdapter(abc.ABC):
             raise ValueError("queued task card does not match host capabilities")
         return acknowledgement
 
+    def consume_acknowledged_card(self, task_id: str, delivery_token: str) -> None:
+        """Atomically consume the exact card once its durable ACK commits."""
+        path = self.task_card_path(task_id)
+        card = self._read_card(task_id)
+        if card is None or card.get("delivery_token") != delivery_token:
+            raise ValueError("queued task card is unavailable")
+        consumed = path.with_name(path.name + ".consumed-" + secrets.token_hex(8))
+        try:
+            os.replace(path, consumed)
+        except OSError as error:
+            raise ValueError("queued task card was already consumed") from error
+        try:
+            consumed.unlink()
+        except OSError:
+            pass
+
     def launch(self, task: TaskCard) -> OperationResult:
         if not self.detect().found:
             return OperationResult(self.name, False, DeliveryStatus.FAILED, "host is not detected; launch was not attempted")
@@ -341,6 +364,19 @@ class HostAdapter(abc.ABC):
             return None
         return card if isinstance(card, dict) else None
 
+    def _cleanup_pending_cards(self) -> None:
+        """Remove only regular, safe card files owned by this host inbox."""
+        if not self.inbox_path.is_dir() or self.inbox_path.is_symlink():
+            return
+        for path in self.inbox_path.glob("*.json"):
+            if path.is_symlink():
+                continue
+            try:
+                self.task_card_path(path.stem)
+                path.unlink()
+            except (OSError, ValueError):
+                continue
+
 
 class ManagedTomlAdapter(HostAdapter):
     """Named managed TOML table support that leaves user-owned text unchanged."""
@@ -358,23 +394,27 @@ class ManagedTomlAdapter(HostAdapter):
             "protocol_version = {0}".format(capabilities.protocol_version),
             "surface = \"session_card\"",
             "inbox = {0}".format(json.dumps(str(self.inbox_path))),
-            "entrypoint = {0}".format(json.dumps(self._entrypoint())),
+            "command = \"python\"",
+            "args = {0}".format(json.dumps(self._entrypoint()[1:])),
         )
         block = "# >>> agent-bridge:{0} >>>\n{1}\n# <<< agent-bridge:{0} <<<\n".format(self.name, "\n".join(lines))
-        self.config_path.write_text(_append_block(cleaned, block), encoding="utf-8")
+        _atomic_write(self.config_path, _append_block(cleaned, block))
 
     def _uninstall_config(self) -> None:
-        self.config_path.write_text(_remove_toml_block(self.config_path.read_text(encoding="utf-8"), self.name), encoding="utf-8")
+        _atomic_write(self.config_path, _remove_toml_block(self.config_path.read_text(encoding="utf-8"), self.name))
 
     def _consumer_is_installed(self) -> bool:
         try:
             text = self.config_path.read_text(encoding="utf-8")
         except OSError:
             return False
-        return "# >>> agent-bridge:{0} >>>".format(self.name) in text and "entrypoint" in text
+        return "# >>> agent-bridge:{0} >>>".format(self.name) in text and "command = \"python\"" in text and "serve" in text
 
     def _entrypoint(self) -> list:
-        return ["python", "-m", "agent_bridge.adapters.integration", "--host", self.name]
+        return [
+            "python", "-m", "agent_bridge.adapters.integration", "serve", "--host", self.name,
+            "--home", str(self.home), "--data-root", str(self.home / ".agent-bridge"),
+        ]
 
 
 class ManagedJsonAdapter(HostAdapter):
@@ -393,7 +433,8 @@ class ManagedJsonAdapter(HostAdapter):
             "protocol_version": capabilities.protocol_version,
             "surface": Surface.SESSION_CARD.value,
             "inbox": str(self.inbox_path),
-            "entrypoint": self._entrypoint(),
+            "command": "python",
+            "args": self._entrypoint()[1:],
         }
         _write_json_object(self.config_path, root)
 
@@ -408,10 +449,13 @@ class ManagedJsonAdapter(HostAdapter):
             managed = _read_json_object(self.config_path).get("agent_bridge")
         except ValueError:
             return False
-        return isinstance(managed, dict) and managed.get("host_identity") == self.name and managed.get("entrypoint") == self._entrypoint()
+        return isinstance(managed, dict) and managed.get("host_identity") == self.name and managed.get("command") == "python" and managed.get("args") == self._entrypoint()[1:]
 
     def _entrypoint(self) -> list:
-        return ["python", "-m", "agent_bridge.adapters.integration", "--host", self.name]
+        return [
+            "python", "-m", "agent_bridge.adapters.integration", "serve", "--host", self.name,
+            "--home", str(self.home), "--data-root", str(self.home / ".agent-bridge"),
+        ]
 
     def _remove_legacy_managed(self, root: dict) -> None:
         """Remove pre-v2 data owned by a host integration."""
@@ -429,7 +473,53 @@ def _read_json_object(path: Path) -> dict:
 
 
 def _write_json_object(path: Path, root: dict) -> None:
-    path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _atomic_write(path, json.dumps(root, ensure_ascii=False, indent=2) + "\n")
+
+
+@contextmanager
+def _config_lock(path: Path):
+    lock = path.with_name(path.name + ".agent-bridge.lock")
+    deadline = time.monotonic() + 5.0
+    descriptor = None
+    while descriptor is None:
+        try:
+            descriptor = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(descriptor, str(os.getpid()).encode("ascii"))
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("timed out waiting for host config lock")
+            time.sleep(0.02)
+    try:
+        yield
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(str(temporary), str(path))
+        try:
+            parent_descriptor = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(parent_descriptor)
+            finally:
+                os.close(parent_descriptor)
+        except OSError:
+            pass
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def _bounded_text(name: str, value: object, maximum: int, required: bool = False) -> None:

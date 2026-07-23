@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import json
-import io
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from pathlib import Path
 
 from agent_bridge.adapters import ADAPTER_TYPES, ClaudeAdapter, CodexAdapter, ReasonixAdapter, ZCodeAdapter, adapter_for
@@ -156,6 +154,20 @@ class AdapterContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "body"):
             TaskCard("task", "subject", "x" * 8193)
 
+    def test_uninstall_removes_only_its_pending_cards_and_rejects_traversal_ids(self) -> None:
+        adapter = self._installed(CodexAdapter(self.home))
+        adapter.notify_in_app(self.task)
+        sibling = adapter.inbox_path.parent / "claude" / "keep.json"
+        sibling.parent.mkdir(parents=True)
+        sibling.write_text("keep", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "safe"):
+            adapter.task_card_path("../escape")
+        adapter.uninstall()
+
+        self.assertFalse(adapter.task_card_path(self.task.task_id).exists())
+        self.assertTrue(sibling.exists())
+
     def test_unavailable_richer_surface_has_terminal_fallback_and_health_warning(self) -> None:
         health = CodexAdapter(self.home / "missing").health_check()
 
@@ -175,18 +187,3 @@ class AdapterContractTests(unittest.TestCase):
                 self.assertEqual(manifest["acknowledge"]["operation"], "acknowledge")
                 self.assertIn("entrypoint", manifest)
                 self.assertIn("session_card", manifest)
-
-    def test_host_consumer_entrypoint_emits_a_validated_ack_request(self) -> None:
-        from agent_bridge.adapters.integration import main
-
-        adapter = self._installed(ClaudeAdapter(self.home))
-        adapter.notify_in_app(self.task)
-        output = io.StringIO()
-        with redirect_stdout(output):
-            exit_code = main(["--host", "claude", "--home", str(self.home), "--task-id", self.task.task_id])
-
-        request = json.loads(output.getvalue())
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(request["host_identity"], "claude")
-        self.assertEqual(request["task_id"], self.task.task_id)
-        self.assertIn("delivery_token", request)

@@ -160,6 +160,27 @@ class BridgeService:
             raise KeyError("unknown task: {0}".format(task_id))
         return _task_view(row, self._artifact_paths(task_id))
 
+    def acknowledge_delivery(
+        self, task_id: str, host_identity: str, integration_version: str,
+        protocol_version: int, delivery_token: str,
+    ) -> None:
+        """Record one durable host ACK; the delivery token is single-use."""
+        if not task_id or not host_identity or type(protocol_version) is not int or protocol_version < 1 or not delivery_token:
+            raise ValueError("invalid host acknowledgement")
+        with self.store.transaction(immediate=True) as connection:
+            task = connection.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if task is None or str(task["assignee"]) != host_identity:
+                raise ValueError("host acknowledgement is not authorized for this task")
+            key = "host-ack:{0}:{1}:{2}".format(host_identity, task_id, delivery_token)
+            try:
+                connection.execute(
+                    "INSERT INTO delivery_attempts(task_id, channel, status, attempts, created_at, updated_at, error, idempotency_key) "
+                    "VALUES (?, ?, ?, 1, ?, ?, NULL, ?)",
+                    (task_id, "host:" + host_identity, DeliveryStatus.AGENT_ACKNOWLEDGED.value, utc_now(), utc_now(), key),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ValueError("host acknowledgement was already consumed") from error
+
     def board(self, project_id: str) -> List[TaskView]:
         return self._query_tasks("project_id = ?", (project_id,))
 
