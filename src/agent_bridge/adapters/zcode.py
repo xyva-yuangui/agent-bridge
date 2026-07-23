@@ -34,7 +34,18 @@ class ZCodeAdapter(ManagedJsonAdapter):
     def plugin_bundle_path(self) -> Path:
         return self.home / ".zcode" / "cli" / "plugins" / "cache" / "local" / "agent-bridge" / "1.0.0"
 
+    @property
+    def ownership_path(self) -> Path:
+        return self.home / ".agent-bridge" / "host-integrations" / "zcode-ownership.json"
+
     def _install_config(self) -> None:
+        root_before = _read_json_object(self.config_path)
+        plugins_before = root_before.get("plugins", {}) if isinstance(root_before.get("plugins", {}), dict) else {}
+        enabled_before = plugins_before.get("enabledPlugins", {}) if isinstance(plugins_before.get("enabledPlugins", {}), dict) else {}
+        local_before = plugins_before.get("localPlugins", {}) if isinstance(plugins_before.get("localPlugins", {}), dict) else {}
+        ownership = {"enabled_present": "agent-bridge@local" in enabled_before, "enabled": enabled_before.get("agent-bridge@local"), "local_present": "agent-bridge@local" in local_before, "local": local_before.get("agent-bridge@local"), "bundle_existed": self.plugin_bundle_path.exists()}
+        self.ownership_path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(self.ownership_path, json.dumps(ownership, sort_keys=True) + "\n")
         self._assert_contained(self.plugin_bundle_path)
         self.plugin_bundle_path.mkdir(parents=True, exist_ok=True)
         source = Path(__file__).resolve().parents[3] / "integrations" / "zcode" / "plugin.json"
@@ -76,21 +87,37 @@ class ZCodeAdapter(ManagedJsonAdapter):
         )
 
     def _uninstall_config(self) -> None:
+        try:
+            ownership = _read_json_object(self.ownership_path)
+        except ValueError:
+            ownership = {}
         def update(root: dict) -> None:
             plugins = root.get("plugins")
             if isinstance(plugins, dict):
                 enabled = plugins.get("enabledPlugins")
                 if isinstance(enabled, dict):
-                    enabled.pop("agent-bridge@local", None)
+                    if enabled.get("agent-bridge@local") is True:
+                        if ownership.get("enabled_present"):
+                            enabled["agent-bridge@local"] = ownership.get("enabled")
+                        else:
+                            enabled.pop("agent-bridge@local", None)
                 local = plugins.get("localPlugins")
                 if isinstance(local, dict):
-                    local.pop("agent-bridge@local", None)
+                    if local.get("agent-bridge@local") == str(self.plugin_bundle_path):
+                        if ownership.get("local_present"):
+                            local["agent-bridge@local"] = ownership.get("local")
+                        else:
+                            local.pop("agent-bridge@local", None)
             if root.get("agent_bridge") == self._managed_metadata():
                 root.pop("agent_bridge", None)
         _optimistic_json_update(self.config_path, update)
         self._assert_contained(self.plugin_bundle_path)
-        if self.plugin_bundle_path.exists() and not self.plugin_bundle_path.is_symlink():
+        if not ownership.get("bundle_existed") and self.plugin_bundle_path.exists() and not self.plugin_bundle_path.is_symlink():
             shutil.rmtree(self.plugin_bundle_path)
+        try:
+            self.ownership_path.unlink()
+        except OSError:
+            pass
 
     def _remove_legacy_managed(self, root: dict) -> None:
         plugins = root.get("plugins")

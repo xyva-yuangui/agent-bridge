@@ -171,6 +171,15 @@ class BridgeService:
             task = connection.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if task is None or str(task["assignee"]) != host_identity:
                 raise ValueError("host delivery proof is not authorized for this task")
+            if connection.execute(
+                "SELECT 1 FROM delivery_attempts WHERE task_id = ? AND channel = ? AND status = ?",
+                (task_id, "host:" + host_identity, DeliveryStatus.AGENT_ACKNOWLEDGED.value),
+            ).fetchone() is not None:
+                raise ValueError("host acknowledgement already exists")
+            connection.execute(
+                "UPDATE host_delivery_proofs SET superseded_at = ? WHERE task_id = ? AND host_identity = ? AND integration_version = ? AND protocol_version = ? AND consumed_at IS NULL AND superseded_at IS NULL",
+                (utc_now(), task_id, host_identity, integration_version, protocol_version),
+            )
             try:
                 connection.execute(
                     "INSERT INTO host_delivery_proofs(task_id, host_identity, integration_version, protocol_version, token_sha256, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -197,11 +206,16 @@ class BridgeService:
             if task is None or str(task["assignee"]) != host_identity:
                 raise ValueError("host acknowledgement is not authorized for this task")
             consumed = connection.execute(
-                "UPDATE host_delivery_proofs SET consumed_at = ? WHERE task_id = ? AND host_identity = ? AND integration_version = ? AND protocol_version = ? AND token_sha256 = ? AND consumed_at IS NULL",
+                "UPDATE host_delivery_proofs SET consumed_at = ? WHERE task_id = ? AND host_identity = ? AND integration_version = ? AND protocol_version = ? AND token_sha256 = ? AND consumed_at IS NULL AND superseded_at IS NULL",
                 (utc_now(), task_id, host_identity, integration_version, protocol_version, _token_hash(delivery_token)),
             ).rowcount
             if consumed != 1:
                 raise ValueError("host acknowledgement proof is missing or already consumed")
+            if connection.execute(
+                "SELECT 1 FROM delivery_attempts WHERE task_id = ? AND channel = ? AND status = ?",
+                (task_id, "host:" + host_identity, DeliveryStatus.AGENT_ACKNOWLEDGED.value),
+            ).fetchone() is not None:
+                raise ValueError("host acknowledgement was already consumed")
             key = "host-ack:{0}:{1}:{2}".format(host_identity, task_id, _token_hash(delivery_token))
             try:
                 connection.execute(

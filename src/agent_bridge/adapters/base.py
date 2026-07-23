@@ -264,11 +264,13 @@ class HostAdapter(abc.ABC):
             "delivery_token": token,
         }
         try:
-            self._write_card_temporary(task.task_id, payload)
-            service.register_host_delivery_proof(
-                task.task_id, self.name, capabilities.integration_version, capabilities.protocol_version, token,
-            )
-            self._publish_temporary_card(task.task_id)
+            self.inbox_path.mkdir(parents=True, exist_ok=True)
+            with _config_lock(self.task_card_path(task.task_id)):
+                self._write_card_temporary(task.task_id, payload)
+                service.register_host_delivery_proof(
+                    task.task_id, self.name, capabilities.integration_version, capabilities.protocol_version, token,
+                )
+                self._publish_temporary_card(task.task_id)
         except (OSError, ValueError) as error:
             try:
                 service.cancel_host_delivery_proof(task.task_id, self.name, token)

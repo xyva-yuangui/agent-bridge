@@ -78,3 +78,10 @@
 - Config updates now use Windows `ReplaceFileW` with a captured displaced file and retry from that exact external edit when it lands between comparison and swap. Unsupported platforms fail closed for existing-file CAS writes.
 - Install rolls back only its managed config and receipt if receipt creation fails. All generated registrations now record `sys.executable` rather than `python`.
 - Verification: 70 targeted adapter/config/MCP/store/service/dispatcher tests passed, plus the injected receipt-failure rollback test; `compileall` and `git diff --check` passed.
+
+## Final concurrency and ownership follow-up
+
+- Migration 4 supersedes prior unconsumed logical delivery proofs before registering a replacement; ACK consumption accepts only the active proof and refuses a second host ACK.
+- Per-card cross-process locks serialize staging/proof registration/publication so replacement cards cannot race through one deterministic pending filename.
+- ZCode records prior same-key registration values and bundle existence, restores only values it still owns, and only removes a bundle it created.
+- Focused adapter/config/MCP/store/service verification passed (52 tests), as did `compileall` and `git diff --check`.
