@@ -12,24 +12,77 @@ except ImportError:
     _HAS_FCNTL = False
 
 if not _HAS_FCNTL:
+    STALE_LOCK_SECONDS = 30
+
+    def _process_exists(pid):
+        if not isinstance(pid, int) or pid <= 0:
+            return False
+        if sys.platform == "win32":
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def _stale_lock(lockpath):
+        try:
+            if time.time() - os.path.getmtime(lockpath) <= STALE_LOCK_SECONDS:
+                return False
+        except OSError:
+            return False
+        try:
+            data = json.loads(Path(lockpath).read_text(encoding="utf-8"))
+            created = float(data.get("created", 0))
+            pid = int(data.get("pid", 0))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+        return time.time() - created > STALE_LOCK_SECONDS and not _process_exists(pid)
+
     def _portable_lock(filepath, timeout=10):
         lockpath = filepath + ".lock"
         deadline = time.time() + timeout
         while True:
             try:
                 fd = os.open(lockpath, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd)
+                with os.fdopen(fd, "w", encoding="utf-8") as lock_file:
+                    json.dump({"pid": os.getpid(), "created": time.time()}, lock_file)
                 return lockpath
-            except (FileExistsError, OSError):
-                if time.time() > deadline:
-                    raise TimeoutError(f"Could not acquire lock on {filepath}")
-                time.sleep(0.01)
+            except FileExistsError:
+                pass
+            except PermissionError:
+                parent = os.path.dirname(lockpath) or "."
+                if not os.access(parent, os.W_OK):
+                    raise
+            if _stale_lock(lockpath):
+                try:
+                    os.unlink(lockpath)
+                except FileNotFoundError:
+                    pass
+                continue
+            if time.time() > deadline:
+                raise TimeoutError(f"Could not acquire lock on {filepath}")
+            time.sleep(0.01)
 
     def _portable_unlock(lockpath):
-        try:
-            os.unlink(lockpath)
-        except OSError:
-            pass
+        deadline = time.time() + 1
+        while True:
+            try:
+                os.unlink(lockpath)
+                return
+            except FileNotFoundError:
+                return
+            except PermissionError:
+                if time.time() > deadline:
+                    raise
+                time.sleep(0.01)
 
 from contextlib import contextmanager
 
@@ -309,10 +362,11 @@ def append_activity(project_id: str, entry: dict):
     ap = activity_path(project_id)
     ap.parent.mkdir(parents=True, exist_ok=True)
     entry["ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    with open(ap, "a") as f:
+    with _locked_file(str(ap), "a") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         f.flush()
         os.fsync(f.fileno())
+    _maybe_rotate(ap)
 
 
 def _maybe_rotate(ap: Path):
@@ -330,6 +384,27 @@ def _maybe_rotate(ap: Path):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, ap)
+
+
+def _append_archive(project_id: str, tasks: list[dict]):
+    """Append tasks to archive.json under the cross-platform file lock."""
+    if not tasks:
+        return
+    ap = board_path(project_id).parent / "archive.json"
+    ap.parent.mkdir(parents=True, exist_ok=True)
+    with _locked_file(str(ap), "a+") as f:
+        f.seek(0)
+        raw = f.read()
+        try:
+            existing = json.loads(raw) if raw.strip() else []
+        except json.JSONDecodeError:
+            existing = []
+        existing.extend(tasks)
+        f.seek(0)
+        f.truncate()
+        json.dump(existing, f, indent=2, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def _touch_heartbeat(name: str):
@@ -404,13 +479,12 @@ def _auto_stale_working(project_id: str, me: str):
                 pass
         return board
 
-    if stale_ids:
-        atomic_update_board(bp, _detect)
-        for tid in stale_ids:
-            append_activity(project_id, {
-                "agent": me, "action": "auto-failed", "task_id": tid,
-                "subject": f"stale working task (> {STALE_WORKING_HOURS}h)",
-            })
+    atomic_update_board(bp, _detect)
+    for tid in stale_ids:
+        append_activity(project_id, {
+            "agent": me, "action": "auto-failed", "task_id": tid,
+            "subject": f"stale working task (> {STALE_WORKING_HOURS}h)",
+        })
 
 
 def _auto_archive(project_id: str, me: str):
@@ -418,27 +492,16 @@ def _auto_archive(project_id: str, me: str):
     bp = board_path(project_id)
     if not bp.exists():
         return
-    ap = bp.parent / "archive.json"
+    archived = []
 
     def _archive(board):
+        nonlocal archived
         completed = [t for t in board["tasks"] if t["status"] in ("completed", "failed", "canceled")]
         if len(completed) <= MAX_COMPLETED_TASKS:
             return board  # nothing to do
-        # sort by creation time, archive oldest half of completed
         completed.sort(key=lambda x: x.get("created", ""))
-        to_archive = completed[:len(completed) // 2]
-        archive_ids = {t["id"] for t in to_archive}
-        # load existing archive
-        existing = []
-        if ap.exists():
-            try:
-                existing = json.load(open(ap))
-            except Exception:
-                existing = []
-        existing.extend(to_archive)
-        with open(ap, "w") as f:
-            json.dump(existing, f, indent=2, ensure_ascii=False)
-        # remove archived from board
+        archived = completed[:len(completed) // 2]
+        archive_ids = {t["id"] for t in archived}
         board["tasks"] = [t for t in board["tasks"] if t["id"] not in archive_ids]
         return board
 
@@ -446,9 +509,10 @@ def _auto_archive(project_id: str, me: str):
     completed = [t for t in board["tasks"] if t["status"] in ("completed", "failed", "canceled")]
     if len(completed) > MAX_COMPLETED_TASKS:
         atomic_update_board(bp, _archive)
+        _append_archive(project_id, archived)
         append_activity(project_id, {
             "agent": me, "action": "auto-archive",
-            "subject": f"archived {len(completed) // 2} completed tasks (board had {len(completed)})",
+            "subject": f"archived {len(archived)} completed tasks (board had {len(completed)})",
         })
 
 
@@ -462,10 +526,10 @@ def _auto_clean(project_id: str, me: str):
     if total < AUTO_CLEAN_MIN_TASKS:
         return  # board is small, no need to clean
     cutoff = time.time() - AUTO_CLEAN_DAYS * 86400
-    cleaned = 0
+    removed = []
 
     def _clean(board):
-        nonlocal cleaned
+        nonlocal removed
         kept = []
         for t in board["tasks"]:
             if t["status"] not in ("completed", "failed", "canceled"):
@@ -480,7 +544,7 @@ def _auto_clean(project_id: str, me: str):
             except (ValueError, OverflowError):
                 kept.append(t)
                 continue
-            cleaned += 1
+            removed.append(t)
         board["tasks"] = kept
         return board
 
@@ -500,10 +564,11 @@ def _auto_clean(project_id: str, me: str):
         return
 
     atomic_update_board(bp, _clean)
-    if cleaned > 0:
+    if removed:
+        _append_archive(project_id, removed)
         append_activity(project_id, {
             "agent": me, "action": "auto-clean",
-            "subject": f"silently cleaned {cleaned} old task(s) (> {AUTO_CLEAN_DAYS}d)",
+            "subject": f"silently cleaned {len(removed)} old task(s) (> {AUTO_CLEAN_DAYS}d)",
         })
 
 
@@ -515,6 +580,9 @@ def cmd_clean(args):
     if not bp.exists():
         print("📭 board is empty")
         return
+    if not args.clean_all and args.days is None:
+        print("error: specify --all or --days N", file=sys.stderr)
+        sys.exit(1)
 
     clean_statuses = {"completed", "failed", "canceled"}
     if args.status:
@@ -528,41 +596,6 @@ def cmd_clean(args):
     if not args.clean_all and args.days is not None:
         cutoff = time.time() - args.days * 86400
     # --all means no cutoff (clean everything in the status set)
-
-    def _clean(board):
-        removed = []
-        kept = []
-        for t in board["tasks"]:
-            if t["status"] not in clean_statuses:
-                kept.append(t)
-                continue
-            if cutoff is not None:
-                updated = t.get("updated", "")
-                try:
-                    ut = calendar.timegm(time.strptime(updated, "%Y-%m-%dT%H:%M:%SZ"))
-                    if ut >= cutoff:
-                        kept.append(t)
-                        continue
-                except (ValueError, OverflowError):
-                    pass
-            removed.append(t)
-        if args.dry_run:
-            # restore all tasks for preview
-            return board
-        board["tasks"] = kept
-        # archive removed tasks
-        if removed and not args.dry_run:
-            ap = bp.parent / "archive.json"
-            existing = []
-            if ap.exists():
-                try:
-                    existing = json.load(open(ap))
-                except Exception:
-                    existing = []
-            existing.extend(removed)
-            with open(ap, "w") as f:
-                json.dump(existing, f, indent=2, ensure_ascii=False)
-        return board, removed
 
     if args.dry_run:
         board = read_board(bp)
@@ -611,22 +644,12 @@ def cmd_clean(args):
             board["tasks"] = kept
             return board
         atomic_update_board(bp, _write)
-        # archive
-        if removed:
-            ap = bp.parent / "archive.json"
-            existing = []
-            if ap.exists():
-                try:
-                    existing = json.load(open(ap))
-                except Exception:
-                    existing = []
-            existing.extend(removed)
-            with open(ap, "w") as f:
-                json.dump(existing, f, indent=2, ensure_ascii=False)
+        _append_archive(pid, removed)
         append_activity(pid, {
             "agent": name, "action": "clean",
             "subject": f"cleaned {len(removed)} task(s)",
         })
+        ap = bp.parent / "archive.json"
         print(f"✅ cleaned {len(removed)} task(s), archived to {ap}")
 
 
