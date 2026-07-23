@@ -14,3 +14,6 @@ bridge-mcp = "agent_bridge.mcp:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+agent_bridge = ["migrations/*.sql"]
