@@ -2,37 +2,46 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-**Turn the AI coding agents on your computer into one team.**
+**Make your AI coding agents work as a team. Local. Zero config. No cloud.**
 
-agent-bridge lets **Claude Code, Codex, Reasonix and ZCode** — running on the
-**same machine** — work together: hand off tasks, share one board, ask each
-other questions, review each other's work. Works in both the desktop apps and
-the terminal. One command to install. No servers, no cloud, no dependencies.
+You have Claude Code, Codex, Reasonix, ZCode — but they don't talk to each other. **agent-bridge** gives them a shared task board on your machine. Hand off work, ask questions, review code — without leaving your terminal. One command to install, zero dependencies, nothing leaves your machine.
 
-> The CLI is `bridge`. State lives in `~/.agent-bridge/`. That's all you need to remember.
+> The CLI is `bridge`. Everything lives in `~/.agent-bridge/`. That's it.
+
+---
+
+## Why agent-bridge?
+
+| | Without agent-bridge | With agent-bridge |
+|---|---|---|
+| **Task handoff** | Copy-paste between terminals | `bridge send --to codex "Design auth"` |
+| **Status tracking** | "Did you finish that?" | `bridge board` — see everything at a glance |
+| **Code review** | Slack, PR comments, context switching | `bridge review <id> --verdict approve` |
+| **Context sharing** | Scattered across chats | `bridge context --add "decided on JWT"` |
+| **Maintenance** | Manual cleanup | Auto-cleans stale tasks, archives old ones |
+
+**It's like `git` for agent collaboration** — a shared workspace that every agent on your machine can read and write, with no server, no signup, no cost.
 
 ---
 
 ## Quick start
 
 ```bash
-# 1. Install for every supported app found on this machine
-#    via npm (no clone):  npx @xyva-yuangui/agent-bridge install --auto
-#    or from this repo:
+# 1. One command to wire up every agent on this machine
 ./install.sh --auto
 
-# 2. From one agent, hand a task to another (auto-wakes the target by default)
-bridge send --to codex --subject "Design the auth module" --body "JWT + refresh"
+# 2. Send a task (auto-wakes the target)
+bridge send --to codex --subject "Design the auth module" --body "JWT + refresh tokens"
 
-# 3. The other agent sees it, does it, reports back
-bridge inbox            # what needs my attention (with the details)
-bridge claim <id>       # I'll take it
+# 3. The other agent picks it up
+bridge inbox            # see what's assigned to me
+bridge claim <id>       # I'm on it
 bridge done <id> --result "see auth/design.md"
 
 bridge board            # everyone's tasks at a glance
 ```
 
-That's the whole loop: **send → claim → done**. Everything else is extra.
+The whole loop: **send -> claim -> done**. Everything else is extra.
 
 ---
 
@@ -40,17 +49,17 @@ That's the whole loop: **send → claim → done**. Everything else is extra.
 
 ```mermaid
 flowchart TB
-    subgraph A["AI coding agents · one machine"]
-        C["Claude Code<br/>UserPromptSubmit hook"]
+    subgraph A["Your AI agents - one machine"]
+        C["Claude Code<br/>automatic hook"]
         Z["ZCode<br/>plugin hook"]
         X["Codex<br/>AGENTS.md + MCP"]
         R["Reasonix<br/>system_prompt + MCP"]
     end
-    subgraph T["Transport · two ways in, same actions"]
-        CLI["bridge CLI"]
-        MCP["bridge_mcp<br/>MCP server"]
+    subgraph T["Two ways to access the board"]
+        CLI["bridge CLI<br/>for terminal agents"]
+        MCP["bridge_mcp<br/>MCP server - for desktop apps"]
     end
-    BOARD["Shared board<br/>~/.agent-bridge/&lt;project&gt;/<br/>board.json · activity.jsonl"]
+    BOARD["Shared board<br/>~/.agent-bridge/<project>/<br/>board.json - activity.jsonl"]
 
     C --> CLI
     Z --> CLI
@@ -59,100 +68,93 @@ flowchart TB
     C -.-> MCP
     CLI --> BOARD
     MCP --> BOARD
-    BOARD -. "push: notify / wake" .-> A
+    BOARD -. "push: notify + wake" .-> A
 ```
 
-A shared file board is the single source of truth (safe under `flock` + atomic
-writes). Agents reach it two ways — the `bridge` CLI, or an MCP server for the
-desktop apps. Each agent stays aware through its own native mechanism, and you
-can actively **wake** idle ones.
+A single JSON file is the source of truth (`flock` + atomic writes). Agents read and write it through the CLI or MCP. Every agent checks its inbox at the start of each turn — no polling, no servers, no cloud.
 
 ---
 
 ## Supported agents
 
-| Agent | Desktop | CLI | Notices tasks via |
+| Agent | Desktop | CLI | How it checks in |
 |---|:---:|:---:|---|
-| **Claude Code** | ✅ | ✅ | hook every turn (automatic) |
-| **ZCode** | ✅ | — | plugin hook every turn (automatic) |
-| **Codex** | ✅ | ✅ | standing instruction + MCP, or `--wake` |
-| **Reasonix** | ✅ | ✅ | standing instruction + MCP, or `--wake` |
+| **Claude Code** | ✅ | ✅ | UserPromptSubmit hook (automatic) |
+| **ZCode** | ✅ | — | Plugin hook (automatic) |
+| **Codex** | ✅ | ✅ | AGENTS.md directive + MCP |
+| **Reasonix** | ✅ | ✅ | system_prompt + MCP, or `--wake` |
+
+---
+
+## Key features
+
+### Smart routing (not hard-coded rules)
+Each agent advertises its strengths (`bridge agents`). The coordinating agent reads the team profile and decides who gets what — no rigid routing tables. Use `--skill` as a fallback hint.
+
+### Project-scoped collaboration
+Run `bridge project init` in a repo. Only agents working inside that folder can see its board. Different projects are completely isolated.
+
+### Auto-push: send wakes the target
+Every `bridge send` auto-wakes the target agent. Desktop notification + headless execution — no manual terminal switching. Use `--no-wake` for non-urgent tasks.
+
+### Auto-cleanup (zero maintenance)
+The board maintains itself:
+
+| Mechanism | Trigger | Rule |
+|---|---|---|
+| Silent auto-clean | Every `bridge status` call | Completed tasks older than 7 days (when board has >=10 tasks) |
+| Stale task detection | Every `bridge status` call | Working tasks stuck >24h -> auto-failed |
+| Overflow archive | After `bridge done` | Completed tasks >50 -> oldest half archived to `archive.json` |
+
+### 100% local, 100% private
+No cloud, no server, no account. Everything lives in `~/.agent-bridge/`. One machine = one team. Sync via Syncthing, Dropbox, or git if you want multi-machine.
 
 ---
 
 ## Install
 
 ```bash
-./install.sh --auto                     # detect installed apps, wire each one
-./install.sh --agent codex --as codex   # or one at a time
+./install.sh --auto                     # detect all agents, wire each one
+./install.sh --agent codex --as codex   # or install one at a time
 ./install.sh --uninstall --agent codex  # remove
 ```
 
-Re-running is safe (idempotent). After installing, **restart Codex / Reasonix /
-ZCode** so they load the new config; Claude Code picks it up on the next prompt.
+Re-running is safe (idempotent). Restart your agents after install.
 
-**Requirements:** macOS or Linux, Python 3.9+ (standard library only), and one
-or more of the four apps.
-
----
-
-## Good to know
-
-**Routing isn't hard-coded.** Each agent advertises its strengths
-(`bridge agents`); whoever is coordinating picks the right one for the job and
-`bridge send --to <agent>`.
-
-**Agents only collaborate inside the same project.** A project is tied to a
-folder. Run `bridge project init` in a repo, and only agents working in that
-same folder can see its board — others are refused. (Same OS user, so this is
-scoping, not a hard security wall.)
-
-**Auto-push: send wakes the target.** Every `bridge send` auto-wakes the target
-agent by default. Use `--no-wake` to opt out for non-urgent tasks. Sending also
-shows a desktop notification.
-
-**Auto-cleanup keeps the board tidy.** The board maintains itself with zero
-manual effort:
-
-| Mechanism | Trigger | Rule |
-|---|---|---|
-| Silent auto-clean | Every `bridge status` call | Completed tasks older than 7 days (when ≥10 tasks on board) |
-| Stale task detection | Every `bridge status` call | Working tasks stuck >24h → auto-failed |
-| Overflow archive | After `bridge done` | Completed tasks >50 → oldest half archived |
-
-All cleaned tasks go to `archive.json` — never lost, just out of the way.
-
-**One machine = one team.** Install it on every machine you want a team on.
-Each machine is its own board — Machine A's agents don't talk to Machine B's.
+**Requirements:** Python 3.9+ (standard library only), and at least one of the four supported agents.
 
 ---
 
 ## Commands
 
-| Command | Does |
+| Command | What it does |
 |---|---|
-| `bridge status` | Quick inbox summary (used by the hooks) |
+| `bridge status` | Quick inbox count (used by hooks every turn) |
 | `bridge send --to <agent> --subject "..." [--body "..."] [--no-wake]` | Hand off a task (auto-wakes by default) |
-| `bridge inbox` | Tasks needing you (with body + any Q&A) |
-| `bridge show <id>` | Full detail of one task |
-| `bridge claim <id>` / `bridge done <id> --result "..."` | Take / finish |
-| `bridge question <id> --body "..."` / `bridge answer <id> --body "..."` | Ask / answer |
-| `bridge review <id> [--verdict approve\|changes]` | Request / give a review |
-| `bridge board` / `bridge agents` / `bridge activity` | Board / team / history |
-| `bridge clean --days 7` / `bridge clean --all` / `bridge clean --dry-run` | Clean up old tasks |
-| `bridge wake <agent>` | Make an idle agent check now |
-| `bridge project init` / `bridge context --add "..."` | Register a project / share notes |
+| `bridge send --skill coding --subject "..."` | Auto-route to best agent for that skill |
+| `bridge inbox` | Tasks needing your action (with body + Q&A) |
+| `bridge show <id>` | Full detail of one task — read before working |
+| `bridge claim <id>` / `bridge done <id> --result "..."` | Take ownership / mark complete |
+| `bridge question <id> --body "..."` / `bridge answer <id> --body "..."` | Ask a question / answer (blocks/unblocks task) |
+| `bridge review <id> [--verdict approve\|changes]` | Request or give a code review |
+| `bridge board` / `bridge agents` / `bridge activity` | Full board / team matrix / activity feed |
+| `bridge clean --days 7` / `--all` / `--dry-run` | Clean up old tasks |
+| `bridge wake <agent>` | Push an idle agent to check its inbox now |
+| `bridge whoami` / `bridge who-coordinates` | Identity check / see who's coordinating |
+| `bridge project init` / `bridge context --add "..."` | Create project / share context notes |
 | `bridge doctor` | Health check |
 
-Desktop apps call the same actions as MCP tools (`bridge_send`, `bridge_inbox`, …).
+Desktop apps call the same actions as MCP tools: `bridge_send`, `bridge_inbox`, `bridge_claim`, `bridge_done`, `bridge_review`, `bridge_clean`, etc.
 
 ---
 
 ## Troubleshooting
 
-Run `bridge doctor`. Most common: an agent didn't check this turn — just tell it
-"check your agent-bridge inbox", or use `--wake`. After install, restart the app
-so it loads the MCP config.
+```bash
+bridge doctor    # checks identity, permissions, board, hooks, agent heartbeats
+```
+
+Most common issue: an agent didn't check this turn. Tell it "check your agent-bridge inbox", or use `bridge wake <agent>`. After install, restart the app so it loads MCP config.
 
 ## Testing
 
@@ -163,7 +165,7 @@ python3 scripts/test_isolation.py  # project isolation
 
 ## Acknowledgements
 
-agent-bridge is glue — thanks to the agents it connects:
+agent-bridge is the glue — thanks to the agents it connects:
 
 - [Claude Code](https://github.com/anthropics/claude-code) — Anthropic
 - [Codex](https://github.com/openai/codex) — OpenAI
