@@ -1,7 +1,9 @@
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_bridge.store import Store
 
@@ -83,3 +85,71 @@ class StoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "checksum"):
             Store.open(self.db_path)
+
+    def test_concurrent_open_serializes_initial_migration(self):
+        errors = []
+        start = threading.Barrier(3)
+        absence_check = threading.Barrier(2)
+        original_exists = Store._migration_table_exists
+
+        def synchronized_initial_absence(store):
+            exists = original_exists(store)
+            if not exists and not store.connection.in_transaction:
+                absence_check.wait()
+            return exists
+
+        def open_store():
+            store = None
+            try:
+                start.wait()
+                store = Store.open(self.db_path)
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                if store is not None:
+                    store.close()
+
+        with mock.patch.object(Store, "_migration_table_exists", synchronized_initial_absence):
+            threads = [threading.Thread(target=open_store) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            start.wait()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(errors, [])
+        connection = sqlite3.connect(str(self.db_path))
+        try:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 1"
+            ).fetchone()[0], 1)
+        finally:
+            connection.close()
+
+    def test_non_initial_migration_creates_readable_restorable_backup(self):
+        store = Store.open(self.db_path)
+        initial_migrations = list(store._migration_sources())
+        store.close()
+        second_migration = (2, "CREATE TABLE migration_backup_probe (id INTEGER PRIMARY KEY);")
+
+        with mock.patch.object(
+            Store, "_migration_sources", return_value=initial_migrations + [second_migration]
+        ):
+            upgraded = Store.open(self.db_path)
+            upgraded.close()
+
+        backups = list(self.root.glob("agent-bridge.sqlite3.before-v2.*.bak"))
+        self.assertEqual(len(backups), 1)
+        restored_path = self.root / "restored.sqlite3"
+        restored_path.write_bytes(backups[0].read_bytes())
+        restored = sqlite3.connect(str(restored_path))
+        try:
+            self.assertEqual(restored.execute(
+                "SELECT MAX(version) FROM schema_migrations"
+            ).fetchone()[0], 1)
+            self.assertIsNone(restored.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'migration_backup_probe'"
+            ).fetchone())
+            self.assertEqual(restored.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        finally:
+            restored.close()

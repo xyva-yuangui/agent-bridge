@@ -29,16 +29,12 @@ def import_v1(store: Store, v1_root: Path) -> ImportReport:
     v1_root = Path(v1_root)
     board_path = _find_board(v1_root)
     board_bytes = board_path.read_bytes()
-    source_hash = hashlib.sha256(board_bytes).hexdigest()
     board = _load_json(board_path, board_bytes)
     tasks = _validate_board(board, board_path)
-    existing = store.scalar("SELECT 1 FROM import_ledger WHERE source_hash = ?", (source_hash,))
-    if existing:
-        return ImportReport(0, 0, 0, Path())
-
-    backup_path = _backup_v1_tree(store, v1_root)
     project_id = str(board.get("project", "default"))
-    agents = _read_agents(v1_root)
+    agent_paths = sorted(v1_root.glob("agents/*/agent.json"))
+    source_hash = _source_hash(v1_root, [board_path] + agent_paths)
+    agents = _read_agents(agent_paths)
     for task in tasks:
         for name in (task["sender"], task["assignee"]):
             agents.setdefault(str(name), {})
@@ -47,15 +43,25 @@ def import_v1(store: Store, v1_root: Path) -> ImportReport:
     imported_tasks = 0
     imported_deliveries = 0
     with store.transaction(immediate=True) as connection:
+        existing = connection.execute(
+            "SELECT 1 FROM import_ledger WHERE source_hash = ?", (source_hash,)
+        ).fetchone()
+        if existing:
+            return ImportReport(0, 0, 0, Path())
+        backup_path = _backup_v1_tree(store, v1_root)
         connection.execute(
             "INSERT OR IGNORE INTO projects(id, path, created_at) VALUES (?, ?, ?)",
             (project_id, str(v1_root.resolve()), _utc_now()),
         )
         for name, profile in sorted(agents.items()):
             cursor = connection.execute(
-                "INSERT OR IGNORE INTO agents("
+                "INSERT INTO agents("
                 "name, capabilities_json, last_seen, launch_argv_json"
-                ") VALUES (?, ?, ?, ?)",
+                ") VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET "
+                "capabilities_json = excluded.capabilities_json, "
+                "last_seen = excluded.last_seen, "
+                "launch_argv_json = excluded.launch_argv_json",
                 (
                     name,
                     json.dumps(profile.get("skills", []), sort_keys=True),
@@ -111,11 +117,14 @@ def export_json(store: Store, destination: Path) -> Path:
         "delivery_attempts", "outbox", "dispatcher_leases", "notification_mappings", "metadata",
         "import_ledger",
     )
-    payload = {
-        "format": "agent-bridge-v2-export",
-        "schema_version": store.scalar("SELECT MAX(version) FROM schema_migrations"),
-        "tables": {table: _rows(store, table) for table in tables},
-    }
+    with store.transaction() as connection:
+        payload = {
+            "format": "agent-bridge-v2-export",
+            "schema_version": connection.execute(
+                "SELECT MAX(version) FROM schema_migrations"
+            ).fetchone()[0],
+            "tables": {table: _rows(store, table) for table in tables},
+        }
     payload.update(payload.pop("tables"))
     handle, temporary_name = tempfile.mkstemp(prefix=destination.name + ".", suffix=".tmp", dir=str(destination.parent))
     try:
@@ -174,9 +183,19 @@ def _validate_delivery(delivery: Any, path: Path) -> None:
         raise ValueError("v1 delivery has an invalid status in {0}".format(path))
 
 
-def _read_agents(v1_root: Path) -> Dict[str, Mapping[str, Any]]:
+def _source_hash(v1_root: Path, paths: Iterable[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda candidate: candidate.relative_to(v1_root).as_posix()):
+        digest.update(path.relative_to(v1_root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _read_agents(profile_paths: Iterable[Path]) -> Dict[str, Mapping[str, Any]]:
     agents: Dict[str, Mapping[str, Any]] = {}
-    for profile_path in sorted(v1_root.glob("agents/*/agent.json")):
+    for profile_path in profile_paths:
         profile = _load_json(profile_path, profile_path.read_bytes())
         name = profile.get("name")
         if not isinstance(name, str) or not name:
@@ -196,7 +215,18 @@ def _backup_v1_tree(store: Store, v1_root: Path) -> Path:
     else:
         backup_root = source_root.parent / (source_root.name + ".backups")
     backup_path = backup_root / ("v1-" + timestamp)
-    shutil.copytree(str(v1_root), str(backup_path))
+    database_names = {
+        store.path.name,
+        store.path.name + "-wal",
+        store.path.name + "-shm",
+    }
+
+    def ignore_database_files(directory: str, names: List[str]) -> List[str]:
+        if Path(directory).resolve() == store.path.parent.resolve():
+            return [name for name in names if name in database_names]
+        return []
+
+    shutil.copytree(str(v1_root), str(backup_path), ignore=ignore_database_files)
     return backup_path
 
 

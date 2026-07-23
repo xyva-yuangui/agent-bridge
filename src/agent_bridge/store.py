@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -30,18 +31,25 @@ class Store:
     def open(cls, path: Path) -> "Store":
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(str(path), timeout=5.0, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        try:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA foreign_keys=ON")
-            connection.execute("PRAGMA busy_timeout=5000")
-            store = cls(path, connection)
-            store.apply_migrations()
-            return store
-        except Exception:
-            connection.close()
-            raise
+        deadline = time.monotonic() + 5.0
+        while True:
+            connection = sqlite3.connect(str(path), timeout=5.0, isolation_level=None)
+            connection.row_factory = sqlite3.Row
+            try:
+                connection.execute("PRAGMA busy_timeout=5000")
+                connection.execute("PRAGMA foreign_keys=ON")
+                connection.execute("PRAGMA journal_mode=WAL")
+                store = cls(path, connection)
+                store.apply_migrations()
+                return store
+            except sqlite3.OperationalError as error:
+                connection.close()
+                if "locked" not in str(error).lower() or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+            except Exception:
+                connection.close()
+                raise
 
     def close(self) -> None:
         self.connection.close()
@@ -66,27 +74,31 @@ class Store:
         return IntegrityReport(ok=message.lower() == "ok", message=message)
 
     def apply_migrations(self) -> None:
-        for version, source in self._migration_sources():
-            checksum = hashlib.sha256(source.encode("utf-8")).hexdigest()
-            applied = self.connection.execute(
-                "SELECT checksum FROM schema_migrations WHERE version = ?", (version,)
-            ).fetchone() if self._migration_table_exists() else None
-            if applied is not None:
-                if applied[0] != checksum:
-                    raise RuntimeError("migration checksum mismatch for version {0}".format(version))
-                continue
-            if version > 1 and self._migration_table_exists():
-                self._backup_before_migration(version)
-            self.connection.executescript("BEGIN IMMEDIATE;\n" + source)
-            try:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            has_migration_table = self._migration_table_exists()
+            for version, source in self._migration_sources():
+                checksum = hashlib.sha256(source.encode("utf-8")).hexdigest()
+                applied = self.connection.execute(
+                    "SELECT checksum FROM schema_migrations WHERE version = ?", (version,)
+                ).fetchone() if has_migration_table else None
+                if applied is not None:
+                    if applied[0] != checksum:
+                        raise RuntimeError("migration checksum mismatch for version {0}".format(version))
+                    continue
+                if version > 1 and has_migration_table:
+                    self._backup_before_migration(version)
+                _execute_sql_script(self.connection, source)
                 self.connection.execute(
                     "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?, ?, ?)",
                     (version, checksum, _utc_now()),
                 )
-                self.connection.execute("COMMIT")
-            except BaseException:
+                has_migration_table = True
+            self.connection.execute("COMMIT")
+        except BaseException:
+            if self.connection.in_transaction:
                 self.connection.execute("ROLLBACK")
-                raise
+            raise
 
     def _migration_table_exists(self) -> bool:
         return bool(self.scalar(
@@ -104,13 +116,27 @@ class Store:
         backup_path = self.path.with_name(
             "{0}.before-v{1}.{2}.bak".format(self.path.name, version, timestamp)
         )
+        source_connection = sqlite3.connect(str(self.path), timeout=5.0)
         backup_connection = sqlite3.connect(str(backup_path))
         try:
-            self.connection.backup(backup_connection)
+            source_connection.backup(backup_connection)
         finally:
+            source_connection.close()
             backup_connection.close()
         return backup_path
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _execute_sql_script(connection: sqlite3.Connection, source: str) -> None:
+    """Execute complete SQL statements without ending the caller's transaction."""
+    statement = ""
+    for line in source.splitlines(True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            connection.execute(statement)
+            statement = ""
+    if statement.strip():
+        raise ValueError("migration contains an incomplete SQL statement")
