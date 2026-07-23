@@ -84,6 +84,8 @@
 - Create: `src/agent_bridge/version.py`
 - Create: `src/agent_bridge/paths.py`
 - Create: `src/agent_bridge/models.py`
+- Create: `src/agent_bridge/cli.py`
+- Create: `src/agent_bridge/mcp.py`
 - Create: `tests/unit/test_paths.py`
 - Create: `tests/unit/test_models.py`
 - Modify: `scripts/bridge.py`
@@ -165,7 +167,34 @@ class AgentProfile:
     workspace_allowlist: Tuple[str, ...] = ()
 ```
 
-- [ ] **Step 5: Replace compatibility scripts with import-only wrappers**
+- [ ] **Step 5: Add minimal runnable CLI and MCP entry points**
+
+```python
+# src/agent_bridge/cli.py
+import argparse
+from typing import Optional, Sequence
+
+from .version import BRIDGE_VERSION
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(prog="bridge")
+    parser.add_argument("--version", action="version", version=BRIDGE_VERSION)
+    parser.parse_args(argv)
+    return 0
+```
+
+```python
+# src/agent_bridge/mcp.py
+from typing import Optional, Sequence
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    del argv
+    return 0
+```
+
+- [ ] **Step 6: Replace compatibility scripts with import-only wrappers**
 
 ```python
 #!/usr/bin/env python3
@@ -178,7 +207,7 @@ if __name__ == "__main__":
 Keep the old v1 file reachable through Git history and migration fixtures; do
 not keep two active implementations.
 
-- [ ] **Step 6: Install editable package and run tests**
+- [ ] **Step 7: Install editable package and run tests**
 
 Run: `py -3 -m pip install -e .`
 
@@ -188,7 +217,7 @@ Run: `py -3 -m unittest tests.unit.test_paths tests.unit.test_models -v`
 
 Expected: all tests pass.
 
-- [ ] **Step 7: Commit the package boundary**
+- [ ] **Step 8: Commit the package boundary**
 
 ```powershell
 git add pyproject.toml src scripts tests/unit
@@ -229,8 +258,34 @@ class StoreTests(unittest.TestCase):
         store = Store.open(self.db_path)
         with self.assertRaises(RuntimeError):
             with store.transaction(immediate=True) as connection:
-                connection.execute("INSERT INTO tasks (...) VALUES (...)")
-                connection.execute("INSERT INTO outbox (...) VALUES (...)")
+                connection.execute(
+                    "INSERT INTO projects(id, path) VALUES (?, ?)",
+                    ("default", str(self.root)),
+                )
+                connection.executemany(
+                    "INSERT INTO agents(name) VALUES (?)",
+                    (("codex",), ("zcode",)),
+                )
+                connection.execute(
+                    "INSERT INTO tasks("
+                    "id, project_id, sender, assignee, state, subject, body, "
+                    "priority, revision, created_at, updated_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "task-1", "default", "codex", "zcode", "pending",
+                        "Review", "", 0, 0,
+                        "2026-07-23T00:00:00Z", "2026-07-23T00:00:00Z",
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO outbox("
+                    "idempotency_key, kind, payload_json, due_at"
+                    ") VALUES (?, ?, ?, ?)",
+                    (
+                        "task-1:created", "task.created",
+                        '{"task_id":"task-1"}', "2026-07-23T00:00:00Z",
+                    ),
+                )
                 raise RuntimeError("crash")
         self.assertEqual(store.scalar("SELECT COUNT(*) FROM tasks"), 0)
         self.assertEqual(store.scalar("SELECT COUNT(*) FROM outbox"), 0)
@@ -344,7 +399,7 @@ git commit -m "feat: add sqlite storage and v1 migration"
 **Interfaces:**
 - Consumes: `Store`, `TaskState`, `DeliveryStatus`
 - Produces: `authorize_transition(task, actor, action) -> TaskState`
-- Produces: `BridgeService.send_task(...) -> TaskView`
+- Produces: `BridgeService.send_task(sender: str, assignee: str, subject: str, body: str, project_id: str = "default") -> TaskView`
 - Produces: `claim`, `question`, `answer`, `request_review`, `review`, `done`
 - Produces: `status(agent)`, `inbox(agent)`, `show(task_id)`, `board(project)`
 
@@ -430,8 +485,8 @@ git commit -m "feat: add transactional task lifecycle service"
 ### Task 4: Restore complete CLI and MCP parity on the service layer
 
 **Files:**
-- Create: `src/agent_bridge/cli.py`
-- Create: `src/agent_bridge/mcp.py`
+- Modify: `src/agent_bridge/cli.py`
+- Modify: `src/agent_bridge/mcp.py`
 - Create: `src/agent_bridge/presentation.py`
 - Create: `tests/integration/test_cli_v2.py`
 - Create: `tests/integration/test_mcp_v2.py`
@@ -794,7 +849,21 @@ Expected: missing notification client.
 - [ ] **Step 3: Implement the bounded Python helper client**
 
 Serialize title, body, opaque task ID, action names, and timeout-limited expiry
-as JSON. Use `subprocess.run(..., input=json_text, timeout=5, shell=False)`.
+as JSON. Invoke it exactly as:
+
+```python
+completed = subprocess.run(
+    [str(self.helper_path)],
+    input=json_text,
+    capture_output=True,
+    text=True,
+    encoding="utf-8",
+    errors="strict",
+    timeout=self.timeout_seconds,
+    check=False,
+    shell=False,
+)
+```
 Reject output above the documented limit and malformed JSON.
 
 - [ ] **Step 4: Add Rust request/response parsing and tests**
@@ -1248,7 +1317,8 @@ degradation. Do not convert a fallback into a supported native claim.
 ```text
 Design: docs/superpowers/specs/2026-07-23-agent-bridge-v2-lightweight-desktop-design.md
 Plan: docs/superpowers/plans/2026-07-23-agent-bridge-v2-lightweight-desktop.md
-Commit range: <design parent>..<implementation head>
+Commit range: compute with `git merge-base 3efdd5d HEAD` and
+              `git rev-parse HEAD`, then write the two returned hashes
 Review: design conformance, concurrency, security, installers, portability,
         desktop UX, tests, documentation, artifacts, and v1 finding disposition
 ```
