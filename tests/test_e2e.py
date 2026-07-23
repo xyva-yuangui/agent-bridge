@@ -21,7 +21,10 @@ class EndToEndWorkflowTests(unittest.TestCase):
                     "--as",
                     name,
                     *args,
-                    extra_env={"PYTHONUTF8": "1"},
+                    extra_env={
+                        "PYTHONUTF8": "1",
+                        "AGENT_BRIDGE_DISABLE_NOTIFY": "1",
+                    },
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 return result

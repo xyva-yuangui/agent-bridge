@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.support import load_bridge, read_board, run_bridge, write_agent
 
@@ -174,7 +175,10 @@ class LifecycleTests(BridgeTestCase):
             "--as",
             name,
             *args,
-            extra_env={"PYTHONUTF8": "1"},
+            extra_env={
+                "PYTHONUTF8": "1",
+                "AGENT_BRIDGE_DISABLE_NOTIFY": "1",
+            },
         )
 
     def send_task(self) -> str:
@@ -260,6 +264,120 @@ class LifecycleTests(BridgeTestCase):
         delivery = self.task(task_id).get("delivery", {})
         self.assertEqual(delivery.get("status"), "acknowledged")
         self.assertTrue(delivery.get("acknowledged_at"))
+
+
+class PlatformTests(BridgeTestCase):
+    def test_wake_argv_preserves_executable_path_with_spaces(self):
+        profile = {
+            "wake_argv": [r"C:\Program Files\Agent\agent.exe", "run"],
+        }
+
+        argv = self.bridge._load_wake_argv(profile)
+
+        self.assertEqual(argv, profile["wake_argv"])
+
+    def test_windows_notification_uses_file_and_separate_arguments(self):
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(self.bridge.sys, "platform", "win32"), mock.patch.object(
+            self.bridge.subprocess, "run", return_value=completed
+        ) as run:
+            result = self.bridge._desktop_notify("O'Brien", "x'; exit 9; '")
+
+        argv = run.call_args.args[0]
+        self.assertIn("-File", argv)
+        self.assertIn("O'Brien", argv)
+        self.assertIn("x'; exit 9; '", argv)
+        self.assertTrue(result.ok)
+
+    def test_notification_nonzero_exit_is_reported(self):
+        completed = mock.Mock(returncode=1, stdout="", stderr="notification disabled")
+        with mock.patch.object(self.bridge.subprocess, "run", return_value=completed):
+            result = self.bridge._desktop_notify("title", "message")
+
+        self.assertFalse(result.ok)
+        self.assertIn("notification disabled", result.detail)
+
+    def test_send_rejects_unregistered_target(self):
+        write_agent(self.home, "alice", skills=["planning"])
+
+        result = run_bridge(
+            self.home,
+            "--as",
+            "alice",
+            "send",
+            "--to",
+            "typo-agent",
+            "--subject",
+            "orphan",
+            "--no-wake",
+            extra_env={"PYTHONUTF8": "1"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not registered", result.stderr)
+        self.assertFalse(self.board_path.exists())
+
+    def test_route_prefers_recent_capable_agent(self):
+        write_agent(
+            self.home,
+            "a-stale",
+            skills=["review"],
+            last_seen=OLD_TIMESTAMP,
+        )
+        write_agent(
+            self.home,
+            "z-recent",
+            skills=["review"],
+            last_seen=RECENT_TIMESTAMP,
+        )
+
+        target = self.bridge.route_task("review")
+
+        self.assertEqual(target, "z-recent")
+
+    def test_missing_coordinator_is_replaced(self):
+        self.write_board([])
+        board = read_board(self.home)
+        board["coordinator"] = "missing-agent"
+        self.board_path.write_text(json.dumps(board), encoding="utf-8")
+        write_agent(self.home, "codex", skills=["implementation"])
+
+        self.bridge.set_coordinator("default", "codex")
+
+        updated = read_board(self.home)
+        self.assertEqual(updated["coordinator"], "codex")
+        self.assertTrue(updated["coordinator_updated"])
+
+    def test_send_records_wake_launch_without_false_acknowledgment(self):
+        import sys
+
+        write_agent(
+            self.home,
+            "target",
+            skills=["review"],
+            wake_argv=[sys.executable, "-c", "pass"],
+        )
+
+        result = run_bridge(
+            self.home,
+            "--as",
+            "alice",
+            "send",
+            "--to",
+            "target",
+            "--subject",
+            "wake",
+            extra_env={
+                "PYTHONUTF8": "1",
+                "AGENT_BRIDGE_DISABLE_NOTIFY": "1",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        task = read_board(self.home)["tasks"][0]
+        self.assertEqual(task["delivery"]["status"], "wake_launched")
+        self.assertNotIn("acknowledged_at", task["delivery"])
+        self.assertIn("awaiting acknowledgment", result.stdout)
 
 
 if __name__ == "__main__":

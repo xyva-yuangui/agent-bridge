@@ -24,7 +24,10 @@ class ConcurrencyTests(unittest.TestCase):
                 "--subject",
                 "seed",
                 "--no-wake",
-                extra_env={"PYTHONUTF8": "1"},
+                extra_env={
+                    "PYTHONUTF8": "1",
+                    "AGENT_BRIDGE_DISABLE_NOTIFY": "1",
+                },
             )
             self.assertEqual(seed.returncode, 0, seed.stderr)
 
@@ -39,7 +42,10 @@ class ConcurrencyTests(unittest.TestCase):
                     "--subject",
                     f"job-{index}",
                     "--no-wake",
-                    extra_env={"PYTHONUTF8": "1"},
+                    extra_env={
+                        "PYTHONUTF8": "1",
+                        "AGENT_BRIDGE_DISABLE_NOTIFY": "1",
+                    },
                 )
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=40) as pool:

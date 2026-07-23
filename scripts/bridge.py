@@ -5,6 +5,9 @@ from __future__ import annotations  # 3.9 compat for `str | None` annotations
 
 import argparse
 import calendar
+import shlex
+import shutil
+from dataclasses import dataclass
 try:
     import fcntl
     _HAS_FCNTL = True
@@ -111,39 +114,120 @@ import time
 import uuid
 from pathlib import Path
 
+BRIDGE_VERSION = "1.3.0"
+NOTIFY_WINDOWS_SCRIPT = Path(__file__).with_name("notify_windows.ps1")
+
+
+def _configure_stdio():
+    """Never let decorative Unicode crash a legacy Windows console."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
+_configure_stdio()
+
 # ── push layer ──────────────────────────────────────────────────────────────────
 # Pull model can't deliver to an idle agent. Two best-effort nudges:
 #  (a) desktop notification on send → the human switches to the target agent;
 #  (b) headless "wake" → if the target registered a wake command (e.g. Reasonix's
 #      `reasonix run`), run it so the agent checks its inbox now. Never fatal.
 
-def _desktop_notify(title: str, msg: str):
+@dataclass(frozen=True)
+class NotificationResult:
+    ok: bool
+    detail: str
+
+
+@dataclass(frozen=True)
+class WakeResult:
+    launched: bool
+    detail: str
+    pid: int | None = None
+
+
+def _desktop_notify(title: str, msg: str) -> NotificationResult:
+    if os.environ.get("AGENT_BRIDGE_DISABLE_NOTIFY", "").lower() in ("1", "true", "yes"):
+        return NotificationResult(True, "notification disabled by environment")
     try:
         if sys.platform == "darwin":
-            subprocess.run(["osascript", "-e",
-                            f"display notification {json.dumps(msg)} with title {json.dumps(title)}"],
-                           capture_output=True, timeout=5)
+            argv = [
+                "osascript",
+                "-e",
+                f"display notification {json.dumps(msg)} with title {json.dumps(title)}",
+            ]
         elif sys.platform == "win32":
-            subprocess.run(["powershell", "-Command",
-                            f"New-BurntToastNotification -Text '{title}','{msg}'"],
-                           capture_output=True, timeout=5)
+            powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+            if not powershell:
+                return NotificationResult(False, "powershell.exe not found")
+            argv = [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(NOTIFY_WINDOWS_SCRIPT),
+                "-Title",
+                title,
+                "-Message",
+                msg,
+            ]
         else:
-            subprocess.run(["notify-send", title, msg], capture_output=True, timeout=5)
-    except Exception:
-        pass
+            argv = ["notify-send", title, msg]
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return NotificationResult(False, str(exc))
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
+        return NotificationResult(False, detail)
+    return NotificationResult(True, "notification sent")
 
 
-def _wake_agent(name: str) -> bool:
+def _load_wake_argv(profile: dict) -> list[str] | None:
+    wake_argv = profile.get("wake_argv")
+    if isinstance(wake_argv, list) and wake_argv and all(
+        isinstance(item, str) and item for item in wake_argv
+    ):
+        return list(wake_argv)
+    legacy = profile.get("wake")
+    if not isinstance(legacy, str) or not legacy.strip():
+        return None
+    parsed = shlex.split(legacy, posix=sys.platform != "win32")
+    if sys.platform == "win32":
+        parsed = [item.strip('"') for item in parsed]
+    return parsed or None
+
+
+def _wake_agent(name: str) -> WakeResult:
     """Run the target's registered headless wake command, if any. Backgrounded."""
     af = AGENTS_DIR / name / "agent.json"
     if not af.exists():
-        return False
+        return WakeResult(False, f"agent {name} is not registered")
     try:
-        wake = json.load(open(af)).get("wake")
-    except Exception:
-        wake = None
-    if not wake:
-        return False
+        with open(af, encoding="utf-8") as profile_file:
+            profile = json.load(profile_file)
+    except (OSError, json.JSONDecodeError) as exc:
+        return WakeResult(False, f"invalid agent profile: {exc}")
+    wake_argv = _load_wake_argv(profile)
+    if not wake_argv:
+        return WakeResult(False, f"agent {name} has no wake command")
+    executable = wake_argv[0]
+    resolved = executable if Path(executable).exists() else shutil.which(executable)
+    if not resolved:
+        return WakeResult(False, f"wake executable not found: {executable}")
+    wake_argv[0] = str(resolved)
     prompt = (
         "Run `bridge inbox`. Claim ALL pending tasks. "
         "Complete each one, marking done with `bridge done`. "
@@ -158,10 +242,10 @@ def _wake_agent(name: str) -> bool:
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             kwargs["start_new_session"] = True
-        subprocess.Popen(wake.split() + [prompt], **kwargs)
-        return True
-    except Exception:
-        return False
+        process = subprocess.Popen(wake_argv + [prompt], **kwargs)
+        return WakeResult(True, f"wake process launched for {name}", process.pid)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return WakeResult(False, f"wake launch failed: {exc}")
 
 # ── identity ──────────────────────────────────────────────────────────────────
 
@@ -195,10 +279,12 @@ def get_coordinator(project_id: str) -> str | None:
 
 
 def set_coordinator(project_id: str, name: str):
-    """Set the coordinator for this project (first agent to use it)."""
+    """Set or replace a missing/stale project coordinator."""
     def _set(board):
-        if not board.get("coordinator"):
+        coordinator = board.get("coordinator")
+        if not coordinator or not _agent_recent(coordinator):
             board["coordinator"] = name
+            board["coordinator_updated"] = _now()
         return board
     atomic_update_board(board_path(project_id), _set)
 
@@ -208,7 +294,8 @@ def load_capabilities() -> dict:
     caps = {}
     for af in sorted(AGENTS_DIR.glob("*/agent.json")):
         try:
-            ad = json.load(open(af))
+            with open(af, encoding="utf-8") as profile_file:
+                ad = json.load(profile_file)
             name = ad.get("name", af.parent.name)
             skills = ad.get("skills", [])
             if skills:
@@ -218,15 +305,34 @@ def load_capabilities() -> dict:
     return caps
 
 
+def _agent_recent(name: str, max_age_seconds: int = 1800) -> bool:
+    af = AGENTS_DIR / name / "agent.json"
+    if not af.exists():
+        return False
+    try:
+        with open(af, encoding="utf-8") as profile_file:
+            profile = json.load(profile_file)
+        timestamp = profile.get("last_seen", "")
+        if not timestamp:
+            return False
+        seen = calendar.timegm(time.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ"))
+        return seen >= time.time() - max_age_seconds
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
 def route_task(skill: str, exclude: str = "") -> str | None:
-    """Find the best agent for a skill. Returns None if no match."""
+    """Prefer a recently active agent, using name only as a tie-breaker."""
     caps = load_capabilities()
-    for name, skills in sorted(caps.items()):
-        if name == exclude:
-            continue
-        if skill in skills:
-            return name
-    return None
+    candidates = [
+        name
+        for name, skills in caps.items()
+        if name != exclude and skill in skills
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda name: (not _agent_recent(name), name))
+    return candidates[0]
 
 
 def ensure_dirs():
@@ -500,6 +606,53 @@ def _ack_pending_tasks(project_id: str, agent: str) -> int:
 
     atomic_update_board(bp, _ack)
     return acknowledged
+
+
+def _attempt_delivery(
+    project_id: str,
+    task_id: str,
+    target: str,
+    subject: str,
+    *,
+    no_wake: bool = False,
+) -> dict:
+    """Notify and optionally launch the target without claiming false ACK."""
+    notification = _desktop_notify(f"agent-bridge -> {target}", subject)
+    wake = WakeResult(False, "wake disabled")
+    if not no_wake:
+        wake = _wake_agent(target)
+    if no_wake:
+        status = "queued"
+    elif wake.launched:
+        status = "wake_launched"
+    else:
+        status = "unavailable"
+    detail_parts = [
+        f"notification: {notification.detail}",
+        f"wake: {wake.detail}",
+    ]
+    updated_delivery = {
+        "target": target,
+        "status": status,
+        "attempted_at": _now(),
+        "detail": "; ".join(detail_parts),
+    }
+    bp = board_path(project_id)
+
+    def _update(board):
+        for task in board["tasks"]:
+            if task["id"] != task_id:
+                continue
+            current = task.get("delivery") or {}
+            if current.get("status") == "acknowledged":
+                updated_delivery.update(current)
+            else:
+                task["delivery"] = dict(updated_delivery)
+            break
+        return board
+
+    atomic_update_board(bp, _update)
+    return updated_delivery
 
 
 def _inbox_filter(task: dict, me: str, max_age_days: int = MAX_INBOX_AGE_DAYS) -> bool:
@@ -896,8 +1049,6 @@ def cmd_send(args):
     ensure_dirs()
     pid = _project(args)
     bp = board_path(pid)
-    # ponytail: first agent to send in a project becomes the coordinator
-    set_coordinator(pid, name)
     # routing is the coordinator MODEL's call (read `bridge agents` + project context).
     # --skill is only an optional convenience fallback, not a hard rule.
     target = args.to
@@ -910,6 +1061,11 @@ def cmd_send(args):
     if not target:
         print("❌ must specify --to <agent> or --skill <tag>", file=sys.stderr)
         sys.exit(1)
+    registered_profiles = list(AGENTS_DIR.glob("*/agent.json"))
+    if registered_profiles and not (AGENTS_DIR / target / "agent.json").exists():
+        print(f"error: target agent '{target}' is not registered", file=sys.stderr)
+        sys.exit(1)
+    set_coordinator(pid, name)
     task = {
         "id": _new_task_id(),
         "subject": args.subject,
@@ -929,22 +1085,29 @@ def cmd_send(args):
         return board
     atomic_update_board(bp, _append)
     print(f"✅ sent task {task['id']} to {target}: {args.subject}")
-    # push layer: notify the human, and auto-wake the target agent (unless --no-wake)
-    _desktop_notify(f"agent-bridge → {target}", args.subject)
     no_wake = getattr(args, "no_wake", False)
-    if not no_wake:
-        if _wake_agent(target):
-            print(f"⏰ woke {target} (headless) to handle it now")
-        else:
-            print(f"ℹ️  {target} has no headless wake command — it'll see this next turn")
+    delivery = _attempt_delivery(
+        pid,
+        task["id"],
+        target,
+        args.subject,
+        no_wake=no_wake,
+    )
+    if delivery["status"] == "wake_launched":
+        print(f"[wake] launched {target}; awaiting acknowledgment")
+    elif delivery["status"] == "unavailable":
+        print(f"[wake] unavailable for {target}; task remains queued")
+    else:
+        print(f"[delivery] queued for {target}")
 
 
 def cmd_wake(args):
     ensure_dirs()
-    if _wake_agent(args.agent):
-        print(f"⏰ woke {args.agent} (headless) — it will check its inbox")
+    result = _wake_agent(args.agent)
+    if result.launched:
+        print(f"[wake] launched {args.agent}; awaiting acknowledgment")
     else:
-        print(f"ℹ️  {args.agent} has no headless wake command registered (install with --wake-cmd)")
+        print(f"[wake] unavailable for {args.agent}: {result.detail}")
 
 
 def cmd_who_coordinates(args):
@@ -962,7 +1125,8 @@ def load_agents() -> dict:
     out = {}
     for af in sorted(AGENTS_DIR.glob("*/agent.json")):
         try:
-            ad = json.load(open(af))
+            with open(af, encoding="utf-8") as profile_file:
+                ad = json.load(profile_file)
             out[ad.get("name", af.parent.name)] = ad
         except Exception:
             pass
@@ -1120,17 +1284,24 @@ def _check_owner(task: dict, name: str, task_id: str):
 def cmd_question(args):
     name = _get_name(args)
     ensure_dirs()
-    bp = board_path(_project(args))
+    pid = _project(args)
+    bp = board_path(pid)
+    target = ""
+    subject = ""
     def _q(board):
+        nonlocal target, subject
         for t in board["tasks"]:
             if t["id"] == args.task_id:
                 _transition_task(t, name, "question")
                 t["question"] = args.body
-                _queue_delivery(t, t["from"], "question awaiting sender")
+                target = t["from"]
+                subject = t["subject"]
+                _queue_delivery(t, target, "question awaiting sender")
                 return board
         raise SystemExit(f"❌ task {args.task_id} not found")
     try:
         atomic_update_board(bp, _q)
+        _attempt_delivery(pid, args.task_id, target, f"Question: {subject}")
         print(f"❓ question on {args.task_id}: {args.body}")
     except SystemExit as e:
         print(str(e), file=sys.stderr)
@@ -1140,17 +1311,24 @@ def cmd_question(args):
 def cmd_answer(args):
     name = _get_name(args)
     ensure_dirs()
-    bp = board_path(_project(args))
+    pid = _project(args)
+    bp = board_path(pid)
+    target = ""
+    subject = ""
     def _a(board):
+        nonlocal target, subject
         for t in board["tasks"]:
             if t["id"] == args.task_id:
                 _transition_task(t, name, "answer")
                 t["answer"] = args.body
-                _queue_delivery(t, t["to"], "answer ready for assignee")
+                target = t["to"]
+                subject = t["subject"]
+                _queue_delivery(t, target, "answer ready for assignee")
                 return board
         raise SystemExit(f"❌ task {args.task_id} not found")
     try:
         atomic_update_board(bp, _a)
+        _attempt_delivery(pid, args.task_id, target, f"Answer ready: {subject}")
         print(f"✅ answered {args.task_id}, task unblocked")
     except SystemExit as e:
         print(str(e), file=sys.stderr)
@@ -1161,16 +1339,23 @@ def cmd_review(args):
     if args.verdict is None:  # review request
         name = _get_name(args)
         ensure_dirs()
-        bp = board_path(_project(args))
+        pid = _project(args)
+        bp = board_path(pid)
+        target = ""
+        subject = ""
         def _req(board):
+            nonlocal target, subject
             for t in board["tasks"]:
                 if t["id"] == args.task_id:
                     _transition_task(t, name, "request_review")
-                    _queue_delivery(t, t["from"], "review requested")
+                    target = t["from"]
+                    subject = t["subject"]
+                    _queue_delivery(t, target, "review requested")
                     return board
             raise SystemExit(f"❌ task {args.task_id} not found")
         try:
             atomic_update_board(bp, _req)
+            _attempt_delivery(pid, args.task_id, target, f"Review requested: {subject}")
             rp = bp.parent / "reviews"
             rp.mkdir(exist_ok=True)
             review = {"task_id": args.task_id, "requested_by": name, "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "verdict": None}
@@ -1184,12 +1369,16 @@ def cmd_review(args):
     else:  # review verdict
         name = _get_name(args)
         ensure_dirs()
-        bp = board_path(_project(args))
+        pid = _project(args)
+        bp = board_path(pid)
         verdict = args.verdict
         if verdict not in ("approve", "changes"):
             print("❌ verdict must be 'approve' or 'changes'", file=sys.stderr)
             sys.exit(1)
+        target = ""
+        subject = ""
         def _verdict(board):
+            nonlocal target, subject
             for t in board["tasks"]:
                 if t["id"] == args.task_id:
                     action = "approve" if verdict == "approve" else "changes"
@@ -1198,11 +1387,20 @@ def cmd_review(args):
                     if args.body:
                         t["review_comment"] = args.body
                     if verdict == "changes":
-                        _queue_delivery(t, t["to"], "review changes requested")
+                        target = t["to"]
+                        subject = t["subject"]
+                        _queue_delivery(t, target, "review changes requested")
                     return board
             raise SystemExit(f"❌ task {args.task_id} not found")
         try:
             atomic_update_board(bp, _verdict)
+            if verdict == "changes":
+                _attempt_delivery(
+                    pid,
+                    args.task_id,
+                    target,
+                    f"Review changes requested: {subject}",
+                )
             print(f"{'✅' if verdict=='approve' else '🔄'} review {verdict} on {args.task_id}")
         except SystemExit as e:
             print(str(e), file=sys.stderr)
