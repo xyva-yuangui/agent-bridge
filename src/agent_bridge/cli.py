@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
+from . import dispatcher
 from .migrate_v1 import export_json, import_v1
 from .paths import get_data_root
 from .presentation import configure_streams, error_view, render, task_page, task_view, tasks_view
@@ -19,7 +20,7 @@ from .version import BRIDGE_VERSION, SCHEMA_VERSION
 
 
 MCP_EXCLUDED_COMMANDS = frozenset(("dispatch", "tui", "setup", "uninstall", "open-action"))
-UNAVAILABLE_COMMANDS = MCP_EXCLUDED_COMMANDS
+UNAVAILABLE_COMMANDS = frozenset(("tui", "setup", "uninstall", "open-action"))
 
 
 class CommandUnavailable(RuntimeError):
@@ -61,14 +62,35 @@ def _put_metadata(service: BridgeService, key: str, value: str) -> None:
         )
 
 
+def _delivery_result(task: Any) -> Dict[str, Any]:
+    """Render a committed task mutation, then request a detached delivery burst."""
+    dispatcher.request_dispatch()
+    return {"task": task_view(task)}
+
+
 def execute_command(
     service: BridgeService, identity: str, command: str, arguments: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Execute one public command directly against the v2 service and store."""
     arguments = dict(arguments or {})
     project_id = _project(arguments)
+    if command != "dispatch":
+        # This is deliberately one indexed probe: a dispatcher never launches
+        # another dispatcher while it is draining the outbox.
+        dispatcher.tick(service.store)
     if command in UNAVAILABLE_COMMANDS:
         raise CommandUnavailable("{0} is unavailable in the v2 service layer".format(command))
+    if command == "dispatch":
+        report = dispatcher.Dispatcher(service.store).run_burst()
+        return {"dispatch": {
+            "acquired": report.acquired,
+            "processed": report.processed,
+            "delivered": report.delivered,
+            "retried": report.retried,
+            "failed": report.failed,
+            "coalesced": report.coalesced,
+            "timed_out": report.timed_out,
+        }}
     if command == "whoami":
         return {"identity": identity}
     if command == "send":
@@ -78,9 +100,9 @@ def execute_command(
         task = service.send_task(identity, str(assignee), str(_argument(arguments, "subject")), str(_argument(arguments, "body", "")), project_id)
         if _metadata(service, "coordinator:" + project_id) is None:
             _put_metadata(service, "coordinator:" + project_id, identity)
-        return {"task": task_view(task)}
+        return _delivery_result(task)
     if command == "claim":
-        return {"task": task_view(service.claim(str(_argument(arguments, "task_id")), str(_argument(arguments, "actor", identity)), str(_argument(arguments, "body", ""))))}
+        return _delivery_result(service.claim(str(_argument(arguments, "task_id")), str(_argument(arguments, "actor", identity)), str(_argument(arguments, "body", ""))))
     if command == "done":
         files = _argument(arguments, "files") or ""
         task = service.done(
@@ -88,18 +110,18 @@ def execute_command(
             str(_argument(arguments, "result", _argument(arguments, "body", ""))),
             artifacts=tuple(str(files).split(",")),
         )
-        return {"task": task_view(task)}
+        return _delivery_result(task)
     if command == "question":
-        return {"task": task_view(service.question(str(_argument(arguments, "task_id")), str(_argument(arguments, "actor", identity)), str(_argument(arguments, "body", ""))))}
+        return _delivery_result(service.question(str(_argument(arguments, "task_id")), str(_argument(arguments, "actor", identity)), str(_argument(arguments, "body", ""))))
     if command == "answer":
-        return {"task": task_view(service.answer(str(_argument(arguments, "task_id")), str(_argument(arguments, "actor", identity)), str(_argument(arguments, "body", ""))))}
+        return _delivery_result(service.answer(str(_argument(arguments, "task_id")), str(_argument(arguments, "actor", identity)), str(_argument(arguments, "body", ""))))
     if command == "review":
         task_id = str(_argument(arguments, "task_id"))
         actor = str(_argument(arguments, "actor", identity))
         body = str(_argument(arguments, "body", ""))
         verdict = _argument(arguments, "verdict")
         task = service.request_review(task_id, actor, body) if verdict is None else service.review(task_id, actor, str(verdict), body)
-        return {"task": task_view(task)}
+        return _delivery_result(task)
     if command == "show":
         return {"task": task_view(service.show(str(_argument(arguments, "task_id"))))}
     if command == "status":
@@ -262,6 +284,7 @@ def build_parser() -> argparse.ArgumentParser:
     log = command("log"); log.add_argument("--what", required=True); log.add_argument("--project", default="default")
     migrate = command("migrate"); migrate.add_argument("source")
     export = command("export"); export.add_argument("destination")
+    dispatch = command("dispatch"); dispatch.add_argument("--burst", action="store_true")
     for name in UNAVAILABLE_COMMANDS:
         command(name, help="reserved for a later v2 component")
     return parser
