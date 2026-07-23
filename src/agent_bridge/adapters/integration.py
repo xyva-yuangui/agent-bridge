@@ -33,12 +33,21 @@ def serve(host: str, home: Path, data_root: Path) -> int:
     store = Store.open(data_root / "agent-bridge.sqlite3")
     service = BridgeService(store)
     try:
+        _recover_acknowledged_cards(adapter, service)
         for line in sys.stdin:
+            request = None
             try:
                 request = json.loads(line)
+                if not isinstance(request, dict):
+                    _response(None, error="invalid request")
+                    continue
                 request_id = request.get("id")
+                if request.get("jsonrpc") != "2.0":
+                    raise ValueError("invalid JSON-RPC version")
                 method = request.get("method")
                 params = request.get("params", {})
+                if not isinstance(params, dict):
+                    raise ValueError("params must be an object")
                 if method == "initialize":
                     _response(request_id, {"serverInfo": {"name": "agent-bridge-host-consumer", "version": "1.0.0"}, "capabilities": {"tools": {}}})
                 elif method == "tools/list":
@@ -46,8 +55,11 @@ def serve(host: str, home: Path, data_root: Path) -> int:
                 elif method == "tools/call":
                     name = params.get("name")
                     arguments = params.get("arguments", {})
+                    if not isinstance(arguments, dict):
+                        raise ValueError("tool arguments must be an object")
                     if name == "list_task_cards":
                         cards = []
+                        adapter._assert_contained(adapter.inbox_path)
                         for path in sorted(adapter.inbox_path.glob("*.json")):
                             card = adapter._read_card(path.stem)
                             if card is not None:
@@ -64,18 +76,45 @@ def serve(host: str, home: Path, data_root: Path) -> int:
                         prepared = adapter.integration_acknowledgement(task_id)
                         if acknowledgement != prepared:
                             raise ValueError("acknowledgement does not match queued task card")
-                        service.acknowledge_delivery(task_id, adapter.name, prepared.integration_version, prepared.protocol_version, prepared.delivery_token)
+                        service.claim_host_acknowledgement(task_id, adapter.name, prepared.integration_version, prepared.protocol_version, prepared.delivery_token)
                         adapter.consume_acknowledged_card(task_id, prepared.delivery_token)
                         _response(request_id, {"acknowledged": True})
                     else:
                         raise ValueError("unknown tool")
                 else:
                     _response(request_id, error="unknown method")
+            except json.JSONDecodeError:
+                message = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}
+                print(json.dumps(message, ensure_ascii=False, sort_keys=True), flush=True)
             except (KeyError, TypeError, ValueError) as error:
                 _response(request.get("id") if isinstance(request, dict) else None, error=str(error))
+            except Exception:
+                _response(request.get("id") if isinstance(request, dict) else None, error="internal server error")
     finally:
         store.close()
     return 0
+
+
+def _recover_acknowledged_cards(adapter, service: BridgeService) -> None:
+    """Finish filesystem cleanup after a crash following the durable ACK commit."""
+    try:
+        adapter._assert_contained(adapter.inbox_path)
+        if not adapter.inbox_path.is_dir() or adapter.inbox_path.is_symlink():
+            return
+        paths = tuple(adapter.inbox_path.glob("*.json"))
+    except (OSError, ValueError):
+        return
+    for path in paths:
+        if path.is_symlink():
+            continue
+        try:
+            acknowledgement = adapter.integration_acknowledgement(path.stem)
+            if service.host_acknowledgement_is_claimed(
+                acknowledgement.task_id, acknowledgement.host_identity, acknowledgement.delivery_token,
+            ):
+                adapter.consume_acknowledged_card(acknowledgement.task_id, acknowledgement.delivery_token)
+        except (OSError, ValueError):
+            continue
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

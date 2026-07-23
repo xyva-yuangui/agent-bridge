@@ -160,12 +160,15 @@ class BridgeService:
             raise KeyError("unknown task: {0}".format(task_id))
         return _task_view(row, self._artifact_paths(task_id))
 
-    def acknowledge_delivery(
+    def claim_host_acknowledgement(
         self, task_id: str, host_identity: str, integration_version: str,
         protocol_version: int, delivery_token: str,
     ) -> None:
-        """Record one durable host ACK; the delivery token is single-use."""
-        if not task_id or not host_identity or type(protocol_version) is not int or protocol_version < 1 or not delivery_token:
+        """Atomically claim one host ACK; callers must not synthesize callbacks."""
+        if (
+            not task_id or not host_identity or not integration_version
+            or type(protocol_version) is not int or protocol_version < 1 or not delivery_token
+        ):
             raise ValueError("invalid host acknowledgement")
         with self.store.transaction(immediate=True) as connection:
             task = connection.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -180,6 +183,16 @@ class BridgeService:
                 )
             except sqlite3.IntegrityError as error:
                 raise ValueError("host acknowledgement was already consumed") from error
+
+    def host_acknowledgement_is_claimed(
+        self, task_id: str, host_identity: str, delivery_token: str,
+    ) -> bool:
+        """Read durable ACK state so a restarted consumer can clear stale cards."""
+        key = "host-ack:{0}:{1}:{2}".format(host_identity, task_id, delivery_token)
+        return bool(self.store.scalar(
+            "SELECT 1 FROM delivery_attempts WHERE idempotency_key = ? AND status = ?",
+            (key, DeliveryStatus.AGENT_ACKNOWLEDGED.value),
+        ))
 
     def board(self, project_id: str) -> List[TaskView]:
         return self._query_tasks("project_id = ?", (project_id,))

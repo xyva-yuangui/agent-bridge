@@ -7,7 +7,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from .base import HostCapabilities, ManagedJsonAdapter, Surface, _read_json_object, _write_json_object
+from .base import HostCapabilities, ManagedJsonAdapter, Surface, _atomic_write, _optimistic_json_update, _read_json_object
 from ..version import PROTOCOL_VERSION
 
 
@@ -35,40 +35,61 @@ class ZCodeAdapter(ManagedJsonAdapter):
         return self.home / ".zcode" / "cli" / "plugins" / "cache" / "local" / "agent-bridge" / "1.0.0"
 
     def _install_config(self) -> None:
+        self._assert_contained(self.plugin_bundle_path)
         self.plugin_bundle_path.mkdir(parents=True, exist_ok=True)
         source = Path(__file__).resolve().parents[3] / "integrations" / "zcode" / "plugin.json"
         shutil.copyfile(source, self.plugin_bundle_path / "plugin.json")
         plugin = json.loads((self.plugin_bundle_path / "plugin.json").read_text(encoding="utf-8"))
         plugin["command"] = sys.executable
         plugin["args"] = self._entrypoint()[1:]
-        _write_json_object(self.plugin_bundle_path / "plugin.json", plugin)
-        root = _read_json_object(self.config_path)
-        plugins = root.setdefault("plugins", {})
-        plugins.setdefault("enabledPlugins", {})["agent-bridge@local"] = True
-        plugins.setdefault("localPlugins", {})["agent-bridge@local"] = str(self.plugin_bundle_path)
-        _write_json_object(self.config_path, root)
+        _atomic_write(self.plugin_bundle_path / "plugin.json", json.dumps(plugin, ensure_ascii=False, indent=2) + "\n")
+        def update(root: dict) -> None:
+            plugins = root.setdefault("plugins", {})
+            if not isinstance(plugins, dict):
+                raise ValueError("zcode plugins config must be an object")
+            enabled = plugins.setdefault("enabledPlugins", {})
+            local = plugins.setdefault("localPlugins", {})
+            if not isinstance(enabled, dict) or not isinstance(local, dict):
+                raise ValueError("zcode plugin registrations must be objects")
+            enabled["agent-bridge@local"] = True
+            local["agent-bridge@local"] = str(self.plugin_bundle_path)
+            root["agent_bridge"] = self._managed_metadata()
+        _optimistic_json_update(self.config_path, update)
 
     def _consumer_is_installed(self) -> bool:
         try:
+            if self._managed_config_text() is None:
+                return False
+            self._assert_contained(self.plugin_bundle_path)
+            if self.plugin_bundle_path.is_symlink():
+                return False
             root = _read_json_object(self.config_path)
             bundle = Path(root["plugins"]["localPlugins"]["agent-bridge@local"])
             plugin = json.loads((bundle / "plugin.json").read_text(encoding="utf-8"))
         except (KeyError, OSError, ValueError, TypeError):
             return False
-        return bundle == self.plugin_bundle_path and plugin.get("command") == sys.executable and plugin.get("args") == self._entrypoint()[1:]
+        return (
+            bundle == self.plugin_bundle_path
+            and root.get("agent_bridge") == self._managed_metadata()
+            and plugin.get("command") == sys.executable
+            and plugin.get("args") == self._entrypoint()[1:]
+        )
 
     def _uninstall_config(self) -> None:
-        root = _read_json_object(self.config_path)
-        plugins = root.get("plugins")
-        if isinstance(plugins, dict):
-            enabled = plugins.get("enabledPlugins")
-            if isinstance(enabled, dict):
-                enabled.pop("agent-bridge@local", None)
-            local = plugins.get("localPlugins")
-            if isinstance(local, dict):
-                local.pop("agent-bridge@local", None)
-        _write_json_object(self.config_path, root)
-        if self.plugin_bundle_path.exists():
+        def update(root: dict) -> None:
+            plugins = root.get("plugins")
+            if isinstance(plugins, dict):
+                enabled = plugins.get("enabledPlugins")
+                if isinstance(enabled, dict):
+                    enabled.pop("agent-bridge@local", None)
+                local = plugins.get("localPlugins")
+                if isinstance(local, dict):
+                    local.pop("agent-bridge@local", None)
+            if root.get("agent_bridge") == self._managed_metadata():
+                root.pop("agent_bridge", None)
+        _optimistic_json_update(self.config_path, update)
+        self._assert_contained(self.plugin_bundle_path)
+        if self.plugin_bundle_path.exists() and not self.plugin_bundle_path.is_symlink():
             shutil.rmtree(self.plugin_bundle_path)
 
     def _remove_legacy_managed(self, root: dict) -> None:

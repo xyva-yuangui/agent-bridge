@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,7 +12,6 @@ from agent_bridge.adapters.base import (
     HostAdapter,
     HostCapabilities,
     Surface,
-    TaskAcknowledgement,
     TaskCard,
 )
 
@@ -93,37 +93,28 @@ class AdapterContractTests(unittest.TestCase):
                 self.assertEqual(card["host_identity"], adapter.name)
                 self.assertEqual(card["task_id"], self.task.task_id)
 
-    def test_explicit_integration_acknowledges_only_after_consuming_queued_card(self) -> None:
-        calls = []
+    def test_integration_prepares_an_acknowledgement_from_a_queued_card(self) -> None:
         for adapter_type in ADAPTER_TYPES:
             with self.subTest(adapter=adapter_type.__name__):
                 adapter = self._installed(adapter_type(self.home))
                 adapter.notify_in_app(self.task)
                 card = json.loads(adapter.task_card_path(self.task.task_id).read_text(encoding="utf-8"))
-                acknowledgement = TaskAcknowledgement(
-                    adapter.name,
-                    self.task.task_id,
-                    card["integration_version"],
-                    card["protocol_version"],
-                    card["delivery_token"],
-                )
-                result = adapter.acknowledge_integration(acknowledgement, lambda **payload: calls.append(payload))
+                acknowledgement = adapter.integration_acknowledgement(self.task.task_id)
 
-                self.assertEqual(result.status, DeliveryStatus.AGENT_ACKNOWLEDGED)
-                self.assertTrue(result.acknowledged)
-                self.assertEqual(calls.pop(), acknowledgement.as_shared_payload())
+                self.assertEqual(acknowledgement.host_identity, adapter.name)
+                self.assertEqual(acknowledgement.task_id, self.task.task_id)
+                self.assertEqual(acknowledgement.delivery_token, card["delivery_token"])
 
-    def test_forged_or_mismatched_ack_is_rejected_without_calling_shared_acknowledge(self) -> None:
+    def test_forged_or_mismatched_card_ack_is_rejected(self) -> None:
         adapter = self._installed(CodexAdapter(self.home))
         adapter.notify_in_app(self.task)
-        card = json.loads(adapter.task_card_path(self.task.task_id).read_text(encoding="utf-8"))
-        calls = []
-        forged = TaskAcknowledgement("claude", self.task.task_id, "1.0.0", 2, card["delivery_token"])
-        mismatched = TaskAcknowledgement("codex", self.task.task_id, "9.9.9", 2, card["delivery_token"])
+        path = adapter.task_card_path(self.task.task_id)
+        card = json.loads(path.read_text(encoding="utf-8"))
+        card["host_identity"] = "claude"
+        path.write_text(json.dumps(card), encoding="utf-8")
 
-        self.assertEqual(adapter.acknowledge_integration(forged, lambda **payload: calls.append(payload)).status, DeliveryStatus.FAILED)
-        self.assertEqual(adapter.acknowledge_integration(mismatched, lambda **payload: calls.append(payload)).status, DeliveryStatus.FAILED)
-        self.assertEqual(calls, [])
+        with self.assertRaisesRegex(ValueError, "does not belong"):
+            adapter.integration_acknowledgement(self.task.task_id)
 
     def test_forged_card_versions_cannot_be_promoted_to_a_shared_acknowledgement(self) -> None:
         adapter = self._installed(CodexAdapter(self.home))
@@ -132,13 +123,8 @@ class AdapterContractTests(unittest.TestCase):
         card = json.loads(path.read_text(encoding="utf-8"))
         card["integration_version"] = "9.9.9"
         path.write_text(json.dumps(card), encoding="utf-8")
-        calls = []
-        forged = TaskAcknowledgement("codex", self.task.task_id, "9.9.9", 2, card["delivery_token"])
-
-        result = adapter.acknowledge_integration(forged, lambda **payload: calls.append(payload))
-
-        self.assertEqual(result.status, DeliveryStatus.FAILED)
-        self.assertEqual(calls, [])
+        with self.assertRaisesRegex(ValueError, "does not match host capabilities"):
+            adapter.integration_acknowledgement(self.task.task_id)
 
     def test_missing_installed_consumer_fails_without_queuing_a_card(self) -> None:
         adapter = CodexAdapter(self.home)
@@ -167,6 +153,29 @@ class AdapterContractTests(unittest.TestCase):
 
         self.assertFalse(adapter.task_card_path(self.task.task_id).exists())
         self.assertTrue(sibling.exists())
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink support is unavailable")
+    def test_symlinked_inbox_cannot_escape_the_host_home(self) -> None:
+        adapter = self._installed(CodexAdapter(self.home))
+        outside = self.home / "outside"
+        outside.mkdir()
+        adapter.inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(outside, adapter.inbox_path, target_is_directory=True)
+
+        result = adapter.notify_in_app(self.task)
+
+        self.assertEqual(result.status, DeliveryStatus.FAILED)
+        self.assertFalse((outside / (self.task.task_id + ".json")).exists())
+
+    def test_detect_requires_marker_exact_managed_config_and_installation_artifact(self) -> None:
+        adapter = self._installed(CodexAdapter(self.home))
+        self.assertTrue(adapter.detect().found)
+        adapter.installation_artifact_path.unlink()
+        self.assertFalse(adapter.detect().found)
+        adapter.install()
+        source = adapter.config_path.read_text(encoding="utf-8")
+        adapter.config_path.write_text(source.replace('command = "python"', 'command = "other-python"'), encoding="utf-8")
+        self.assertFalse(adapter.detect().found)
 
     def test_unavailable_richer_surface_has_terminal_fallback_and_health_warning(self) -> None:
         health = CodexAdapter(self.home / "missing").health_check()

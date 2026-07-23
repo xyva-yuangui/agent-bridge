@@ -192,3 +192,19 @@ class ServiceWorkflowTests(unittest.TestCase):
         self.assertEqual(self.service.status("zcode")[0].artifacts, ("src/a.py",))
         self.assertEqual(self.service.inbox("zcode")[0].artifacts, ("src/a.py",))
         self.assertEqual(self.service.board("default")[0].artifacts, ("src/a.py",))
+
+    def test_host_acknowledgement_claim_is_durable_and_rejects_a_replay(self):
+        task = self.service.send_task("codex", "zcode", "Review", "Body")
+
+        self.service.claim_host_acknowledgement(task.id, "zcode", "1.0.0", 2, "one-time-token")
+
+        self.assertEqual(
+            self.store.scalar(
+                "SELECT COUNT(*) FROM delivery_attempts WHERE task_id = ? AND channel = ? AND status = 'agent_acknowledged'",
+                (task.id, "host:zcode"),
+            ),
+            1,
+        )
+        self.assertTrue(self.service.host_acknowledgement_is_claimed(task.id, "zcode", "one-time-token"))
+        with self.assertRaisesRegex(ValueError, "already consumed"):
+            self.service.claim_host_acknowledgement(task.id, "zcode", "1.0.0", 2, "one-time-token")

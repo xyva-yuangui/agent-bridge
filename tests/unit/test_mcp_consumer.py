@@ -77,6 +77,79 @@ class HostMcpConsumerTests(unittest.TestCase):
                 finally:
                     verify.close()
 
+    def test_malformed_json_rpc_returns_parse_error_and_server_continues(self) -> None:
+        adapter = self._adapter(ADAPTER_TYPES[0])
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+        command = self._registered_command(adapter)
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env)
+        try:
+            assert process.stdin is not None and process.stdout is not None
+            process.stdin.write("{bad json\n")
+            process.stdin.flush()
+            self.assertEqual(json.loads(process.stdout.readline())["error"]["code"], -32700)
+            process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"}) + "\n")
+            process.stdin.flush()
+            self.assertEqual(json.loads(process.stdout.readline())["result"]["serverInfo"]["name"], "agent-bridge-host-consumer")
+        finally:
+            process.terminate()
+            process.communicate(timeout=10)
+
+    def test_invalid_request_shapes_return_errors_without_terminating_the_server(self) -> None:
+        adapter = self._adapter(ADAPTER_TYPES[0])
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+        process = subprocess.Popen(self._registered_command(adapter), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env)
+        try:
+            assert process.stdin is not None and process.stdout is not None
+            for request in (
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": []},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "acknowledge", "arguments": []}},
+                {"jsonrpc": "1.0", "id": 3, "method": "initialize"},
+            ):
+                process.stdin.write(json.dumps(request) + "\n")
+                process.stdin.flush()
+                self.assertIn("error", json.loads(process.stdout.readline()))
+            process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 4, "method": "initialize"}) + "\n")
+            process.stdin.flush()
+            self.assertEqual(json.loads(process.stdout.readline())["result"]["serverInfo"]["name"], "agent-bridge-host-consumer")
+        finally:
+            process.terminate()
+            process.communicate(timeout=10)
+
+    def test_restarted_consumer_recovers_a_crashed_ack_cleanup_and_rejects_replay(self) -> None:
+        adapter = self._adapter(ADAPTER_TYPES[0])
+        store = Store.open(self.data_root / "agent-bridge.sqlite3")
+        try:
+            service = BridgeService(store)
+            task = service.send_task("sender", adapter.name, "subject", "body")
+            self.assertEqual(adapter.notify_in_app(TaskCard(task.id, task.subject, task.body)).status.value, "queued")
+            acknowledgement = adapter.integration_acknowledgement(task.id)
+            service.claim_host_acknowledgement(
+                acknowledgement.task_id,
+                acknowledgement.host_identity,
+                acknowledgement.integration_version,
+                acknowledgement.protocol_version,
+                acknowledgement.delivery_token,
+            )
+        finally:
+            store.close()
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+        process = subprocess.Popen(self._registered_command(adapter), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env)
+        try:
+            assert process.stdin is not None and process.stdout is not None
+            process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list_task_cards", "arguments": {}}}) + "\n")
+            process.stdin.flush()
+            self.assertEqual(json.loads(process.stdout.readline())["result"]["cards"], [])
+            self.assertFalse(adapter.task_card_path(task.id).exists())
+            process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "acknowledge", "arguments": {"task_id": task.id}}}) + "\n")
+            process.stdin.flush()
+            self.assertIn("error", json.loads(process.stdout.readline()))
+        finally:
+            process.terminate()
+            process.communicate(timeout=10)
+
     def _registered_command(self, adapter):
         if adapter.name == "codex":
             config = tomllib.loads(adapter.config_path.read_text(encoding="utf-8"))

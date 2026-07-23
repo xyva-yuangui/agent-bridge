@@ -5,8 +5,10 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_bridge.adapters import ADAPTER_TYPES
+from agent_bridge.adapters import base
 
 try:
     import tomllib
@@ -94,3 +96,24 @@ class HostConfigurationRoundTripTests(unittest.TestCase):
                 self.assertNotIn("agent_bridge", restored)
                 if host == "zcode":
                     self.assertNotIn("agent-bridge@local", restored["plugins"]["enabledPlugins"])
+
+    def test_install_retries_an_external_writer_without_losing_its_edit(self) -> None:
+        adapter = self._adapter("claude")
+        path = self._copy_fixture("claude", "unrelated.json")
+        original_write = base._atomic_write
+        calls = 0
+
+        def externally_changed_write(destination, text, expected_source=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                current = json.loads(destination.read_text(encoding="utf-8"))
+                current["external_writer"] = {"preserve": True}
+                destination.write_text(json.dumps(current) + "\n", encoding="utf-8")
+            return original_write(destination, text, expected_source)
+
+        with patch("agent_bridge.adapters.base._atomic_write", side_effect=externally_changed_write):
+            self.assertTrue(adapter.install().ok)
+
+        self.assertGreaterEqual(calls, 2)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["external_writer"], {"preserve": True})
