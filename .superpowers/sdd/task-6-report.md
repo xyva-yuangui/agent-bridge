@@ -169,3 +169,36 @@ git diff --check
 ```
 
 Result: all focused tests passed; compilation and whitespace checks passed.
+
+## Final P1 RED/GREEN (2026-07-24)
+
+### RED
+
+Changed the crash-before-evidence expectation to require a pending result,
+then added a dispatcher regression that inserts a durable `reserved` row before
+any `Popen` and verifies the subsequent burst. Ran:
+
+```powershell
+$env:PYTHONPATH=(Join-Path $PWD 'src')
+python -m unittest tests.integration.test_launch_deduplication -v
+```
+
+Result: `FAILED (failures=2)` as expected: a live `reserved` row was reported
+as `started`, causing the dispatcher to complete the outbox and record
+`launch_started` even though no process had been created.
+
+### GREEN
+
+Reservations now retain their persisted state. Reusing `started` returns durable
+launch evidence, while reusing `reserved` returns `launch reservation is
+pending`. The dispatcher treats that result as retryable work, preserving the
+reservation's fail-closed duplicate-process guard without claiming launch
+evidence. The pre-`Popen` regression asserts zero completed outbox rows and
+zero `launch_started` attempts.
+
+```powershell
+$env:PYTHONPATH=(Join-Path $PWD 'src')
+python -m unittest tests.integration.test_launch_deduplication tests.integration.test_dispatcher tests.integration.test_dispatcher_faults -v
+```
+
+Result: `Ran 24 tests ... OK`.

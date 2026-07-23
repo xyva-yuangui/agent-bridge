@@ -47,6 +47,7 @@ class _Reservation:
     existing: bool
     decision: LaunchDecision
     pid: Optional[int] = None
+    status: str = ""
 
 
 LastLaunch = Optional[Union[datetime, float, int, str]]
@@ -191,7 +192,9 @@ def launch_stored_agent(
     if not reservation.decision.allowed:
         return LaunchResult(False, reservation.decision.reason)
     if reservation.existing:
-        return LaunchResult(True, "launch already reserved", reservation.pid)
+        if reservation.status == "started":
+            return LaunchResult(True, "launch already started", reservation.pid)
+        return LaunchResult(False, "launch reservation is pending")
     result = launch_agent(reservation.decision)
     if not result.started:
         _record_failure(store, key, result.reason)
@@ -234,7 +237,12 @@ def _reserve_launch(
             (idempotency_key,),
         ).fetchone()
         if existing is not None and str(existing["status"]) in ("reserved", "started") and str(existing["expires_at"]) > now:
-            return _Reservation(True, LaunchDecision(True, "", _safe_argv(profile.launch_argv), workspace), existing["pid"])
+            return _Reservation(
+                True,
+                LaunchDecision(True, "", _safe_argv(profile.launch_argv), workspace),
+                existing["pid"],
+                str(existing["status"]),
+            )
         running_count = int(connection.execute(
             "SELECT COUNT(*) FROM launch_reservations WHERE agent_name = ? "
             "AND status IN ('reserved', 'started') AND expires_at > ?",

@@ -9,8 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 from agent_bridge.dispatcher import Dispatcher
-from agent_bridge.launchers import LaunchDeliveryChannel, launch_stored_agent
+from agent_bridge.launchers import LaunchDeliveryChannel, _reserve_launch, launch_stored_agent, load_agent_profile
 from agent_bridge.models import ExecutionPolicy
+from agent_bridge.outbox import due_items
 from agent_bridge.service import BridgeService
 from agent_bridge.store import Store
 
@@ -74,10 +75,12 @@ class LaunchDeduplicationTests(unittest.TestCase):
                 results = list(workers.map(lambda ignored: wake_once(), range(2)))
 
         self.assertEqual(popen.call_count, 1)
-        self.assertTrue(all(result.started for result in results))
+        self.assertTrue(all(
+            result.started or result.reason == "launch reservation is pending" for result in results
+        ))
         self.assertEqual(self.store.scalar("SELECT status FROM launch_reservations"), "started")
 
-    def test_reserved_launch_is_not_restarted_after_popen_before_evidence_crash(self) -> None:
+    def test_reserved_launch_is_not_restarted_or_reported_started_after_popen_before_evidence_crash(self) -> None:
         self._configure_auto_profile()
 
         class Process:
@@ -90,9 +93,25 @@ class LaunchDeduplicationTests(unittest.TestCase):
                 launch_stored_agent(self.store, "zcode", self.workspace, "wake:zcode:project")
         retry = launch_stored_agent(self.store, "zcode", self.workspace, "wake:zcode:project")
 
-        self.assertTrue(retry.started)
+        self.assertFalse(retry.started)
+        self.assertEqual(retry.reason, "launch reservation is pending")
         self.assertEqual(popen.call_count, 1)
         self.assertEqual(self.store.scalar("SELECT status FROM launch_reservations"), "reserved")
+
+    def test_pre_popen_reserved_launch_retries_without_false_launch_evidence(self) -> None:
+        self._configure_auto_profile()
+        task = self.service.send_task("sender", "zcode", "subject", "body", "project")
+        item = tuple(due_items(self.store.connection))[0]
+        profile = load_agent_profile(self.store, "zcode")
+        _reserve_launch(self.store, profile, str(self.workspace), item.idempotency_key, task.id)
+
+        report = Dispatcher(self.store, {"launcher": LaunchDeliveryChannel(str(self.store.path))}).run_burst()
+
+        self.assertEqual(report.delivered, 0)
+        self.assertEqual(report.retried, 1)
+        self.assertIsNone(self.store.scalar("SELECT completed_at FROM outbox"))
+        self.assertEqual(self.store.scalar("SELECT status FROM delivery_attempts"), "retry_wait")
+        self.assertEqual(self.store.scalar("SELECT COUNT(*) FROM delivery_attempts WHERE status = 'launch_started'"), 0)
 
     def test_manual_recipient_is_not_a_retry_when_auto_channel_is_enabled(self) -> None:
         self._configure_auto_profile()
