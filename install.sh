@@ -312,6 +312,21 @@ json.dump(s, open('$settings','w'), indent=2)
             && echo "✅ Claude Code: MCP server 'agent-bridge' registered" \
             || echo "⚠️  claude mcp add failed — register manually"
     fi
+
+    # 4. register Claude's headless wake command so other agents can push to it
+    mkdir -p "$HOME/.agent-bridge/agents/$AS_NAME"
+    AS_NAME="$AS_NAME" python3 - <<'PY'
+import json, os
+af = os.path.expanduser("~/.agent-bridge/agents/%s/agent.json" % os.environ["AS_NAME"])
+try: data = json.load(open(af))
+except Exception: data = {}
+data["name"] = os.environ["AS_NAME"]
+data["wake"] = "claude -p"
+json.dump(data, open(af, "w"), indent=2)
+PY
+    echo "✅ Claude wake command registered (headless push via 'claude -p')"
+
+    
 }
 
 install_codex() {

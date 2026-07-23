@@ -5,7 +5,51 @@ from __future__ import annotations  # 3.9 compat for `str | None` annotations
 
 import argparse
 import calendar
-import fcntl
+try:
+    import fcntl
+    _HAS_FCNTL = True
+except ImportError:
+    _HAS_FCNTL = False
+
+if not _HAS_FCNTL:
+    def _portable_lock(filepath, timeout=10):
+        lockpath = filepath + ".lock"
+        deadline = time.time() + timeout
+        while True:
+            try:
+                fd = os.open(lockpath, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                return lockpath
+            except (FileExistsError, OSError):
+                if time.time() > deadline:
+                    raise TimeoutError(f"Could not acquire lock on {filepath}")
+                time.sleep(0.01)
+
+    def _portable_unlock(lockpath):
+        try:
+            os.unlink(lockpath)
+        except OSError:
+            pass
+
+from contextlib import contextmanager
+
+@contextmanager
+def _locked_file(path, mode):
+    if _HAS_FCNTL:
+        lock_op = fcntl.LOCK_EX if ("w" in mode or "+" in mode) else fcntl.LOCK_SH
+        with open(path, mode) as f:
+            fcntl.flock(f, lock_op)
+            try:
+                yield f
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    else:
+        lockpath = _portable_lock(path)
+        try:
+            with open(path, mode) as f:
+                yield f
+        finally:
+            _portable_unlock(lockpath)
 import json
 import os
 import subprocess
@@ -26,6 +70,10 @@ def _desktop_notify(title: str, msg: str):
             subprocess.run(["osascript", "-e",
                             f"display notification {json.dumps(msg)} with title {json.dumps(title)}"],
                            capture_output=True, timeout=5)
+        elif sys.platform == "win32":
+            subprocess.run(["powershell", "-Command",
+                            f"New-BurntToastNotification -Text '{title}','{msg}'"],
+                           capture_output=True, timeout=5)
         else:
             subprocess.run(["notify-send", title, msg], capture_output=True, timeout=5)
     except Exception:
@@ -43,11 +91,21 @@ def _wake_agent(name: str) -> bool:
         wake = None
     if not wake:
         return False
-    prompt = "Run `bridge inbox`; if a task is pending, claim and complete it, then `bridge done`."
+    prompt = (
+        "Run `bridge inbox`. Claim ALL pending tasks. "
+        "Complete each one, marking done with `bridge done`. "
+        "Keep going until `bridge inbox` is empty. "
+        "Then report a summary of what you completed."
+    )
     try:
-        subprocess.Popen(wake.split() + [prompt],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+        env = os.environ.copy()
+        env["AGENT_BRIDGE_NAME"] = name
+        kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "env": env}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen(wake.split() + [prompt], **kwargs)
         return True
     except Exception:
         return False
@@ -153,7 +211,9 @@ def activity_path(project_id: str = "default") -> Path:
 # ponytail: cwd-prefix match like git repo discovery; "default" (unbound) stays open.
 
 def _under(child: str, parent: str) -> bool:
-    return child == parent or child.startswith(parent + os.sep)
+    c = os.path.normcase(os.path.normpath(child))
+    p = os.path.normcase(os.path.normpath(parent))
+    return c == p or c.startswith(p + os.sep)
 
 
 def project_workspace(pid: str) -> str | None:
@@ -209,12 +269,8 @@ def read_board(path: Path) -> dict:
     """Read board.json with shared lock (for read-only operations)."""
     if not path.exists():
         return {"version": BOARD_VERSION, "tasks": []}
-    with open(path, "r") as f:
-        fcntl.flock(f, fcntl.LOCK_SH)
-        try:
-            return json.load(f)
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+    with _locked_file(str(path), "r") as f:
+        return json.load(f)
 
 
 def atomic_update_board(path: Path, update_fn):
@@ -224,20 +280,16 @@ def atomic_update_board(path: Path, update_fn):
         with open(path, "w") as f:
             json.dump({"version": BOARD_VERSION, "tasks": []}, f)
     # ponytail: open with r+ to read AND write under one lock
-    with open(path, "r+") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            f.seek(0)
-            board = json.load(f)
-            board = update_fn(board)
-            board["version"] = BOARD_VERSION
-            f.seek(0)
-            f.truncate()
-            json.dump(board, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+    with _locked_file(str(path), "r+") as f:
+        f.seek(0)
+        board = json.load(f)
+        board = update_fn(board)
+        board["version"] = BOARD_VERSION
+        f.seek(0)
+        f.truncate()
+        json.dump(board, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def write_board(path: Path, data: dict):
@@ -245,14 +297,10 @@ def write_board(path: Path, data: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     data["version"] = BOARD_VERSION
-    with open(tmp, "w") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            json.dump(data, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+    with _locked_file(str(tmp), "w") as f:
+        json.dump(data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
 
 
@@ -262,39 +310,25 @@ def append_activity(project_id: str, entry: dict):
     ap.parent.mkdir(parents=True, exist_ok=True)
     entry["ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     with open(ap, "a") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
-    # ponytail: rotate if over limit — keep only recent half
-    _maybe_rotate(ap)
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def _maybe_rotate(ap: Path):
     """Truncate activity.jsonl to half if over MAX_ACTIVITY_ENTRIES."""
     if not ap.exists():
         return
-    with open(ap, "r") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            lines = f.readlines()
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+    with _locked_file(str(ap), "r") as f:
+        lines = f.readlines()
     if len(lines) <= MAX_ACTIVITY_ENTRIES:
         return
     keep = lines[len(lines) // 2:]
     tmp = ap.with_suffix(".tmp")
-    with open(tmp, "w") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            f.writelines(keep)
-            f.flush()
-            os.fsync(f.fileno())
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+    with _locked_file(str(tmp), "w") as f:
+        f.writelines(keep)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, ap)
 
 
