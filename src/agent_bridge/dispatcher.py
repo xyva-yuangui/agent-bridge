@@ -27,6 +27,12 @@ DEFAULT_BATCH_SIZE = 32
 DEFAULT_MAX_ATTEMPTS = 5
 MAX_RETRY_SECONDS = 300.0
 EFFECT_GUARD_SECONDS = 0.02
+WORKER_TERMINATE_SECONDS = 0.10
+WORKER_KILL_SECONDS = 0.10
+STATE_WRITE_RESERVE_SECONDS = 0.10
+EFFECT_CLEANUP_RESERVE_SECONDS = (
+    WORKER_TERMINATE_SECONDS + WORKER_KILL_SECONDS + STATE_WRITE_RESERVE_SECONDS
+)
 
 
 @dataclass(frozen=True)
@@ -160,16 +166,16 @@ class Dispatcher:
                     return delivered, retried, failed
             representative = group[0]
             remaining = deadline_at - time.monotonic()
-            if remaining <= EFFECT_GUARD_SECONDS:
+            if remaining <= EFFECT_CLEANUP_RESERVE_SECONDS:
                 self._deadline_reached = True
                 return self._retry_group(group, channel, "burst deadline leaves no safe effect budget")
-            timeout_seconds = remaining - EFFECT_GUARD_SECONDS
-            if not self._renew_lease(timeout_seconds + EFFECT_GUARD_SECONDS):
+            timeout_seconds = remaining - EFFECT_CLEANUP_RESERVE_SECONDS
+            if not self._renew_lease(timeout_seconds + EFFECT_CLEANUP_RESERVE_SECONDS):
                 self._lease_lost = True
                 return delivered, retried, failed
             try:
                 completed, result = _invoke_bounded(
-                    adapter, representative, representative.idempotency_key, timeout_seconds
+                    adapter, representative, representative.idempotency_key, timeout_seconds, deadline_at
                 )
                 if not completed:
                     self._deadline_reached = True
@@ -188,13 +194,17 @@ class Dispatcher:
                 # This hook intentionally sits after the external effect and
                 # before durable completion so fault tests exercise that gap.
                 hook_remaining = deadline_at - time.monotonic()
-                if hook_remaining <= EFFECT_GUARD_SECONDS:
+                if hook_remaining <= EFFECT_CLEANUP_RESERVE_SECONDS:
                     self._deadline_reached = True
                     return self._retry_group(
                         group, channel, "burst deadline leaves no safe hook budget"
                     )
                 hook_completed, ignored = _after_effect_bounded(
-                    self.after_effect, representative, status, hook_remaining - EFFECT_GUARD_SECONDS
+                    self.after_effect,
+                    representative,
+                    status,
+                    hook_remaining - EFFECT_CLEANUP_RESERVE_SECONDS,
+                    deadline_at,
                 )
                 if not hook_completed:
                     self._deadline_reached = True
@@ -394,7 +404,11 @@ def _invoke(adapter: DeliveryChannel, item: OutboxItem, idempotency_key: str, ti
 
 
 def _invoke_bounded(
-    adapter: DeliveryChannel, item: OutboxItem, idempotency_key: str, timeout_seconds: float
+    adapter: DeliveryChannel,
+    item: OutboxItem,
+    idempotency_key: str,
+    timeout_seconds: float,
+    deadline_at: float,
 ) -> Tuple[bool, Any]:
     """Run a pickleable adapter in a killable child process.
 
@@ -413,13 +427,14 @@ def _invoke_bounded(
     try:
         worker.start()
         started = True
-        if not receiver.poll(max(0.0, timeout_seconds)):
-            if not _terminate_worker(worker):
+        wait_seconds = min(timeout_seconds, _effect_wait_budget(deadline_at))
+        if wait_seconds <= 0.0 or not receiver.poll(wait_seconds):
+            if not _terminate_worker(worker, deadline_at):
                 raise RuntimeError("delivery worker did not terminate")
             return False, None
         kind, value = receiver.recv()
-        worker.join(0.25)
-        if worker.is_alive() and not _terminate_worker(worker):
+        worker.join(_remaining(deadline_at))
+        if worker.is_alive() and not _terminate_worker(worker, deadline_at):
             raise RuntimeError("delivery worker did not exit")
         if kind == "error":
             raise RuntimeError(str(value))
@@ -432,8 +447,8 @@ def _invoke_bounded(
             pass
         if started:
             if worker.is_alive():
-                _terminate_worker(worker)
-            worker.join(0.25)
+                _terminate_worker(worker, deadline_at)
+            worker.join(_remaining(deadline_at))
 
 
 def _after_effect_bounded(
@@ -441,6 +456,7 @@ def _after_effect_bounded(
     item: OutboxItem,
     status: DeliveryStatus,
     timeout_seconds: float,
+    deadline_at: float,
 ) -> Tuple[bool, Any]:
     context = multiprocessing.get_context("spawn")
     receiver, sender = context.Pipe(duplex=False)
@@ -453,13 +469,14 @@ def _after_effect_bounded(
     try:
         worker.start()
         started = True
-        if not receiver.poll(max(0.0, timeout_seconds)):
-            if not _terminate_worker(worker):
+        wait_seconds = min(timeout_seconds, _effect_wait_budget(deadline_at))
+        if wait_seconds <= 0.0 or not receiver.poll(wait_seconds):
+            if not _terminate_worker(worker, deadline_at):
                 raise RuntimeError("delivery hook worker did not terminate")
             return False, None
         kind, value = receiver.recv()
-        worker.join(0.25)
-        if worker.is_alive() and not _terminate_worker(worker):
+        worker.join(_remaining(deadline_at))
+        if worker.is_alive() and not _terminate_worker(worker, deadline_at):
             raise RuntimeError("delivery hook worker did not exit")
         if kind == "error":
             raise RuntimeError(str(value))
@@ -472,8 +489,8 @@ def _after_effect_bounded(
             pass
         if started:
             if worker.is_alive():
-                _terminate_worker(worker)
-            worker.join(0.25)
+                _terminate_worker(worker, deadline_at)
+            worker.join(_remaining(deadline_at))
 
 
 def _adapter_worker(
@@ -506,13 +523,21 @@ def _after_effect_worker(
         sender.close()
 
 
-def _terminate_worker(worker: Any) -> bool:
+def _terminate_worker(worker: Any, deadline_at: float) -> bool:
     worker.terminate()
-    worker.join(0.25)
+    worker.join(min(WORKER_TERMINATE_SECONDS, _remaining(deadline_at)))
     if worker.is_alive() and hasattr(worker, "kill"):
         worker.kill()
-        worker.join(0.25)
+        worker.join(min(WORKER_KILL_SECONDS, _remaining(deadline_at)))
     return not worker.is_alive()
+
+
+def _remaining(deadline_at: float) -> float:
+    return max(0.0, deadline_at - time.monotonic())
+
+
+def _effect_wait_budget(deadline_at: float) -> float:
+    return max(0.0, _remaining(deadline_at) - EFFECT_CLEANUP_RESERVE_SECONDS)
 
 
 def _delivery_status(value: object) -> DeliveryStatus:

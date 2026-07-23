@@ -133,7 +133,7 @@ class DispatcherTests(unittest.TestCase):
 
         self.assertTrue(blocking.started.wait(0.5))
         self.assertTrue(report.timed_out)
-        self.assertLess(time.monotonic() - started, 1.2)
+        self.assertLess(time.monotonic() - started, 0.8)
         second_store = Store.open(self.path)
         self.second_store = second_store
         competing = self._recording()
