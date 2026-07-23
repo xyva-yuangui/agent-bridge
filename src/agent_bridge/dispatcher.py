@@ -489,12 +489,12 @@ def _invoke_bounded(
             return False, None
         wait_seconds = min(timeout_seconds, _effect_wait_budget(deadline_at))
         if wait_seconds <= 0.0 or not receiver.poll(wait_seconds):
-            if not _terminate_worker(worker, deadline_at):
+            if not _terminate_worker(worker, deadline_at, conclusive=True):
                 raise RuntimeError("delivery worker did not terminate")
             return False, None
         kind, value = receiver.recv()
         worker.join(_remaining(deadline_at))
-        if worker.is_alive() and not _terminate_worker(worker, deadline_at):
+        if worker.is_alive() and not _terminate_worker(worker, deadline_at, conclusive=True):
             raise RuntimeError("delivery worker did not exit")
         if kind == "error":
             raise RuntimeError(str(value))
@@ -507,8 +507,8 @@ def _invoke_bounded(
             pass
         if started:
             if worker.is_alive():
-                _terminate_worker(worker, deadline_at)
-            worker.join(_remaining(deadline_at))
+                _terminate_worker(worker, deadline_at, conclusive=True)
+            worker.join()
 
 
 def _after_effect_bounded(
@@ -537,12 +537,12 @@ def _after_effect_bounded(
             return False, None
         wait_seconds = min(timeout_seconds, _effect_wait_budget(deadline_at))
         if wait_seconds <= 0.0 or not receiver.poll(wait_seconds):
-            if not _terminate_worker(worker, deadline_at):
+            if not _terminate_worker(worker, deadline_at, conclusive=True):
                 raise RuntimeError("delivery hook worker did not terminate")
             return False, None
         kind, value = receiver.recv()
         worker.join(_remaining(deadline_at))
-        if worker.is_alive() and not _terminate_worker(worker, deadline_at):
+        if worker.is_alive() and not _terminate_worker(worker, deadline_at, conclusive=True):
             raise RuntimeError("delivery hook worker did not exit")
         if kind == "error":
             raise RuntimeError(str(value))
@@ -555,8 +555,8 @@ def _after_effect_bounded(
             pass
         if started:
             if worker.is_alive():
-                _terminate_worker(worker, deadline_at)
-            worker.join(_remaining(deadline_at))
+                _terminate_worker(worker, deadline_at, conclusive=True)
+            worker.join()
 
 
 def _adapter_worker(

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_bridge.cli import execute_command
+from agent_bridge import dispatcher as dispatcher_module
 from agent_bridge.delivery import DeliveryChannel
 from agent_bridge.dispatcher import Dispatcher
 from agent_bridge.models import DeliveryStatus
@@ -219,6 +220,21 @@ class DispatcherTests(unittest.TestCase):
             Dispatcher(self.store, {"notification": channel}).run_burst(0.6)
 
         self.assertEqual(list(channel.effects), [])
+        self.assertFalse(any(
+            child.name == "agent-bridge-delivery" and child.is_alive()
+            for child in multiprocessing.active_children()
+        ))
+
+    def test_normal_timeout_uses_conclusive_cleanup_without_live_child(self) -> None:
+        self._outbox_item()
+        blocking = BlockingChannel(self.manager.Event(), self.manager.Event(), self.manager.list())
+
+        with patch("agent_bridge.dispatcher._terminate_worker", wraps=dispatcher_module._terminate_worker) as terminated:
+            report = Dispatcher(self.store, {"notification": blocking}, lease_seconds=1.0).run_burst(0.8)
+
+        self.assertTrue(report.timed_out)
+        self.assertTrue(blocking.started.wait(0.5))
+        self.assertTrue(any(call.kwargs.get("conclusive") is True for call in terminated.call_args_list))
         self.assertFalse(any(
             child.name == "agent-bridge-delivery" and child.is_alive()
             for child in multiprocessing.active_children()
