@@ -8,7 +8,9 @@ Date: 2026-07-23
 - Base: `0f9662e`
 - Candidate code: `0743613`
 - Review range: `0f9662e..HEAD` (includes this acceptance report)
-- Canonical source: `C:\tmp\roundtable`
+- Review checkout:
+  `C:\tmp\roundtable\.worktrees\cross-platform-fixes`
+- Canonical repository after integration: `C:\tmp\roundtable`
 
 ## Requirements addressed
 
@@ -30,7 +32,7 @@ Date: 2026-07-23
 
 ## Windows evidence
 
-Run from `C:\tmp\roundtable`:
+Run from the review checkout listed above:
 
 ```powershell
 python -m unittest discover -s tests -v
