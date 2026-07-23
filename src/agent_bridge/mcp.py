@@ -43,7 +43,7 @@ TOOL_SCHEMAS = {
     "question": _schema({"task_id": STRING, "body": STRING, "actor": STRING}, ("task_id", "body")),
     "answer": _schema({"task_id": STRING, "body": STRING, "actor": STRING}, ("task_id", "body")),
     "review": _schema({"task_id": STRING, "verdict": {"type": "string", "enum": ["approve", "changes"]}, "body": STRING, "actor": STRING}, ("task_id",)),
-    "wake": _schema({"agent": STRING}, ("agent",)),
+    "wake": _schema({"agent": STRING, "project": STRING}, ("agent",)),
     "agents": _schema({}),
     "activity": _schema({"project": STRING, "since": STRING}),
     "context": _schema({"project": STRING, "show": BOOLEAN, "add": STRING}),

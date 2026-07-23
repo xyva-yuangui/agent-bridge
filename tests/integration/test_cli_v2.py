@@ -9,6 +9,7 @@ import unittest
 import sqlite3
 from pathlib import Path
 from typing import Optional
+from unittest.mock import patch
 
 from agent_bridge.models import TaskState
 from agent_bridge.cli import execute_command
@@ -120,13 +121,27 @@ class CliV2Tests(unittest.TestCase):
             finally:
                 connection.close()
 
-    def test_wake_is_explicitly_unavailable_until_launcher_exists(self):
+    def test_wake_uses_the_locally_configured_safe_launcher(self):
         with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            run_module("agent_bridge.cli", "--as", "codex", "send", "--to", "zcode", "--subject", "Wake", home=home)
-            result = run_module("agent_bridge.cli", "wake", "zcode", home=home)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("unavailable", result.stderr)
+            store = Store.open(Path(directory) / "agent-bridge.sqlite3")
+            service = BridgeService(store)
+            workspace = Path(directory) / "workspace"
+            workspace.mkdir()
+            try:
+                with store.transaction(immediate=True) as connection:
+                    connection.execute("INSERT INTO projects(id, path) VALUES (?, ?)", ("project", str(workspace)))
+                    connection.execute(
+                        "INSERT INTO agents(name, execution_policy, launch_argv_json, workspace_allowlist_json) VALUES (?, 'auto', ?, ?)",
+                        ("zcode", json.dumps([sys.executable, "-c", "pass"]), json.dumps([str(workspace)])),
+                    )
+                with patch("agent_bridge.launchers.subprocess.Popen") as popen:
+                    popen.return_value.pid = 42
+                    result = execute_command(service, "codex", "wake", {"agent": "zcode", "project": "project"})
+            finally:
+                store.close()
+        self.assertTrue(result["launch"]["started"])
+        self.assertEqual(result["launch"]["pid"], 42)
+        self.assertFalse(popen.call_args.kwargs["shell"])
 
     def test_doctor_strict_reports_schema_version_failures(self):
         with tempfile.TemporaryDirectory() as directory:

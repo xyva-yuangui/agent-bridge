@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 from . import dispatcher
+from .launchers import LaunchDeliveryChannel, launch_stored_agent
 from .migrate_v1 import export_json, import_v1
 from .paths import get_data_root
 from .presentation import configure_streams, error_view, render, task_page, task_view, tasks_view
@@ -81,7 +82,11 @@ def execute_command(
     if command in UNAVAILABLE_COMMANDS:
         raise CommandUnavailable("{0} is unavailable in the v2 service layer".format(command))
     if command == "dispatch":
-        report = dispatcher.Dispatcher(service.store).run_burst()
+        configured = service.store.scalar(
+            "SELECT 1 FROM agents WHERE execution_policy = 'auto' AND launch_argv_json <> '[]' LIMIT 1"
+        )
+        channels = {"launcher": LaunchDeliveryChannel(str(service.store.path))} if configured else {}
+        report = dispatcher.Dispatcher(service.store, channels).run_burst()
         return {"dispatch": {
             "acquired": report.acquired,
             "processed": report.processed,
@@ -135,7 +140,14 @@ def execute_command(
         rows = service.store.connection.execute("SELECT * FROM agents ORDER BY name").fetchall()
         return {"agents": [dict(row) for row in rows]}
     if command == "wake":
-        raise CommandUnavailable("wake is unavailable until launcher support is installed")
+        agent = str(_argument(arguments, "agent"))
+        row = service.store.connection.execute(
+            "SELECT path FROM projects WHERE id = ?", (project_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError("unknown project: {0}".format(project_id))
+        result = launch_stored_agent(service.store, agent, str(row["path"]))
+        return {"launch": {"started": result.started, "reason": result.reason, "pid": result.pid}}
     if command == "who-coordinates":
         return {"project_id": project_id, "coordinator": _metadata(service, "coordinator:" + project_id)}
     if command == "context":
@@ -273,7 +285,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("question", "answer"):
         item = command(name); item.add_argument("task_id"); item.add_argument("--body", required=True)
     review = command("review"); review.add_argument("task_id"); review.add_argument("--verdict", choices=("approve", "changes")); review.add_argument("--body", default="")
-    wake = command("wake"); wake.add_argument("agent")
+    wake = command("wake"); wake.add_argument("agent"); wake.add_argument("--project", default="default")
     command("agents")
     activity = command("activity"); activity.add_argument("--project", default="default"); activity.add_argument("--since")
     context = command("context"); context.add_argument("--project", default="default"); context.add_argument("--show", action="store_true"); context.add_argument("--add")
