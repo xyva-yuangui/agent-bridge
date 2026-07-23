@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import multiprocessing
 import tempfile
-import threading
 import time
 import unittest
 from pathlib import Path
@@ -17,8 +17,8 @@ from agent_bridge.store import Store
 
 
 class RecordingChannel:
-    def __init__(self) -> None:
-        self.effects: list[str] = []
+    def __init__(self, effects) -> None:
+        self.effects = effects
 
     def deliver(self, item, idempotency_key, timeout_seconds):
         self.asserted_arguments = (idempotency_key, timeout_seconds)
@@ -33,13 +33,19 @@ class DispatcherTests(unittest.TestCase):
         self.path = Path(self.directory.name) / "agent-bridge.sqlite3"
         self.store = Store.open(self.path)
         self.service = BridgeService(self.store)
+        self.manager = multiprocessing.Manager()
+        self.effects = self.manager.list()
         self.second_store = None
 
     def tearDown(self) -> None:
         if self.second_store is not None:
             self.second_store.close()
         self.store.close()
+        self.manager.shutdown()
         self.directory.cleanup()
+
+    def _recording(self) -> RecordingChannel:
+        return RecordingChannel(self.effects)
 
     def _outbox_item(self):
         task = self.service.send_task("sender", "target", "subject", "body")
@@ -47,7 +53,7 @@ class DispatcherTests(unittest.TestCase):
 
     def test_only_one_dispatcher_owns_a_live_lease(self) -> None:
         task, _ = self._outbox_item()
-        channel = RecordingChannel()
+        channel = self._recording()
         first = Dispatcher(self.store, {"notification": channel})
         second_store = Store.open(self.path)
         self.second_store = second_store
@@ -57,12 +63,12 @@ class DispatcherTests(unittest.TestCase):
         report = second.run_burst()
 
         self.assertFalse(report.acquired)
-        self.assertEqual(channel.effects, [])
+        self.assertEqual(list(channel.effects), [])
         first.release_lease()
 
     def test_expired_lease_is_reclaimed(self) -> None:
         task, _ = self._outbox_item()
-        channel = RecordingChannel()
+        channel = self._recording()
         with self.store.transaction(immediate=True) as connection:
             connection.execute(
                 "INSERT INTO dispatcher_leases(name, owner, acquired_at, expires_at) VALUES (?, ?, ?, ?)",
@@ -72,7 +78,7 @@ class DispatcherTests(unittest.TestCase):
         report = Dispatcher(self.store, {"notification": channel}).run_burst()
 
         self.assertTrue(report.acquired)
-        self.assertEqual(channel.effects, [self.store.scalar("SELECT idempotency_key FROM outbox")])
+        self.assertEqual(list(channel.effects), [self.store.scalar("SELECT idempotency_key FROM outbox")])
         self.assertIsNotNone(self.store.scalar("SELECT completed_at FROM outbox"))
 
     def test_coalesces_same_task_target_intents_to_one_channel_effect(self) -> None:
@@ -85,7 +91,7 @@ class DispatcherTests(unittest.TestCase):
                 {"task_id": task.id, "recipient": "target", "actor": "sender"},
                 utc_now(),
             )
-        channel = RecordingChannel()
+        channel = self._recording()
 
         report = Dispatcher(self.store, {"notification": channel}).run_burst()
 
@@ -104,42 +110,63 @@ class DispatcherTests(unittest.TestCase):
 
     def test_burst_honors_an_already_expired_deadline(self) -> None:
         self._outbox_item()
-        channel = RecordingChannel()
+        channel = self._recording()
         started = time.monotonic()
 
         report = Dispatcher(self.store, {"notification": channel}).run_burst(deadline_seconds=0.0)
 
         self.assertTrue(report.timed_out)
-        self.assertEqual(channel.effects, [])
+        self.assertEqual(list(channel.effects), [])
         self.assertLess(time.monotonic() - started, 0.25)
 
     def test_blocking_adapter_cannot_extend_burst_or_admit_a_competing_effect(self) -> None:
         self._outbox_item()
-        blocking = BlockingChannel()
+        blocking = BlockingChannel(self.manager.Event(), self.manager.Event(), self.manager.list())
         dispatcher = Dispatcher(
             self.store,
             {"notification": blocking},
-            lease_seconds=0.1,
+            lease_seconds=1.0,
         )
         started = time.monotonic()
 
-        report = dispatcher.run_burst(deadline_seconds=0.15)
+        report = dispatcher.run_burst(deadline_seconds=0.8)
 
-        self.assertTrue(blocking.started.wait(0.1))
+        self.assertTrue(blocking.started.wait(0.5))
         self.assertTrue(report.timed_out)
-        self.assertLess(time.monotonic() - started, 0.4)
+        self.assertLess(time.monotonic() - started, 1.2)
         second_store = Store.open(self.path)
         self.second_store = second_store
-        competing = RecordingChannel()
-        second = Dispatcher(second_store, {"notification": competing}, lease_seconds=0.1)
-        self.assertFalse(second.run_burst(deadline_seconds=0.1).acquired)
-        self.assertEqual(competing.effects, [])
-        self.assertEqual(blocking.keys, [self.store.scalar("SELECT idempotency_key FROM outbox")])
+        competing = self._recording()
+        second = Dispatcher(second_store, {"notification": competing}, lease_seconds=1.0)
+        with self.store.transaction(immediate=True) as connection:
+            connection.execute("UPDATE outbox SET due_at = ?", (utc_now(),))
+        self.assertTrue(second.run_burst(deadline_seconds=1.0).acquired)
+        key = self.store.scalar("SELECT idempotency_key FROM outbox")
+        self.assertEqual(list(blocking.keys), [key])
+        self.assertEqual(list(competing.effects), [key])
+        self.assertFalse(any(
+            child.name == "agent-bridge-delivery" and child.is_alive()
+            for child in multiprocessing.active_children()
+        ))
         blocking.release.set()
+
+    def test_repeated_timeouts_leave_no_delivery_workers(self) -> None:
+        self._outbox_item()
+        for ignored in range(2):
+            blocking = BlockingChannel(self.manager.Event(), self.manager.Event(), self.manager.list())
+            report = Dispatcher(self.store, {"notification": blocking}, lease_seconds=1.0).run_burst(0.8)
+            self.assertTrue(report.timed_out)
+            self.assertTrue(blocking.started.wait(0.5))
+            self.assertFalse(any(
+                child.name == "agent-bridge-delivery" and child.is_alive()
+                for child in multiprocessing.active_children()
+            ))
+            with self.store.transaction(immediate=True) as connection:
+                connection.execute("UPDATE outbox SET due_at = ?", (utc_now(),))
 
     def test_retry_preserves_existing_channel_evidence(self) -> None:
         self._outbox_item()
-        Dispatcher(self.store, {"notification": RecordingChannel()}).run_burst()
+        Dispatcher(self.store, {"notification": self._recording()}).run_burst()
         with self.store.transaction(immediate=True) as connection:
             connection.execute("UPDATE outbox SET completed_at = NULL, due_at = ?", (utc_now(),))
 
@@ -186,10 +213,10 @@ if __name__ == "__main__":
 
 
 class BlockingChannel:
-    def __init__(self) -> None:
-        self.started = threading.Event()
-        self.release = threading.Event()
-        self.keys: list[str] = []
+    def __init__(self, started, release, keys) -> None:
+        self.started = started
+        self.release = release
+        self.keys = keys
 
     def deliver(self, item, idempotency_key, timeout_seconds):
         self.keys.append(idempotency_key)

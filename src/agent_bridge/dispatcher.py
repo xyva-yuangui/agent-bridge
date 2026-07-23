@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import os
+import multiprocessing
 import random
 import subprocess
 import sys
-import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -27,7 +27,6 @@ DEFAULT_BATCH_SIZE = 32
 DEFAULT_MAX_ATTEMPTS = 5
 MAX_RETRY_SECONDS = 300.0
 EFFECT_GUARD_SECONDS = 0.02
-EFFECT_FENCE_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -73,7 +72,6 @@ class Dispatcher:
         self.lease_seconds = lease_seconds
         self.after_effect = after_effect
         self.owner = uuid.uuid4().hex
-        self._retain_lease = False
         self._lease_lost = False
         self._deadline_reached = False
 
@@ -136,8 +134,7 @@ class Dispatcher:
                 if timed_out or self._lease_lost:
                     break
         finally:
-            if not self._retain_lease:
-                self.release_lease()
+            self.release_lease()
         return DispatchReport(
             acquired=True,
             processed=processed,
@@ -158,7 +155,9 @@ class Dispatcher:
         delivered = retried = failed = 0
         for channel, adapter in self.channels.items():
             for item in group:
-                self._mark_dispatching(item, channel)
+                if not self._mark_dispatching(item, channel):
+                    self._lease_lost = True
+                    return delivered, retried, failed
             representative = group[0]
             remaining = deadline_at - time.monotonic()
             if remaining <= EFFECT_GUARD_SECONDS:
@@ -173,10 +172,9 @@ class Dispatcher:
                     adapter, representative, representative.idempotency_key, timeout_seconds
                 )
                 if not completed:
-                    self._fence_timed_out_call()
                     self._deadline_reached = True
                     return self._retry_group(
-                        group, channel, "channel exceeded bounded timeout", EFFECT_FENCE_SECONDS + 1.0
+                        group, channel, "channel exceeded bounded timeout"
                     )
                 status = _delivery_status(result)
                 if status not in EVIDENCE_RANK or EVIDENCE_RANK[status] < EVIDENCE_RANK[DeliveryStatus.OS_POSTED]:
@@ -191,20 +189,16 @@ class Dispatcher:
                 # before durable completion so fault tests exercise that gap.
                 hook_remaining = deadline_at - time.monotonic()
                 if hook_remaining <= EFFECT_GUARD_SECONDS:
-                    self._fence_timed_out_call()
                     self._deadline_reached = True
                     return self._retry_group(
-                        group, channel, "burst deadline leaves no safe hook budget", EFFECT_FENCE_SECONDS + 1.0
+                        group, channel, "burst deadline leaves no safe hook budget"
                     )
-                hook_completed, ignored = _call_bounded(
-                    lambda: self.after_effect(representative, status), hook_remaining - EFFECT_GUARD_SECONDS
+                hook_completed, ignored = _after_effect_bounded(
+                    self.after_effect, representative, status, hook_remaining - EFFECT_GUARD_SECONDS
                 )
                 if not hook_completed:
-                    self._fence_timed_out_call()
                     self._deadline_reached = True
-                    return self._retry_group(
-                        group, channel, "after-effect hook exceeded bounded timeout", EFFECT_FENCE_SECONDS + 1.0
-                    )
+                    return self._retry_group(group, channel, "after-effect hook exceeded bounded timeout")
             for item in group:
                 if not self._record_evidence(item, channel, status):
                     self._lease_lost = True
@@ -217,13 +211,18 @@ class Dispatcher:
             delivered = len(group)
         return delivered, retried, failed
 
-    def _mark_dispatching(self, item: OutboxItem, channel: str) -> None:
+    def _mark_dispatching(self, item: OutboxItem, channel: str) -> bool:
         task_id = _task_id(item)
         if task_id is None:
             raise ValueError("outbox item has no task_id")
         now = utc_now()
         with self.store.transaction(immediate=True) as connection:
-            connection.execute("UPDATE outbox SET attempts = attempts + 1 WHERE id = ?", (item.id,))
+            if not _connection_can_mutate_item(connection, self.owner, item.id):
+                return False
+            if connection.execute(
+                "UPDATE outbox SET attempts = attempts + 1 WHERE id = ? AND completed_at IS NULL", (item.id,)
+            ).rowcount != 1:
+                return False
             connection.execute(
                 "INSERT INTO delivery_attempts(task_id, channel, status, attempts, created_at, updated_at, error, idempotency_key) "
                 "VALUES (?, ?, ?, 1, ?, ?, NULL, ?) "
@@ -234,10 +233,11 @@ class Dispatcher:
                 "attempts = delivery_attempts.attempts + 1, updated_at = excluded.updated_at, error = NULL",
                 (task_id, channel, DeliveryStatus.DISPATCHING.value, now, now, _attempt_key(item, channel)),
             )
+            return True
 
     def _record_evidence(self, item: OutboxItem, channel: str, status: DeliveryStatus) -> bool:
         with self.store.transaction(immediate=True) as connection:
-            if not _connection_has_live_lease(connection, self.owner):
+            if not _connection_can_mutate_item(connection, self.owner, item.id):
                 return False
             row = connection.execute(
                 "SELECT status FROM delivery_attempts WHERE idempotency_key = ?", (_attempt_key(item, channel),)
@@ -258,18 +258,29 @@ class Dispatcher:
         for item in group:
             # An unavailable channel did not have a dispatching record yet.
             if channel == "unavailable":
-                self._mark_dispatching(item, channel)
+                if not self._mark_dispatching(item, channel):
+                    self._lease_lost = True
+                    continue
             final = self._retry_or_fail(item, channel, error, minimum_delay)
+            if final is None:
+                self._lease_lost = True
+                continue
             failed += int(final)
             retried += int(not final)
         return 0, retried, failed
 
-    def _retry_or_fail(self, item: OutboxItem, channel: str, error: str, minimum_delay: float = 0.0) -> bool:
+    def _retry_or_fail(
+        self, item: OutboxItem, channel: str, error: str, minimum_delay: float = 0.0
+    ) -> Optional[bool]:
         now = utc_now()
         with self.store.transaction(immediate=True) as connection:
-            row = connection.execute("SELECT attempts FROM outbox WHERE id = ?", (item.id,)).fetchone()
+            if not _connection_can_mutate_item(connection, self.owner, item.id):
+                return None
+            row = connection.execute(
+                "SELECT attempts FROM outbox WHERE id = ? AND completed_at IS NULL", (item.id,)
+            ).fetchone()
             if row is None:
-                return True
+                return None
             attempts = int(row["attempts"])
             terminal = attempts >= self.max_attempts
             status = DeliveryStatus.FAILED if terminal else DeliveryStatus.RETRY_WAIT
@@ -304,19 +315,9 @@ class Dispatcher:
                 (now, expires_at, LEASE_NAME, self.owner, now),
             ).rowcount == 1
 
-    def _fence_timed_out_call(self) -> None:
-        """Keep a timed-out uncooperative call fenced until its retry is due."""
-        now = utc_now()
-        with self.store.transaction(immediate=True) as connection:
-            connection.execute(
-                "UPDATE dispatcher_leases SET expires_at = ? WHERE name = ? AND owner = ? AND expires_at > ?",
-                (_after_seconds(EFFECT_FENCE_SECONDS), LEASE_NAME, self.owner, now),
-            )
-        self._retain_lease = True
-
     def _complete(self, item: OutboxItem) -> bool:
         with self.store.transaction(immediate=True) as connection:
-            if not _connection_has_live_lease(connection, self.owner):
+            if not _connection_can_mutate_item(connection, self.owner, item.id):
                 return False
             connection.execute(
                 "UPDATE outbox SET completed_at = ? WHERE id = ? AND completed_at IS NULL", (utc_now(), item.id)
@@ -371,10 +372,12 @@ def _task_id(item: OutboxItem) -> Optional[str]:
     return value if isinstance(value, str) and value else None
 
 
-def _connection_has_live_lease(connection: Any, owner: str) -> bool:
+def _connection_can_mutate_item(connection: Any, owner: str, item_id: int) -> bool:
     row = connection.execute(
-        "SELECT 1 FROM dispatcher_leases WHERE name = ? AND owner = ? AND expires_at > ?",
-        (LEASE_NAME, owner, utc_now()),
+        "SELECT 1 FROM dispatcher_leases JOIN outbox ON outbox.id = ? "
+        "WHERE dispatcher_leases.name = ? AND dispatcher_leases.owner = ? "
+        "AND dispatcher_leases.expires_at > ? AND outbox.completed_at IS NULL",
+        (item_id, LEASE_NAME, owner, utc_now()),
     ).fetchone()
     return row is not None
 
@@ -393,30 +396,123 @@ def _invoke(adapter: DeliveryChannel, item: OutboxItem, idempotency_key: str, ti
 def _invoke_bounded(
     adapter: DeliveryChannel, item: OutboxItem, idempotency_key: str, timeout_seconds: float
 ) -> Tuple[bool, Any]:
-    """Return on deadline even when a third-party adapter ignores its timeout."""
-    return _call_bounded(lambda: _invoke(adapter, item, idempotency_key, timeout_seconds), timeout_seconds)
+    """Run a pickleable adapter in a killable child process.
 
-
-def _call_bounded(call: Callable[[], Any], timeout_seconds: float) -> Tuple[bool, Any]:
-    result = []
-    error = []
-    done = threading.Event()
-
-    def runner() -> None:
+    ``spawn`` is used everywhere so the contract is equally explicit on
+    Windows and POSIX: built-in adapters must be top-level/pickleable and may
+    only communicate their result through the worker return value.
+    """
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    worker = context.Process(
+        target=_adapter_worker,
+        args=(adapter, item, idempotency_key, timeout_seconds, sender),
+        name="agent-bridge-delivery",
+    )
+    started = False
+    try:
+        worker.start()
+        started = True
+        if not receiver.poll(max(0.0, timeout_seconds)):
+            if not _terminate_worker(worker):
+                raise RuntimeError("delivery worker did not terminate")
+            return False, None
+        kind, value = receiver.recv()
+        worker.join(0.25)
+        if worker.is_alive() and not _terminate_worker(worker):
+            raise RuntimeError("delivery worker did not exit")
+        if kind == "error":
+            raise RuntimeError(str(value))
+        return True, value
+    finally:
+        receiver.close()
         try:
-            result.append(call())
-        except BaseException as caught:
-            error.append(caught)
-        finally:
-            done.set()
+            sender.close()
+        except OSError:
+            pass
+        if started:
+            if worker.is_alive():
+                _terminate_worker(worker)
+            worker.join(0.25)
 
-    thread = threading.Thread(target=runner, name="agent-bridge-delivery", daemon=True)
-    thread.start()
-    if not done.wait(max(0.0, timeout_seconds)):
-        return False, None
-    if error:
-        raise error[0]
-    return True, result[0] if result else None
+
+def _after_effect_bounded(
+    hook: Callable[[OutboxItem, DeliveryStatus], None],
+    item: OutboxItem,
+    status: DeliveryStatus,
+    timeout_seconds: float,
+) -> Tuple[bool, Any]:
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    worker = context.Process(
+        target=_after_effect_worker,
+        args=(hook, item, status, sender),
+        name="agent-bridge-delivery-hook",
+    )
+    started = False
+    try:
+        worker.start()
+        started = True
+        if not receiver.poll(max(0.0, timeout_seconds)):
+            if not _terminate_worker(worker):
+                raise RuntimeError("delivery hook worker did not terminate")
+            return False, None
+        kind, value = receiver.recv()
+        worker.join(0.25)
+        if worker.is_alive() and not _terminate_worker(worker):
+            raise RuntimeError("delivery hook worker did not exit")
+        if kind == "error":
+            raise RuntimeError(str(value))
+        return True, value
+    finally:
+        receiver.close()
+        try:
+            sender.close()
+        except OSError:
+            pass
+        if started:
+            if worker.is_alive():
+                _terminate_worker(worker)
+            worker.join(0.25)
+
+
+def _adapter_worker(
+    adapter: DeliveryChannel,
+    item: OutboxItem,
+    idempotency_key: str,
+    timeout_seconds: float,
+    sender: Any,
+) -> None:
+    try:
+        sender.send(("ok", _invoke(adapter, item, idempotency_key, timeout_seconds)))
+    except BaseException as error:
+        sender.send(("error", "{0}: {1}".format(type(error).__name__, error)))
+    finally:
+        sender.close()
+
+
+def _after_effect_worker(
+    hook: Callable[[OutboxItem, DeliveryStatus], None],
+    item: OutboxItem,
+    status: DeliveryStatus,
+    sender: Any,
+) -> None:
+    try:
+        hook(item, status)
+        sender.send(("ok", None))
+    except BaseException as error:
+        sender.send(("error", "{0}: {1}".format(type(error).__name__, error)))
+    finally:
+        sender.close()
+
+
+def _terminate_worker(worker: Any) -> bool:
+    worker.terminate()
+    worker.join(0.25)
+    if worker.is_alive() and hasattr(worker, "kill"):
+        worker.kill()
+        worker.join(0.25)
+    return not worker.is_alive()
 
 
 def _delivery_status(value: object) -> DeliveryStatus:
