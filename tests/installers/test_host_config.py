@@ -100,20 +100,30 @@ class HostConfigurationRoundTripTests(unittest.TestCase):
     def test_install_retries_an_external_writer_without_losing_its_edit(self) -> None:
         adapter = self._adapter("claude")
         path = self._copy_fixture("claude", "unrelated.json")
-        original_write = base._atomic_write
         calls = 0
 
-        def externally_changed_write(destination, text, expected_source=None):
+        def external_writer(destination):
             nonlocal calls
             calls += 1
             if calls == 1:
                 current = json.loads(destination.read_text(encoding="utf-8"))
                 current["external_writer"] = {"preserve": True}
                 destination.write_text(json.dumps(current) + "\n", encoding="utf-8")
-            return original_write(destination, text, expected_source)
 
-        with patch("agent_bridge.adapters.base._atomic_write", side_effect=externally_changed_write):
+        with patch("agent_bridge.adapters.base._before_config_swap", side_effect=external_writer):
             self.assertTrue(adapter.install().ok)
 
         self.assertGreaterEqual(calls, 2)
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["external_writer"], {"preserve": True})
+
+    def test_failed_install_receipt_rolls_back_only_its_managed_config(self) -> None:
+        adapter = self._adapter("codex")
+        path = self._copy_fixture("codex", "unrelated.toml")
+        original = path.read_text(encoding="utf-8")
+
+        with patch.object(adapter, "_write_installation_artifact", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                adapter.install()
+
+        self.assertEqual(path.read_text(encoding="utf-8"), original)
+        self.assertFalse(adapter.installation_artifact_path.exists())

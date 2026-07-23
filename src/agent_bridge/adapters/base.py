@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import abc
+import ctypes
 import enum
 import json
 import os
 import re
 import secrets
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -206,8 +208,15 @@ class HostAdapter(abc.ABC):
         self._assert_contained(self.config_path)
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         with _config_lock(self.config_path):
-            self._install_config()
-            self._write_installation_artifact()
+            try:
+                self._install_config()
+                self._write_installation_artifact()
+            except BaseException:
+                try:
+                    self._uninstall_config()
+                finally:
+                    self._remove_installation_artifact()
+                raise
         return OperationResult(self.name, True, DeliveryStatus.QUEUED, "managed session-card consumer installed")
 
     def uninstall(self) -> OperationResult:
@@ -234,7 +243,7 @@ class HostAdapter(abc.ABC):
             "host integration is unavailable; use the terminal fallback",
         )
 
-    def notify_in_app(self, task: TaskCard) -> OperationResult:
+    def notify_in_app(self, task: TaskCard, service) -> OperationResult:
         if not isinstance(task, TaskCard):
             raise TypeError("task must be a TaskCard")
         if not self.detect().found:
@@ -255,8 +264,16 @@ class HostAdapter(abc.ABC):
             "delivery_token": token,
         }
         try:
-            self._write_card_atomically(task.task_id, payload)
+            self._write_card_temporary(task.task_id, payload)
+            service.register_host_delivery_proof(
+                task.task_id, self.name, capabilities.integration_version, capabilities.protocol_version, token,
+            )
+            self._publish_temporary_card(task.task_id)
         except (OSError, ValueError) as error:
+            try:
+                service.cancel_host_delivery_proof(task.task_id, self.name, token)
+            except Exception:
+                pass
             return OperationResult(self.name, False, DeliveryStatus.FAILED, "unable to queue a contained task card: {0}".format(error))
         return OperationResult(self.name, True, DeliveryStatus.QUEUED, "session card queued for host consumer")
 
@@ -373,19 +390,26 @@ class HostAdapter(abc.ABC):
             if cursor.is_symlink():
                 raise ValueError("host path contains a symlink")
 
-    def _write_card_atomically(self, task_id: str, payload: dict) -> None:
+    def _card_temporary_path(self, task_id: str) -> Path:
+        return self.task_card_path(task_id).with_name(task_id + ".pending.json")
+
+    def _write_card_temporary(self, task_id: str, payload: dict) -> None:
         destination = self.task_card_path(task_id)
         self._assert_contained(destination)
         self.inbox_path.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(destination.name + "." + secrets.token_hex(8) + ".tmp")
+        temporary = self._card_temporary_path(task_id)
+        self._assert_contained(temporary)
         try:
-            with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+            with temporary.open("w", encoding="utf-8", newline="\n") as stream:
                 json.dump(payload, stream, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 stream.write("\n")
-            os.replace(temporary, destination)
         finally:
-            if temporary.exists():
-                temporary.unlink()
+            pass
+
+    def _publish_temporary_card(self, task_id: str) -> None:
+        temporary = self._card_temporary_path(task_id)
+        destination = self.task_card_path(task_id)
+        os.replace(temporary, destination)
 
     def _read_card(self, task_id: str) -> Optional[dict]:
         try:
@@ -438,14 +462,14 @@ class ManagedTomlAdapter(HostAdapter):
             "protocol_version = {0}".format(capabilities.protocol_version),
             "surface = \"session_card\"",
             "inbox = {0}".format(json.dumps(str(self.inbox_path))),
-            "command = \"python\"",
+            "command = {0}".format(json.dumps(sys.executable)),
             "args = {0}".format(json.dumps(self._entrypoint()[1:])),
         )
         return "# >>> agent-bridge:{0} >>>\n{1}\n# <<< agent-bridge:{0} <<<\n".format(self.name, "\n".join(lines))
 
     def _entrypoint(self) -> list:
         return [
-            "python", "-m", "agent_bridge.adapters.integration", "serve", "--host", self.name,
+            sys.executable, "-m", "agent_bridge.adapters.integration", "serve", "--host", self.name,
             "--home", str(self.home), "--data-root", str(self.home / ".agent-bridge"),
         ]
 
@@ -486,13 +510,13 @@ class ManagedJsonAdapter(HostAdapter):
             "protocol_version": capabilities.protocol_version,
             "surface": Surface.SESSION_CARD.value,
             "inbox": str(self.inbox_path),
-            "command": "python",
+            "command": sys.executable,
             "args": self._entrypoint()[1:],
         }
 
     def _entrypoint(self) -> list:
         return [
-            "python", "-m", "agent_bridge.adapters.integration", "serve", "--host", self.name,
+            sys.executable, "-m", "agent_bridge.adapters.integration", "serve", "--host", self.name,
             "--home", str(self.home), "--data-root", str(self.home / ".agent-bridge"),
         ]
 
@@ -530,14 +554,16 @@ def _optimistic_json_update(path: Path, update) -> None:
 
 def _optimistic_update(path: Path, transform) -> None:
     """Apply a config mutation without discarding a concurrent external edit."""
+    source = path.read_text(encoding="utf-8") if path.exists() else ""
+    expected_on_disk = source
     for ignored in range(4):
-        source = path.read_text(encoding="utf-8") if path.exists() else ""
         replacement = transform(source)
-        try:
-            _atomic_write(path, replacement, source)
+        result = _atomic_write(path, replacement, expected_on_disk)
+        if result.matched:
             return
-        except _ExternalConfigChanged:
-            continue
+        source = result.displaced_source
+        current = path.read_text(encoding="utf-8") if path.exists() else ""
+        expected_on_disk = replacement if current == replacement else source
     raise RuntimeError("host config changed repeatedly; retry the operation")
 
 
@@ -569,11 +595,21 @@ class _ExternalConfigChanged(RuntimeError):
     pass
 
 
-def _atomic_write(path: Path, text: str, expected_source: Optional[str] = None) -> None:
+@dataclass(frozen=True)
+class _AtomicWriteResult:
+    matched: bool
+    displaced_source: str = ""
+
+
+def _before_config_swap(path: Path) -> None:
+    """Test seam for an uncooperative writer in the compare-to-swap window."""
+
+
+def _atomic_write(path: Path, text: str, expected_source: Optional[str] = None) -> _AtomicWriteResult:
     if expected_source is not None:
         current = path.read_text(encoding="utf-8") if path.exists() else ""
         if current != expected_source:
-            raise _ExternalConfigChanged()
+            return _AtomicWriteResult(False, current)
     descriptor, temporary_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
     temporary = Path(temporary_name)
     try:
@@ -581,7 +617,28 @@ def _atomic_write(path: Path, text: str, expected_source: Optional[str] = None) 
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(str(temporary), str(path))
+        if expected_source is None:
+            os.replace(str(temporary), str(path))
+            return _AtomicWriteResult(True)
+        _before_config_swap(path)
+        if not path.exists():
+            try:
+                os.link(str(temporary), str(path))
+            except (FileExistsError, OSError):
+                return _AtomicWriteResult(False, path.read_text(encoding="utf-8") if path.exists() else "")
+            return _AtomicWriteResult(True)
+        if os.name != "nt":
+            raise RuntimeError("safe atomic config compare-and-swap is unsupported on this platform")
+        backup = Path(tempfile.mktemp(prefix=path.name + ".", suffix=".bak", dir=str(path.parent)))
+        replaced = ctypes.windll.kernel32.ReplaceFileW(str(path), str(temporary), str(backup), 0, None, None)
+        if not replaced:
+            raise OSError(ctypes.get_last_error(), "ReplaceFileW failed")
+        displaced = backup.read_text(encoding="utf-8") if backup.exists() else ""
+        try:
+            backup.unlink()
+        except OSError:
+            pass
+        return _AtomicWriteResult(displaced == expected_source, displaced)
         try:
             parent_descriptor = os.open(str(path.parent), os.O_RDONLY)
             try:

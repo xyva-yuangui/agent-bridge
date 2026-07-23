@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +21,7 @@ class AdapterContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.home = Path(self.directory.name)
+        self.proof_service = _ProofService()
         self.task = TaskCard("task-123", "Review 路径", "Bounded task context")
         for adapter_type in ADAPTER_TYPES:
             self._provision(adapter_type(self.home))
@@ -71,10 +73,10 @@ class AdapterContractTests(unittest.TestCase):
 
         self.assertFalse(stale.detect().found)
         self.assertFalse(stale.install().ok)
-        self.assertEqual(stale.notify_in_app(self.task).status, DeliveryStatus.FAILED)
+        self.assertEqual(stale.notify_in_app(self.task, self.proof_service).status, DeliveryStatus.FAILED)
 
     def test_missing_host_is_not_reported_as_delivered(self) -> None:
-        result = ZCodeAdapter(self.home / "missing").notify_in_app(self.task)
+        result = ZCodeAdapter(self.home / "missing").notify_in_app(self.task, self.proof_service)
 
         self.assertEqual(result.status, DeliveryStatus.FAILED)
         self.assertIn("not detected", result.message)
@@ -83,7 +85,7 @@ class AdapterContractTests(unittest.TestCase):
         for adapter_type in ADAPTER_TYPES:
             with self.subTest(adapter=adapter_type.__name__):
                 adapter = self._installed(adapter_type(self.home))
-                result = adapter.notify_in_app(self.task)
+                result = adapter.notify_in_app(self.task, self.proof_service)
 
                 self.assertEqual(result.status, DeliveryStatus.QUEUED)
                 self.assertFalse(result.acknowledged)
@@ -97,7 +99,7 @@ class AdapterContractTests(unittest.TestCase):
         for adapter_type in ADAPTER_TYPES:
             with self.subTest(adapter=adapter_type.__name__):
                 adapter = self._installed(adapter_type(self.home))
-                adapter.notify_in_app(self.task)
+                adapter.notify_in_app(self.task, self.proof_service)
                 card = json.loads(adapter.task_card_path(self.task.task_id).read_text(encoding="utf-8"))
                 acknowledgement = adapter.integration_acknowledgement(self.task.task_id)
 
@@ -107,7 +109,7 @@ class AdapterContractTests(unittest.TestCase):
 
     def test_forged_or_mismatched_card_ack_is_rejected(self) -> None:
         adapter = self._installed(CodexAdapter(self.home))
-        adapter.notify_in_app(self.task)
+        adapter.notify_in_app(self.task, self.proof_service)
         path = adapter.task_card_path(self.task.task_id)
         card = json.loads(path.read_text(encoding="utf-8"))
         card["host_identity"] = "claude"
@@ -118,7 +120,7 @@ class AdapterContractTests(unittest.TestCase):
 
     def test_forged_card_versions_cannot_be_promoted_to_a_shared_acknowledgement(self) -> None:
         adapter = self._installed(CodexAdapter(self.home))
-        adapter.notify_in_app(self.task)
+        adapter.notify_in_app(self.task, self.proof_service)
         path = adapter.task_card_path(self.task.task_id)
         card = json.loads(path.read_text(encoding="utf-8"))
         card["integration_version"] = "9.9.9"
@@ -129,7 +131,7 @@ class AdapterContractTests(unittest.TestCase):
     def test_missing_installed_consumer_fails_without_queuing_a_card(self) -> None:
         adapter = CodexAdapter(self.home)
 
-        result = adapter.notify_in_app(self.task)
+        result = adapter.notify_in_app(self.task, self.proof_service)
 
         self.assertEqual(result.status, DeliveryStatus.FAILED)
         self.assertFalse(adapter.task_card_path(self.task.task_id).exists())
@@ -142,7 +144,7 @@ class AdapterContractTests(unittest.TestCase):
 
     def test_uninstall_removes_only_its_pending_cards_and_rejects_traversal_ids(self) -> None:
         adapter = self._installed(CodexAdapter(self.home))
-        adapter.notify_in_app(self.task)
+        adapter.notify_in_app(self.task, self.proof_service)
         sibling = adapter.inbox_path.parent / "claude" / "keep.json"
         sibling.parent.mkdir(parents=True)
         sibling.write_text("keep", encoding="utf-8")
@@ -162,7 +164,7 @@ class AdapterContractTests(unittest.TestCase):
         adapter.inbox_path.parent.mkdir(parents=True, exist_ok=True)
         os.symlink(outside, adapter.inbox_path, target_is_directory=True)
 
-        result = adapter.notify_in_app(self.task)
+        result = adapter.notify_in_app(self.task, self.proof_service)
 
         self.assertEqual(result.status, DeliveryStatus.FAILED)
         self.assertFalse((outside / (self.task.task_id + ".json")).exists())
@@ -174,7 +176,7 @@ class AdapterContractTests(unittest.TestCase):
         self.assertFalse(adapter.detect().found)
         adapter.install()
         source = adapter.config_path.read_text(encoding="utf-8")
-        adapter.config_path.write_text(source.replace('command = "python"', 'command = "other-python"'), encoding="utf-8")
+        adapter.config_path.write_text(source.replace('command = ' + json.dumps(sys.executable), 'command = "other-python"'), encoding="utf-8")
         self.assertFalse(adapter.detect().found)
 
     def test_unavailable_richer_surface_has_terminal_fallback_and_health_warning(self) -> None:
@@ -196,3 +198,11 @@ class AdapterContractTests(unittest.TestCase):
                 self.assertEqual(manifest["acknowledge"]["operation"], "acknowledge")
                 self.assertIn("entrypoint", manifest)
                 self.assertIn("session_card", manifest)
+
+
+class _ProofService:
+    def register_host_delivery_proof(self, *arguments) -> None:
+        pass
+
+    def cancel_host_delivery_proof(self, *arguments) -> None:
+        pass

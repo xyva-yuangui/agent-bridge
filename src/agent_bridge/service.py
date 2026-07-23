@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -160,21 +161,48 @@ class BridgeService:
             raise KeyError("unknown task: {0}".format(task_id))
         return _task_view(row, self._artifact_paths(task_id))
 
-    def claim_host_acknowledgement(
+    def register_host_delivery_proof(
         self, task_id: str, host_identity: str, integration_version: str,
         protocol_version: int, delivery_token: str,
     ) -> None:
-        """Atomically claim one host ACK; callers must not synthesize callbacks."""
-        if (
-            not task_id or not host_identity or not integration_version
-            or type(protocol_version) is not int or protocol_version < 1 or not delivery_token
-        ):
-            raise ValueError("invalid host acknowledgement")
+        """Durably register a card's exact one-time proof before it is exposed."""
+        self._validate_host_acknowledgement(task_id, host_identity, integration_version, protocol_version, delivery_token)
+        with self.store.transaction(immediate=True) as connection:
+            task = connection.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if task is None or str(task["assignee"]) != host_identity:
+                raise ValueError("host delivery proof is not authorized for this task")
+            try:
+                connection.execute(
+                    "INSERT INTO host_delivery_proofs(task_id, host_identity, integration_version, protocol_version, token_sha256, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (task_id, host_identity, integration_version, protocol_version, _token_hash(delivery_token), utc_now()),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ValueError("host delivery proof already exists") from error
+
+    def cancel_host_delivery_proof(self, task_id: str, host_identity: str, delivery_token: str) -> None:
+        with self.store.transaction(immediate=True) as connection:
+            connection.execute(
+                "DELETE FROM host_delivery_proofs WHERE task_id = ? AND host_identity = ? AND token_sha256 = ? AND consumed_at IS NULL",
+                (task_id, host_identity, _token_hash(delivery_token)),
+            )
+
+    def acknowledge_integration(
+        self, task_id: str, host_identity: str, integration_version: str,
+        protocol_version: int, delivery_token: str,
+    ) -> None:
+        """Consume the registered proof and write exactly one ACK in one transaction."""
+        self._validate_host_acknowledgement(task_id, host_identity, integration_version, protocol_version, delivery_token)
         with self.store.transaction(immediate=True) as connection:
             task = connection.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if task is None or str(task["assignee"]) != host_identity:
                 raise ValueError("host acknowledgement is not authorized for this task")
-            key = "host-ack:{0}:{1}:{2}".format(host_identity, task_id, delivery_token)
+            consumed = connection.execute(
+                "UPDATE host_delivery_proofs SET consumed_at = ? WHERE task_id = ? AND host_identity = ? AND integration_version = ? AND protocol_version = ? AND token_sha256 = ? AND consumed_at IS NULL",
+                (utc_now(), task_id, host_identity, integration_version, protocol_version, _token_hash(delivery_token)),
+            ).rowcount
+            if consumed != 1:
+                raise ValueError("host acknowledgement proof is missing or already consumed")
+            key = "host-ack:{0}:{1}:{2}".format(host_identity, task_id, _token_hash(delivery_token))
             try:
                 connection.execute(
                     "INSERT INTO delivery_attempts(task_id, channel, status, attempts, created_at, updated_at, error, idempotency_key) "
@@ -184,11 +212,15 @@ class BridgeService:
             except sqlite3.IntegrityError as error:
                 raise ValueError("host acknowledgement was already consumed") from error
 
+    def _validate_host_acknowledgement(self, task_id: str, host_identity: str, integration_version: str, protocol_version: int, delivery_token: str) -> None:
+        if not task_id or not host_identity or not integration_version or type(protocol_version) is not int or protocol_version < 1 or not delivery_token:
+            raise ValueError("invalid host acknowledgement")
+
     def host_acknowledgement_is_claimed(
         self, task_id: str, host_identity: str, delivery_token: str,
     ) -> bool:
         """Read durable ACK state so a restarted consumer can clear stale cards."""
-        key = "host-ack:{0}:{1}:{2}".format(host_identity, task_id, delivery_token)
+        key = "host-ack:{0}:{1}:{2}".format(host_identity, task_id, _token_hash(delivery_token))
         return bool(self.store.scalar(
             "SELECT 1 FROM delivery_attempts WHERE idempotency_key = ? AND status = ?",
             (key, DeliveryStatus.AGENT_ACKNOWLEDGED.value),
@@ -362,6 +394,10 @@ def _normalize_artifacts(paths: Tuple[str, ...]) -> Tuple[str, ...]:
     """Return stable, deduplicated file references suitable for durable storage."""
     normalized = {path.strip().replace("\\", "/") for path in paths if path.strip()}
     return tuple(sorted(normalized))
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _encode_cursor(updated_at: str, task_id: str) -> str:

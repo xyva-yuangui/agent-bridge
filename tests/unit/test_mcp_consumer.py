@@ -41,14 +41,16 @@ class HostMcpConsumerTests(unittest.TestCase):
                 adapter = self._adapter(adapter_type)
                 store = Store.open(self.data_root / "agent-bridge.sqlite3")
                 try:
-                    task = BridgeService(store).send_task("sender", adapter.name, "subject", "body")
+                    service = BridgeService(store)
+                    task = service.send_task("sender", adapter.name, "subject", "body")
+                    self.assertEqual(adapter.notify_in_app(TaskCard(task.id, task.subject, task.body), service).status.value, "queued")
                 finally:
                     store.close()
-                self.assertEqual(adapter.notify_in_app(TaskCard(task.id, task.subject, task.body)).status.value, "queued")
                 card = json.loads(adapter.task_card_path(task.id).read_text(encoding="utf-8"))
                 env = os.environ.copy()
                 env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
                 command = self._registered_command(adapter)
+                self.assertEqual(command[0], sys.executable)
                 process = subprocess.Popen(
                     command,
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env,
@@ -123,9 +125,9 @@ class HostMcpConsumerTests(unittest.TestCase):
         try:
             service = BridgeService(store)
             task = service.send_task("sender", adapter.name, "subject", "body")
-            self.assertEqual(adapter.notify_in_app(TaskCard(task.id, task.subject, task.body)).status.value, "queued")
+            self.assertEqual(adapter.notify_in_app(TaskCard(task.id, task.subject, task.body), service).status.value, "queued")
             acknowledgement = adapter.integration_acknowledgement(task.id)
-            service.claim_host_acknowledgement(
+            service.acknowledge_integration(
                 acknowledgement.task_id,
                 acknowledgement.host_identity,
                 acknowledgement.integration_version,

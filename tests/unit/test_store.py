@@ -26,7 +26,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(store.scalar("PRAGMA journal_mode"), "wal")
         self.assertEqual(store.scalar("PRAGMA foreign_keys"), 1)
         self.assertEqual(store.scalar("PRAGMA busy_timeout"), 5000)
-        self.assertEqual(store.scalar("SELECT MAX(version) FROM schema_migrations"), 2)
+        self.assertEqual(store.scalar("SELECT MAX(version) FROM schema_migrations"), 3)
 
     def test_task_and_outbox_rollback_together(self):
         self.store = Store.open(self.db_path)
@@ -130,7 +130,7 @@ class StoreTests(unittest.TestCase):
         store = Store.open(self.db_path)
         v2_migrations = list(store._migration_sources())
         store.close()
-        third_migration = (3, "CREATE TABLE migration_backup_probe (id INTEGER PRIMARY KEY);")
+        third_migration = (4, "CREATE TABLE migration_backup_probe (id INTEGER PRIMARY KEY);")
 
         with mock.patch.object(
             Store, "_migration_sources", return_value=v2_migrations + [third_migration]
@@ -138,7 +138,7 @@ class StoreTests(unittest.TestCase):
             upgraded = Store.open(self.db_path)
             upgraded.close()
 
-        backups = list(self.root.glob("agent-bridge.sqlite3.before-v3.*.bak"))
+        backups = list(self.root.glob("agent-bridge.sqlite3.before-v4.*.bak"))
         self.assertEqual(len(backups), 1)
         restored_path = self.root / "restored.sqlite3"
         restored_path.write_bytes(backups[0].read_bytes())
@@ -146,7 +146,7 @@ class StoreTests(unittest.TestCase):
         try:
             self.assertEqual(restored.execute(
                 "SELECT MAX(version) FROM schema_migrations"
-            ).fetchone()[0], 2)
+            ).fetchone()[0], 3)
             self.assertIsNone(restored.execute(
                 "SELECT 1 FROM sqlite_master WHERE name = 'migration_backup_probe'"
             ).fetchone())
@@ -167,7 +167,7 @@ class StoreTests(unittest.TestCase):
 
         upgraded = Store.open(legacy_path)
         try:
-            self.assertEqual(upgraded.scalar("SELECT MAX(version) FROM schema_migrations"), 2)
+            self.assertEqual(upgraded.scalar("SELECT MAX(version) FROM schema_migrations"), 3)
             self.assertIsNotNone(upgraded.scalar(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'launch_reservations'"
             ))

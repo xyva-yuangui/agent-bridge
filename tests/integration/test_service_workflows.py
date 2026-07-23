@@ -195,8 +195,9 @@ class ServiceWorkflowTests(unittest.TestCase):
 
     def test_host_acknowledgement_claim_is_durable_and_rejects_a_replay(self):
         task = self.service.send_task("codex", "zcode", "Review", "Body")
+        self.service.register_host_delivery_proof(task.id, "zcode", "1.0.0", 2, "one-time-token")
 
-        self.service.claim_host_acknowledgement(task.id, "zcode", "1.0.0", 2, "one-time-token")
+        self.service.acknowledge_integration(task.id, "zcode", "1.0.0", 2, "one-time-token")
 
         self.assertEqual(
             self.store.scalar(
@@ -207,4 +208,12 @@ class ServiceWorkflowTests(unittest.TestCase):
         )
         self.assertTrue(self.service.host_acknowledgement_is_claimed(task.id, "zcode", "one-time-token"))
         with self.assertRaisesRegex(ValueError, "already consumed"):
-            self.service.claim_host_acknowledgement(task.id, "zcode", "1.0.0", 2, "one-time-token")
+            self.service.acknowledge_integration(task.id, "zcode", "1.0.0", 2, "one-time-token")
+
+    def test_direct_forged_acknowledgement_cannot_create_delivery_evidence(self):
+        task = self.service.send_task("codex", "zcode", "Review", "Body")
+
+        with self.assertRaisesRegex(ValueError, "proof is missing"):
+            self.service.acknowledge_integration(task.id, "zcode", "9.9.9", 2, "forged-token")
+
+        self.assertEqual(self.store.scalar("SELECT COUNT(*) FROM delivery_attempts WHERE task_id = ?", (task.id,)), 0)

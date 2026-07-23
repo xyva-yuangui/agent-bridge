@@ -76,7 +76,7 @@ def serve(host: str, home: Path, data_root: Path) -> int:
                         prepared = adapter.integration_acknowledgement(task_id)
                         if acknowledgement != prepared:
                             raise ValueError("acknowledgement does not match queued task card")
-                        service.claim_host_acknowledgement(task_id, adapter.name, prepared.integration_version, prepared.protocol_version, prepared.delivery_token)
+                        service.acknowledge_integration(task_id, adapter.name, prepared.integration_version, prepared.protocol_version, prepared.delivery_token)
                         adapter.consume_acknowledged_card(task_id, prepared.delivery_token)
                         _response(request_id, {"acknowledged": True})
                     else:

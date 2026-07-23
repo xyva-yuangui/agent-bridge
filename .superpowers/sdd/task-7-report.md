@@ -71,3 +71,10 @@
 - `PYTHONPATH=src py -3 -m unittest tests.unit.test_adapters tests.installers.test_host_config tests.unit.test_mcp_consumer tests.unit.test_delivery tests.unit.test_terminals tests.integration.test_service_workflows tests.integration.test_dispatcher tests.integration.test_dispatcher_faults -v` — 70 tests passed.
 - `py -3 -m compileall -q src tests integrations` — passed.
 - `git diff --check` — passed.
+
+## Phase B review follow-up
+
+- Added migration 3 for hashed, one-time host delivery proofs. Cards are staged, the proof is registered before publication, and `BridgeService.acknowledge_integration` consumes the matching proof and writes ACK evidence in one transaction; forged direct calls and replays are rejected.
+- Config updates now use Windows `ReplaceFileW` with a captured displaced file and retry from that exact external edit when it lands between comparison and swap. Unsupported platforms fail closed for existing-file CAS writes.
+- Install rolls back only its managed config and receipt if receipt creation fails. All generated registrations now record `sys.executable` rather than `python`.
+- Verification: 70 targeted adapter/config/MCP/store/service/dispatcher tests passed, plus the injected receipt-failure rollback test; `compileall` and `git diff --check` passed.
