@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Iterator, List, Optional, Tuple
 
 from .models import DeliveryStatus, TaskState
 from .outbox import enqueue, utc_now
@@ -29,6 +30,26 @@ class TaskView:
     revision: int
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class TaskPage:
+    """A bounded task page with a cursor for the next stable slice."""
+
+    tasks: Tuple[TaskView, ...]
+    next_cursor: Optional[str]
+
+    def __iter__(self) -> Iterator[TaskView]:
+        return iter(self.tasks)
+
+    def __len__(self) -> int:
+        return len(self.tasks)
+
+    def __getitem__(self, index: int) -> TaskView:
+        return self.tasks[index]
+
+
+MAX_INBOX_PAGE_SIZE = 100
 
 
 class BridgeService:
@@ -110,15 +131,19 @@ class BridgeService:
         """Return the agent's current assigned tasks, newest first."""
         return self._query_tasks("assignee = ?", (agent,))
 
-    def inbox(self, agent: str) -> List[TaskView]:
-        """Return tasks currently actionable by *agent*."""
-        return self._query_tasks(
+    def inbox(
+        self, agent: str, limit: int = MAX_INBOX_PAGE_SIZE, cursor: Optional[str] = None
+    ) -> TaskPage:
+        """Return one stable, bounded page of work actionable by *agent*."""
+        return self._query_task_page(
             "(assignee = ? AND state IN (?, ?)) "
             "OR (sender = ? AND state IN (?, ?))",
             (
                 agent, TaskState.PENDING.value, TaskState.CHANGES_REQUESTED.value,
                 agent, TaskState.INPUT_REQUIRED.value, TaskState.REVIEW_REQUESTED.value,
             ),
+            limit,
+            cursor,
         )
 
     def show(self, task_id: str) -> TaskView:
@@ -228,6 +253,27 @@ class BridgeService:
         )
         return [_task_view(row) for row in rows]
 
+    def _query_task_page(
+        self, where: str, parameters: tuple, limit: int, cursor: Optional[str]
+    ) -> TaskPage:
+        if limit < 1 or limit > MAX_INBOX_PAGE_SIZE:
+            raise ValueError("limit must be between 1 and {0}".format(MAX_INBOX_PAGE_SIZE))
+        cursor_parameters = ()
+        if cursor is not None:
+            updated_at, task_id = _decode_cursor(cursor)
+            cursor_parameters = (updated_at, updated_at, task_id)
+            where = "({0}) AND (updated_at < ? OR (updated_at = ? AND id > ?))".format(where)
+        rows = self.store.connection.execute(
+            "SELECT * FROM tasks WHERE {0} ORDER BY updated_at DESC, id ASC LIMIT ?".format(where),
+            parameters + cursor_parameters + (limit + 1,),
+        ).fetchall()
+        tasks = tuple(_task_view(row) for row in rows[:limit])
+        next_cursor = None
+        if len(rows) > limit:
+            last_task = tasks[-1]
+            next_cursor = _encode_cursor(last_task.updated_at, last_task.id)
+        return TaskPage(tasks=tasks, next_cursor=next_cursor)
+
 
 def _task_view(row: sqlite3.Row) -> TaskView:
     return TaskView(
@@ -243,3 +289,23 @@ def _task_view(row: sqlite3.Row) -> TaskView:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _encode_cursor(updated_at: str, task_id: str) -> str:
+    payload = json.dumps(
+        {"id": task_id, "updated_at": updated_at}, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> Tuple[str, str]:
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode((cursor + padding).encode("ascii")))
+        updated_at = payload["updated_at"]
+        task_id = payload["id"]
+    except (KeyError, TypeError, ValueError, UnicodeError) as error:
+        raise ValueError("invalid task cursor") from error
+    if not isinstance(updated_at, str) or not isinstance(task_id, str):
+        raise ValueError("invalid task cursor")
+    return updated_at, task_id

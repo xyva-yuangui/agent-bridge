@@ -30,10 +30,11 @@ def enqueue(
     kind: str,
     payload: Mapping[str, Any],
     due_at: Optional[str] = None,
-) -> None:
+) -> OutboxItem:
     """Record one idempotent delivery intent in the caller's transaction."""
     connection.execute(
-        "INSERT INTO outbox(idempotency_key, kind, payload_json, due_at) VALUES (?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO outbox(idempotency_key, kind, payload_json, due_at) "
+        "VALUES (?, ?, ?, ?)",
         (
             idempotency_key,
             kind,
@@ -41,6 +42,14 @@ def enqueue(
             due_at or utc_now(),
         ),
     )
+    row = connection.execute(
+        "SELECT id, idempotency_key, kind, payload_json, due_at, attempts "
+        "FROM outbox WHERE idempotency_key = ?",
+        (idempotency_key,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("outbox enqueue did not create an intent")
+    return _outbox_item(row)
 
 
 def due_items(
@@ -57,17 +66,21 @@ def due_items(
         (now or utc_now(), limit),
     )
     return tuple(
-        OutboxItem(
-            id=row["id"],
-            idempotency_key=row["idempotency_key"],
-            kind=row["kind"],
-            payload=json.loads(row["payload_json"]),
-            due_at=row["due_at"],
-            attempts=row["attempts"],
-        )
+        _outbox_item(row)
         for row in rows
     )
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _outbox_item(row: sqlite3.Row) -> OutboxItem:
+    return OutboxItem(
+        id=row["id"],
+        idempotency_key=row["idempotency_key"],
+        kind=row["kind"],
+        payload=json.loads(row["payload_json"]),
+        due_at=row["due_at"],
+        attempts=row["attempts"],
+    )

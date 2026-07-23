@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_bridge.models import TaskState
-from agent_bridge.outbox import due_items
+from agent_bridge.outbox import enqueue, due_items
 from agent_bridge.service import BridgeService
 from agent_bridge.store import Store
 
@@ -49,6 +49,15 @@ class ServiceWorkflowTests(unittest.TestCase):
         self.assertEqual(self.count_events(task.id), before_events)
         self.assertEqual(self.store.scalar("SELECT COUNT(*) FROM outbox"), before_outbox)
 
+    def test_task_creation_event_and_outbox_roll_back_when_enqueue_fails(self):
+        with patch("agent_bridge.service.enqueue", side_effect=RuntimeError("outbox failed")):
+            with self.assertRaisesRegex(RuntimeError, "outbox failed"):
+                self.service.send_task("codex", "zcode", "Review", "Body")
+
+        self.assertEqual(self.store.scalar("SELECT COUNT(*) FROM tasks"), 0)
+        self.assertEqual(self.store.scalar("SELECT COUNT(*) FROM task_events"), 0)
+        self.assertEqual(self.store.scalar("SELECT COUNT(*) FROM outbox"), 0)
+
     def test_action_delivery_is_addressed_to_the_other_participant(self):
         task = self.service.send_task("codex", "zcode", "Review", "Body")
         self.service.claim(task.id, "zcode")
@@ -69,6 +78,29 @@ class ServiceWorkflowTests(unittest.TestCase):
         current = self.service.show(task.id)
         self.assertEqual(current.state, TaskState.PENDING)
         self.assertEqual(current.revision, task.revision)
+
+    def test_mutation_accepts_the_current_expected_revision(self):
+        task = self.service.send_task("codex", "zcode", "Review", "Body")
+
+        claimed = self.service.claim(task.id, "zcode", expected_revision=task.revision)
+
+        self.assertEqual(claimed.state, TaskState.WORKING)
+        self.assertEqual(claimed.revision, task.revision + 1)
+
+    def test_duplicate_outbox_enqueue_returns_the_existing_intent(self):
+        with self.store.transaction(immediate=True) as connection:
+            first = enqueue(
+                connection, "task-1:0:task.created", "task.created",
+                {"task_id": "task-1"}, "2026-07-23T00:00:00Z",
+            )
+            replay = enqueue(
+                connection, "task-1:0:task.created", "task.created",
+                {"task_id": "task-1", "ignored": True}, "2026-07-24T00:00:00Z",
+            )
+
+        self.assertEqual(replay, first)
+        self.assertGreater(first.id, 0)
+        self.assertEqual(self.store.scalar("SELECT COUNT(*) FROM outbox"), 1)
 
     def test_due_outbox_items_are_ordered_and_decode_the_delivery_payload(self):
         first = self.service.send_task("codex", "zcode", "First", "Body")
@@ -98,3 +130,31 @@ class ServiceWorkflowTests(unittest.TestCase):
         self.service.claim(task.id, "zcode")
         self.service.request_review(task.id, "zcode", "Ready")
         self.assertEqual([view.id for view in self.service.inbox("codex")], [task.id])
+
+    def test_inbox_uses_stable_bounded_pages_without_duplicates(self):
+        task_ids = [
+            self.service.send_task("codex", "zcode", "Task {0}".format(index), "Body").id
+            for index in range(5)
+        ]
+
+        first = self.service.inbox("zcode", limit=2)
+        second = self.service.inbox("zcode", limit=2, cursor=first.next_cursor)
+        third = self.service.inbox("zcode", limit=2, cursor=second.next_cursor)
+
+        returned_ids = [task.id for page in (first, second, third) for task in page.tasks]
+        self.assertEqual(set(returned_ids), set(task_ids))
+        self.assertEqual(len(returned_ids), len(set(returned_ids)))
+        self.assertIsNone(third.next_cursor)
+
+    def test_inbox_rejects_an_invalid_page_limit(self):
+        with self.assertRaisesRegex(ValueError, "limit"):
+            self.service.inbox("zcode", limit=0)
+
+    def test_inbox_default_page_is_bounded(self):
+        for index in range(101):
+            self.service.send_task("codex", "zcode", "Task {0}".format(index), "Body")
+
+        page = self.service.inbox("zcode")
+
+        self.assertEqual(len(page), 100)
+        self.assertIsNotNone(page.next_cursor)
