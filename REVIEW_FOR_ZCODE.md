@@ -6,7 +6,7 @@ Date: 2026-07-23
 
 - Source branch: `fix/cross-platform-reliability`
 - Base: `0f9662e`
-- Candidate code: `0743613`
+- Candidate code: `6fd7b0e`
 - Review range: `0f9662e..HEAD` (includes this acceptance report)
 - Review checkout:
   `C:\tmp\roundtable\.worktrees\cross-platform-fixes`
@@ -43,7 +43,7 @@ bridge doctor --strict
 
 Observed on this host:
 
-- 28 tests passed, 0 failures.
+- 29 tests passed, 0 failures.
 - `compileall` exited 0.
 - Isolated install, reinstall, and uninstall passed.
 - Dependency-free notification helper exited 0.
