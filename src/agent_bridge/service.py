@@ -268,8 +268,8 @@ class BridgeService:
     def _query_tasks(self, where: str, parameters: tuple) -> List[TaskView]:
         rows = self.store.connection.execute(
             "SELECT * FROM tasks WHERE {0} ORDER BY updated_at DESC, id ASC".format(where), parameters
-        )
-        return [_task_view(row) for row in rows]
+        ).fetchall()
+        return self._task_views(rows)
 
     def _query_task_page(
         self, where: str, parameters: tuple, limit: int, cursor: Optional[str]
@@ -285,12 +285,26 @@ class BridgeService:
             "SELECT * FROM tasks WHERE {0} ORDER BY updated_at DESC, id ASC LIMIT ?".format(where),
             parameters + cursor_parameters + (limit + 1,),
         ).fetchall()
-        tasks = tuple(_task_view(row) for row in rows[:limit])
+        tasks = tuple(self._task_views(rows[:limit]))
         next_cursor = None
         if len(rows) > limit:
             last_task = tasks[-1]
             next_cursor = _encode_cursor(last_task.updated_at, last_task.id)
         return TaskPage(tasks=tasks, next_cursor=next_cursor)
+
+    def _task_views(self, rows: List[sqlite3.Row]) -> List[TaskView]:
+        """Attach artifacts with one bounded query for a task collection."""
+        if not rows:
+            return []
+        task_ids = [str(row["id"]) for row in rows]
+        artifact_rows = self.store.connection.execute(
+            "SELECT task_id, path FROM task_artifacts WHERE task_id IN ({0}) "
+            "ORDER BY task_id, path".format(",".join("?" for ignored in task_ids)), task_ids,
+        ).fetchall()
+        artifacts = {task_id: [] for task_id in task_ids}
+        for artifact in artifact_rows:
+            artifacts[str(artifact["task_id"])].append(str(artifact["path"]))
+        return [_task_view(row, tuple(artifacts[str(row["id"])])) for row in rows]
 
 
 def _task_view(row: sqlite3.Row, artifacts: Tuple[str, ...] = ()) -> TaskView:

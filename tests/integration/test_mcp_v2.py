@@ -91,6 +91,31 @@ class McpV2Tests(unittest.TestCase):
         self.assertIn("project", responses[0]["result"]["content"][0]["text"])
         self.assertTrue(responses[1]["result"]["isError"])
 
+    def test_mcp_done_matches_cli_optional_result_and_parse_errors_continue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            created = self.exchange(home, [
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "bridge_send", "arguments": {"to": "zcode", "subject": "Optional"}}},
+            ])
+            task_id = json.loads(created[0]["result"]["content"][0]["text"])["task"]["id"]
+            claimed = self.exchange(home, [
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "bridge_claim", "arguments": {"task_id": task_id, "actor": "zcode"}}},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "bridge_done", "arguments": {"task_id": task_id, "actor": "zcode"}}},
+            ])
+            self.assertFalse(claimed[1]["result"]["isError"])
+            self.assertEqual(json.loads(claimed[1]["result"]["content"][0]["text"])["task"]["state"], "completed")
+            environment = os.environ.copy()
+            environment["AGENT_BRIDGE_HOME"] = str(home)
+            result = subprocess.run(
+                [sys.executable, str(MCP_PATH), "--as", "codex"],
+                input="{bad json\n" + json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "bridge_whoami", "arguments": {}}}) + "\n",
+                capture_output=True, text=True, encoding="utf-8", errors="strict", env=environment, timeout=30,
+            )
+        responses = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(responses[0]["error"]["code"], -32700)
+        self.assertIn("codex", responses[1]["result"]["content"][0]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

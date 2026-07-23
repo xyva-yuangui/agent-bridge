@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
@@ -127,9 +128,17 @@ def execute_command(
         _put_metadata(service, "log:" + uuid.uuid4().hex, json.dumps(entry, sort_keys=True))
         return {"ok": True, "entry": entry}
     if command == "activity":
-        rows = service.store.connection.execute(
+        since = _activity_since(_argument(arguments, "since"))
+        query = (
             "SELECT task_events.* FROM task_events JOIN tasks ON tasks.id = task_events.task_id "
-            "WHERE tasks.project_id = ? ORDER BY task_events.created_at DESC, task_events.id DESC", (project_id,)
+            "WHERE tasks.project_id = ?"
+        )
+        parameters = [project_id]
+        if since is not None:
+            query += " AND task_events.created_at >= ?"
+            parameters.append(since)
+        rows = service.store.connection.execute(
+            query + " ORDER BY task_events.created_at ASC, task_events.id ASC", parameters
         ).fetchall()
         return {"events": [dict(row) for row in rows]}
     if command == "doctor":
@@ -207,6 +216,20 @@ def execute_command(
         destination = export_json(service.store, Path(str(_argument(arguments, "destination"))))
         return {"destination": str(destination)}
     raise ValueError("unknown command: {0}".format(command))
+
+
+def _activity_since(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("invalid ISO-8601 --since value")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("invalid ISO-8601 --since value") from error
+    if parsed.tzinfo is None:
+        raise ValueError("invalid ISO-8601 --since value")
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def build_parser() -> argparse.ArgumentParser:

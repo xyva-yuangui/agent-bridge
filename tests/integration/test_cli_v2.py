@@ -147,6 +147,25 @@ class CliV2Tests(unittest.TestCase):
             for obsolete in ("`wake_launched`", "`acknowledged`", "`unavailable`"):
                 self.assertNotIn(obsolete, content)
 
+    def test_done_result_is_optional_and_activity_since_is_validated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            sent = run_module(
+                "agent_bridge.cli", "--as", "codex", "--json", "send", "--to", "zcode", "--subject", "Optional", home=home,
+            )
+            task_id = json.loads(sent.stdout)["task"]["id"]
+            self.assertEqual(run_module("agent_bridge.cli", "--as", "zcode", "claim", task_id, home=home).returncode, 0)
+            done = run_module("agent_bridge.cli", "--as", "zcode", "--json", "done", task_id, home=home)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            filtered = run_module(
+                "agent_bridge.cli", "--json", "activity", "--since", "1970-01-01T00:00:00Z", home=home,
+            )
+            self.assertEqual(filtered.returncode, 0, filtered.stderr)
+            self.assertGreaterEqual(len(json.loads(filtered.stdout)["events"]), 1)
+            invalid = run_module("agent_bridge.cli", "activity", "--since", "not-a-date", home=home)
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertIn("invalid ISO-8601", invalid.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

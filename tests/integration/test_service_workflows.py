@@ -180,3 +180,15 @@ class ServiceWorkflowTests(unittest.TestCase):
 
         self.assertEqual(self.service.show(task.id).state, TaskState.WORKING)
         self.assertEqual(self.store.scalar("SELECT COUNT(*) FROM task_artifacts WHERE task_id = ?", (task.id,)), 0)
+
+    def test_all_task_collections_include_persisted_artifacts(self):
+        task = self.service.send_task("codex", "zcode", "Files", "Body")
+        with self.store.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO task_artifacts(task_id, kind, path, metadata_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (task.id, "file", "src/a.py", "{}", task.created_at),
+            )
+
+        self.assertEqual(self.service.status("zcode")[0].artifacts, ("src/a.py",))
+        self.assertEqual(self.service.inbox("zcode")[0].artifacts, ("src/a.py",))
+        self.assertEqual(self.service.board("default")[0].artifacts, ("src/a.py",))

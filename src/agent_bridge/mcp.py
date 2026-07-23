@@ -37,7 +37,7 @@ TOOL_SCHEMAS = {
     "inbox": _schema({"limit": INTEGER, "cursor": STRING, "actor": STRING}),
     "send": _schema({"to": STRING, "subject": STRING, "body": STRING, "project": STRING, "no_wake": BOOLEAN}, ("to", "subject")),
     "claim": _schema({"task_id": STRING, "body": STRING, "actor": STRING}, ("task_id",)),
-    "done": _schema({"task_id": STRING, "result": STRING, "files": STRING, "actor": STRING}, ("task_id", "result")),
+    "done": _schema({"task_id": STRING, "result": STRING, "files": STRING, "actor": STRING}, ("task_id",)),
     "show": _schema({"task_id": STRING}, ("task_id",)),
     "board": _schema({"project": STRING}),
     "question": _schema({"task_id": STRING, "body": STRING, "actor": STRING}, ("task_id", "body")),
@@ -161,6 +161,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             try:
                 request = json.loads(line)
             except json.JSONDecodeError:
+                _response(None, error={"code": -32700, "message": "parse error"})
                 continue
             _handle(service, identity, request)
     finally:
