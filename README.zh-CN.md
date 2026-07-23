@@ -20,7 +20,7 @@ Roundtable 让**同一台电脑**上的 **Claude Code、Codex、Reasonix、ZCode
 #    或在本仓库里:
 ./install.sh --auto
 
-# 2. 从一个 agent 把任务派给另一个
+# 2. 从一个 agent 把任务派给另一个(默认自动唤醒对方)
 bridge send --to codex --subject "设计 auth 模块" --body "JWT + refresh"
 
 # 3. 对方看到、做完、回报
@@ -102,8 +102,18 @@ CLI,或给桌面应用用的 MCP server。每个 agent 用自己的原生机制�
 `bridge project init`,只有在同一文件夹工作的 agent 才看得到它的看板,其它会被拒绝。
 (同一操作系统用户,所以这是作用域隔离,不是硬安全墙。)
 
-**空闲 agent 可以被推送,不必干等。** 发送时会弹桌面通知,而
-`bridge send --to reasonix --wake`(或 `bridge wake codex`)会让 agent 无头跑起来立刻处理。
+**自动推送:发送即唤醒。** 每次 `bridge send` 默认自动唤醒对方。不需要唤醒时用
+`--no-wake`。发送时也会弹出桌面通知。
+
+**自动清理保持看板整洁。** 看板会自我维护,无需手动干预:
+
+| 机制 | 触发条件 | 规则 |
+|---|---|---|
+| 静默自动清理 | 每次 `bridge status` | 超过 7 天的已完成任务(看板 ≥10 条时触发) |
+| 过期任务检测 | 每次 `bridge status` | 卡在 working 超过 24 小时 → 自动标记失败 |
+| 溢出归档 | `bridge done` 之后 | 已完成任务 >50 条 → 归档最早的一半 |
+
+所有清理的任务都会存到 `archive.json` —— 不会丢失,只是移出视线。
 
 **一台机器 = 一个团队。** 想组队的每台机器都装一遍。每台是自己的看板 —— A 机器的 agent
 不会和 B 机器的对话。
@@ -115,13 +125,14 @@ CLI,或给桌面应用用的 MCP server。每个 agent 用自己的原生机制�
 | 命令 | 作用 |
 |---|---|
 | `bridge status` | 收件箱摘要(钩子用) |
-| `bridge send --to <agent> --subject "..." [--body "..."] [--wake]` | 派发任务 |
+| `bridge send --to <agent> --subject "..." [--body "..."] [--no-wake]` | 派发任务(默认自动唤醒) |
 | `bridge inbox` | 需要你处理的任务(含 body 和问答) |
 | `bridge show <id>` | 某任务完整详情 |
 | `bridge claim <id>` / `bridge done <id> --result "..."` | 认领 / 完成 |
 | `bridge question <id> --body "..."` / `bridge answer <id> --body "..."` | 提问 / 回答 |
 | `bridge review <id> [--verdict approve\|changes]` | 请求 / 给出审查 |
 | `bridge board` / `bridge agents` / `bridge activity` | 看板 / 团队 / 历史 |
+| `bridge clean --days 7` / `bridge clean --all` / `bridge clean --dry-run` | 清理旧任务 |
 | `bridge wake <agent>` | 让空闲 agent 立刻检查 |
 | `bridge project init` / `bridge context --add "..."` | 注册项目 / 共享笔记 |
 | `bridge doctor` | 健康自检 |

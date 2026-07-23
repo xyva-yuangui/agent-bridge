@@ -130,6 +130,12 @@ VALID_STATES = {"pending", "accepted", "working", "completed", "failed", "cancel
                 "input_required", "review_requested", "review_approved", "changes_requested"}
 # ponytail: activity.jsonl rotation — keep it bounded so hook status never times out
 MAX_ACTIVITY_ENTRIES = 10000
+# ponytail: auto-cleanup — prevent board.json from growing unbounded
+MAX_COMPLETED_TASKS = 50       # auto-archive oldest completed when exceeded
+STALE_WORKING_HOURS = 24       # auto-fail working tasks stuck > this long
+MAX_INBOX_AGE_DAYS = 30        # don't show tasks older than this in inbox
+AUTO_CLEAN_DAYS = 7            # silently clean completed tasks older than this (every status call)
+AUTO_CLEAN_MIN_TASKS = 10      # only trigger auto-clean when board has at least this many tasks
 
 
 def board_path(project_id: str = "default") -> Path:
@@ -316,9 +322,19 @@ def _task_status(task: dict) -> str:
     return task.get("status", "pending")
 
 
-def _inbox_filter(task: dict, me: str) -> bool:
+def _inbox_filter(task: dict, me: str, max_age_days: int = MAX_INBOX_AGE_DAYS) -> bool:
     """Task is in my inbox if it needs my action this turn."""
     status = _task_status(task)
+    # ponytail: skip tasks older than max_age_days to avoid zombie history in inbox
+    created = task.get("created", "")
+    if created and max_age_days > 0:
+        try:
+            ct = calendar.timegm(time.strptime(created, "%Y-%m-%dT%H:%M:%SZ"))
+            cutoff = time.time() - max_age_days * 86400
+            if ct < cutoff:
+                return False
+        except (ValueError, OverflowError):
+            pass  # malformed date — include it rather than silently drop
     # questions and review requests go back to the original sender to act on
     if status in ("input_required", "review_requested"):
         return task.get("from") == me
@@ -326,6 +342,258 @@ def _inbox_filter(task: dict, me: str) -> bool:
         return False
     # work to do as the assignee: a new task, or rework after a 'changes' review
     return status in ("pending", "changes_requested")
+
+
+def _auto_stale_working(project_id: str, me: str):
+    """Detect and auto-fail working tasks that have been stuck too long."""
+    bp = board_path(project_id)
+    if not bp.exists():
+        return
+    cutoff = time.time() - STALE_WORKING_HOURS * 3600
+    stale_ids = []
+
+    def _detect(board):
+        for t in board["tasks"]:
+            if t["status"] != "working":
+                continue
+            updated = t.get("updated", "")
+            if not updated:
+                continue
+            try:
+                ut = calendar.timegm(time.strptime(updated, "%Y-%m-%dT%H:%M:%SZ"))
+                if ut < cutoff:
+                    t["status"] = "failed"
+                    t["result"] = f"auto-failed: stuck in working for >{STALE_WORKING_HOURS}h"
+                    t["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    stale_ids.append(t["id"])
+            except (ValueError, OverflowError):
+                pass
+        return board
+
+    if stale_ids:
+        atomic_update_board(bp, _detect)
+        for tid in stale_ids:
+            append_activity(project_id, {
+                "agent": me, "action": "auto-failed", "task_id": tid,
+                "subject": f"stale working task (> {STALE_WORKING_HOURS}h)",
+            })
+
+
+def _auto_archive(project_id: str, me: str):
+    """Archive oldest completed tasks when board exceeds MAX_COMPLETED_TASKS."""
+    bp = board_path(project_id)
+    if not bp.exists():
+        return
+    ap = bp.parent / "archive.json"
+
+    def _archive(board):
+        completed = [t for t in board["tasks"] if t["status"] in ("completed", "failed", "canceled")]
+        if len(completed) <= MAX_COMPLETED_TASKS:
+            return board  # nothing to do
+        # sort by creation time, archive oldest half of completed
+        completed.sort(key=lambda x: x.get("created", ""))
+        to_archive = completed[:len(completed) // 2]
+        archive_ids = {t["id"] for t in to_archive}
+        # load existing archive
+        existing = []
+        if ap.exists():
+            try:
+                existing = json.load(open(ap))
+            except Exception:
+                existing = []
+        existing.extend(to_archive)
+        with open(ap, "w") as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+        # remove archived from board
+        board["tasks"] = [t for t in board["tasks"] if t["id"] not in archive_ids]
+        return board
+
+    board = read_board(bp)
+    completed = [t for t in board["tasks"] if t["status"] in ("completed", "failed", "canceled")]
+    if len(completed) > MAX_COMPLETED_TASKS:
+        atomic_update_board(bp, _archive)
+        append_activity(project_id, {
+            "agent": me, "action": "auto-archive",
+            "subject": f"archived {len(completed) // 2} completed tasks (board had {len(completed)})",
+        })
+
+
+def _auto_clean(project_id: str, me: str):
+    """Silently clean old completed tasks every status call — transparent maintenance."""
+    bp = board_path(project_id)
+    if not bp.exists():
+        return
+    board = read_board(bp)
+    total = len(board["tasks"])
+    if total < AUTO_CLEAN_MIN_TASKS:
+        return  # board is small, no need to clean
+    cutoff = time.time() - AUTO_CLEAN_DAYS * 86400
+    cleaned = 0
+
+    def _clean(board):
+        nonlocal cleaned
+        kept = []
+        for t in board["tasks"]:
+            if t["status"] not in ("completed", "failed", "canceled"):
+                kept.append(t)
+                continue
+            updated = t.get("updated", "")
+            try:
+                ut = calendar.timegm(time.strptime(updated, "%Y-%m-%dT%H:%M:%SZ"))
+                if ut >= cutoff:
+                    kept.append(t)
+                    continue
+            except (ValueError, OverflowError):
+                kept.append(t)
+                continue
+            cleaned += 1
+        board["tasks"] = kept
+        return board
+
+    # pre-check: count how many would be cleaned, skip if none
+    would_clean = 0
+    for t in board["tasks"]:
+        if t["status"] not in ("completed", "failed", "canceled"):
+            continue
+        updated = t.get("updated", "")
+        try:
+            ut = calendar.timegm(time.strptime(updated, "%Y-%m-%dT%H:%M:%SZ"))
+            if ut < cutoff:
+                would_clean += 1
+        except (ValueError, OverflowError):
+            pass
+    if would_clean == 0:
+        return
+
+    atomic_update_board(bp, _clean)
+    if cleaned > 0:
+        append_activity(project_id, {
+            "agent": me, "action": "auto-clean",
+            "subject": f"silently cleaned {cleaned} old task(s) (> {AUTO_CLEAN_DAYS}d)",
+        })
+
+
+def cmd_clean(args):
+    name = _get_name(args)
+    ensure_dirs()
+    pid = _project(args)
+    bp = board_path(pid)
+    if not bp.exists():
+        print("📭 board is empty")
+        return
+
+    clean_statuses = {"completed", "failed", "canceled"}
+    if args.status:
+        clean_statuses = set(s.strip() for s in args.status.split(","))
+        invalid = clean_statuses - VALID_STATES
+        if invalid:
+            print(f"❌ invalid statuses: {', '.join(invalid)}", file=sys.stderr)
+            sys.exit(1)
+
+    cutoff = None
+    if not args.clean_all and args.days is not None:
+        cutoff = time.time() - args.days * 86400
+    # --all means no cutoff (clean everything in the status set)
+
+    def _clean(board):
+        removed = []
+        kept = []
+        for t in board["tasks"]:
+            if t["status"] not in clean_statuses:
+                kept.append(t)
+                continue
+            if cutoff is not None:
+                updated = t.get("updated", "")
+                try:
+                    ut = calendar.timegm(time.strptime(updated, "%Y-%m-%dT%H:%M:%SZ"))
+                    if ut >= cutoff:
+                        kept.append(t)
+                        continue
+                except (ValueError, OverflowError):
+                    pass
+            removed.append(t)
+        if args.dry_run:
+            # restore all tasks for preview
+            return board
+        board["tasks"] = kept
+        # archive removed tasks
+        if removed and not args.dry_run:
+            ap = bp.parent / "archive.json"
+            existing = []
+            if ap.exists():
+                try:
+                    existing = json.load(open(ap))
+                except Exception:
+                    existing = []
+            existing.extend(removed)
+            with open(ap, "w") as f:
+                json.dump(existing, f, indent=2, ensure_ascii=False)
+        return board, removed
+
+    if args.dry_run:
+        board = read_board(bp)
+        removed = []
+        for t in board["tasks"]:
+            if t["status"] not in clean_statuses:
+                continue
+            if cutoff is not None:
+                updated = t.get("updated", "")
+                try:
+                    ut = calendar.timegm(time.strptime(updated, "%Y-%m-%dT%H:%M:%SZ"))
+                    if ut >= cutoff:
+                        continue
+                except (ValueError, OverflowError):
+                    pass
+            removed.append(t)
+        if not removed:
+            print("📭 nothing to clean")
+        else:
+            print(f"🔍 dry-run: {len(removed)} task(s) would be removed:")
+            for t in removed:
+                print(f"  [{t['id']}] [{t['status']}] {t['subject']}")
+    else:
+        board = read_board(bp)
+        removed = []
+        kept = []
+        for t in board["tasks"]:
+            if t["status"] not in clean_statuses:
+                kept.append(t)
+                continue
+            if cutoff is not None:
+                updated = t.get("updated", "")
+                try:
+                    ut = calendar.timegm(time.strptime(updated, "%Y-%m-%dT%H:%M:%SZ"))
+                    if ut >= cutoff:
+                        kept.append(t)
+                        continue
+                except (ValueError, OverflowError):
+                    pass
+            removed.append(t)
+        if not removed:
+            print("📭 nothing to clean")
+            return
+        # write back
+        def _write(board):
+            board["tasks"] = kept
+            return board
+        atomic_update_board(bp, _write)
+        # archive
+        if removed:
+            ap = bp.parent / "archive.json"
+            existing = []
+            if ap.exists():
+                try:
+                    existing = json.load(open(ap))
+                except Exception:
+                    existing = []
+            existing.extend(removed)
+            with open(ap, "w") as f:
+                json.dump(existing, f, indent=2, ensure_ascii=False)
+        append_activity(pid, {
+            "agent": name, "action": "clean",
+            "subject": f"cleaned {len(removed)} task(s)",
+        })
+        print(f"✅ cleaned {len(removed)} task(s), archived to {ap}")
 
 
 # ── commands ──────────────────────────────────────────────────────────────────
@@ -475,6 +743,10 @@ def cmd_status(args):
     ensure_dirs()
     _touch_heartbeat(name)  # ponytail: heartbeat on every status call
     pid = _project(args)  # hook runs in the agent's cwd → scope to that project
+    # ponytail: auto-fail stale working tasks before checking inbox
+    _auto_stale_working(pid, name)
+    # ponytail: silently clean old completed tasks every turn
+    _auto_clean(pid, name)
     bp = board_path(pid)
     board = read_board(bp)
     pending = [t for t in board["tasks"] if _inbox_filter(t, name)]
@@ -527,9 +799,10 @@ def cmd_send(args):
         return board
     atomic_update_board(bp, _append)
     print(f"✅ sent task {task['id']} to {target}: {args.subject}")
-    # push layer: notify the human, and optionally wake an idle headless agent
+    # push layer: notify the human, and auto-wake the target agent (unless --no-wake)
     _desktop_notify(f"agent-bridge → {target}", args.subject)
-    if getattr(args, "wake", False):
+    no_wake = getattr(args, "no_wake", False)
+    if not no_wake:
         if _wake_agent(target):
             print(f"⏰ woke {target} (headless) to handle it now")
         else:
@@ -588,7 +861,10 @@ def cmd_agents(args):
 def cmd_inbox(args):
     name = _get_name(args)
     ensure_dirs()
-    bp = board_path(_project(args))
+    pid = _project(args)
+    # ponytail: auto-fail stale working tasks before checking inbox
+    _auto_stale_working(pid, name)
+    bp = board_path(pid)
     board = read_board(bp)
     mine = [t for t in board["tasks"] if _inbox_filter(t, name)]
     if not mine:
@@ -651,7 +927,8 @@ def cmd_claim(args):
 def cmd_done(args):
     name = _get_name(args)
     ensure_dirs()
-    bp = board_path(_project(args))
+    pid = _project(args)
+    bp = board_path(pid)
     subject = ""
     def _done(board):
         nonlocal subject
@@ -670,10 +947,12 @@ def cmd_done(args):
     try:
         atomic_update_board(bp, _done)
         # ponytail: auto-log activity after successful write
-        append_activity(_project(args), {
+        append_activity(pid, {
             "agent": name, "action": "done", "task_id": args.task_id,
             "subject": subject, "result": args.result,
         })
+        # ponytail: auto-archive if completed tasks exceed threshold
+        _auto_archive(pid, name)
         print(f"✅ completed {args.task_id}: {subject}")
     except SystemExit as e:
         print(str(e), file=sys.stderr)
@@ -917,7 +1196,7 @@ def main():
     sp.add_argument("--body", help="task body")
     sp.add_argument("--files", help="comma-separated file paths")
     sp.add_argument("--project", help="project id (default: default)")
-    sp.add_argument("--wake", action="store_true", help="also wake the target now if it has a headless wake command")
+    sp.add_argument("--no-wake", action="store_true", help="skip auto-waking the target agent (by default, send always wakes)")
 
     # wake
     sp = sub.add_parser("wake", help="wake an idle agent to check its inbox (if it registered a headless command)")
@@ -953,6 +1232,14 @@ def main():
 
     # board
     sp = sub.add_parser("board", help="show full task board")
+    sp.add_argument("--project", help="project id")
+
+    # clean
+    sp = sub.add_parser("clean", help="clean up old completed/failed/canceled tasks")
+    sp.add_argument("--days", type=int, help="remove tasks older than N days (based on updated time)")
+    sp.add_argument("--all", action="store_true", dest="clean_all", help="remove all completed/failed/canceled tasks regardless of age")
+    sp.add_argument("--status", help="comma-separated statuses to clean (default: completed,failed,canceled)")
+    sp.add_argument("--dry-run", action="store_true", help="preview without deleting")
     sp.add_argument("--project", help="project id")
 
     # question
@@ -1008,7 +1295,7 @@ def main():
     commands = {
         "whoami": cmd_whoami, "doctor": cmd_doctor, "status": cmd_status,
         "send": cmd_send, "inbox": cmd_inbox, "claim": cmd_claim,
-        "done": cmd_done, "board": cmd_board, "agents": cmd_agents,
+        "done": cmd_done, "board": cmd_board, "clean": cmd_clean, "agents": cmd_agents,
         "show": cmd_show, "wake": cmd_wake, "who-coordinates": cmd_who_coordinates,
         "question": cmd_question, "answer": cmd_answer, "review": cmd_review,
         "activity": cmd_activity, "log": cmd_log,

@@ -34,15 +34,16 @@ TOOLS = {
             "project": {"type": "string"}}},
     },
     "bridge_send": {
-        "description": "Send/delegate a task to another agent. Give --to a name, or --skill to auto-route to the best agent for that capability (architecture|hard-reasoning|complex-impl|orchestrate|review|refactor|plan|headless|frontend|ui).",
-        "sub": "send", "pos": [], "flags": ["to", "skill", "subject", "body", "files", "project"],
+        "description": "Send/delegate a task to another agent. Give --to a name, or --skill to auto-route to the best agent for that capability (architecture|hard-reasoning|complex-impl|orchestrate|review|refactor|plan|headless|frontend|ui). Auto-wakes the target by default.",
+        "sub": "send", "pos": [], "flags": ["to", "skill", "subject", "body", "files", "project", "no_wake"],
         "schema": {"type": "object", "required": ["subject"], "properties": {
             "to": {"type": "string", "description": "target agent name"},
             "skill": {"type": "string", "description": "capability tag for auto-routing (use instead of --to)"},
             "subject": {"type": "string"},
             "body": {"type": "string"},
             "files": {"type": "string", "description": "comma-separated paths"},
-            "project": {"type": "string"}}},
+            "project": {"type": "string"},
+            "no_wake": {"type": "boolean", "description": "skip auto-waking the target (default: false, i.e. always wake)"}}},
     },
     "bridge_claim": {
         "description": "Claim a task assigned to you (moves it to working).",
@@ -110,6 +111,16 @@ TOOLS = {
         "sub": "context", "pos": [], "flags": ["show", "add", "project"],
         "schema": {"type": "object", "properties": {
             "show": {"type": "boolean"}, "add": {"type": "string"}, "project": {"type": "string"}}},
+    },
+    "bridge_clean": {
+        "description": "Clean up old completed/failed/canceled tasks. Use --all to remove all, --days N to remove older than N days, --dry-run to preview.",
+        "sub": "clean", "pos": [], "flags": ["days", "all", "status", "dry_run", "project"],
+        "schema": {"type": "object", "properties": {
+            "days": {"type": "integer", "description": "Remove tasks older than N days"},
+            "all": {"type": "boolean", "description": "Remove all completed/failed/canceled tasks regardless of age"},
+            "status": {"type": "string", "description": "Comma-separated statuses to clean (default: completed,failed,canceled)"},
+            "dry_run": {"type": "boolean", "description": "Preview without deleting"},
+            "project": {"type": "string"}}},
     },
 }
 

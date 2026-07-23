@@ -19,7 +19,7 @@ bridge status --oneliner
 # See your inbox
 bridge inbox
 
-# Send a task
+# Send a task (auto-wakes target by default)
 bridge send --to reasonix --subject "Review PR #42" --body "Please review the changes"
 
 # Claim and complete
@@ -34,7 +34,7 @@ bridge done <task-id> --result "Reviewed, LGTM" --files src/main.py
 | `bridge whoami` | Print current agent identity |
 | `bridge doctor` | Check agent-bridge readiness |
 | `bridge status` | Show inbox summary (use `--oneliner` for hooks) |
-| `bridge send --to <agent> --subject "..."` | Send a task |
+| `bridge send --to <agent> --subject "..."` | Send a task (auto-wakes target by default) |
 | `bridge send --skill coding --subject "..."` | Auto-route to best agent for skill |
 | `bridge inbox` | List tasks needing your action (shows subject + body + any question/answer) |
 | `bridge show <task-id>` | Full detail of one task — read this before working |
@@ -45,6 +45,9 @@ bridge done <task-id> --result "Reviewed, LGTM" --files src/main.py
 | `bridge review <task-id>` | Request a review |
 | `bridge review <task-id> --verdict approve\|changes` | Issue review verdict |
 | `bridge board` | Show full task board |
+| `bridge clean --all` | Clean up completed/failed/canceled tasks |
+| `bridge clean --days 7` | Clean tasks older than N days |
+| `bridge clean --dry-run` | Preview what would be cleaned |
 | `bridge agents` | Show agent capability matrix |
 | `bridge who-coordinates` | Show project coordinator |
 | `bridge activity [--since <ts>]` | Show activity feed |
@@ -73,16 +76,42 @@ pending → accepted → working → completed/failed/canceled
                  ↘ review_requested → review_approved/changes_requested
 ```
 
-## Two ways to call bridge
+## Auto-push (send → wake)
 
-- **CLI / hooks** (Claude Code, Reasonix, Codex terminals): run `bridge <cmd>` via Bash.
-- **MCP tools** (desktop apps + any MCP client): same actions exposed as `bridge_status`, `bridge_inbox`, `bridge_send`, `bridge_claim`, `bridge_done`, `bridge_review`, etc. Call `bridge_status` at the start of every turn.
+Every `bridge send` automatically wakes the target agent (if it has a registered wake command). No manual terminal switching needed.
+
+```bash
+# Default: auto-wake
+bridge send --to reasonix --subject "Urgent review"
+
+# Opt-out: silent send
+bridge send --to reasonix --subject "Non-urgent" --no-wake
+```
+
+## Auto-cleanup (transparent maintenance)
+
+The board is automatically kept clean with zero manual effort:
+
+| Mechanism | Trigger | Rule |
+|---|---|---|
+| Silent auto-clean | Every `bridge status` call | Completed tasks older than 7 days (when ≥10 tasks on board) |
+| Stale task detection | Every `bridge status` call | Working tasks stuck >24h → auto-failed |
+| Overflow archive | After `bridge done` | Completed tasks >50 → oldest half archived |
+
+All cleaned tasks are archived to `archive.json` — never lost, just out of the way.
 
 ## Inbox rules
 
 Your inbox shows tasks where:
-- You are the **assignee** (`to` = you) and status is `pending` (new work) or `changes_requested` (rework after a review)
+- You are the **assignee** (`to` = you) and status is `pending` or `changes_requested`
 - You are the **original sender** (`from` = you) and status is `input_required` (someone asked you a question) or `review_requested` (someone asked you to review their work)
+
+Tasks older than 30 days are automatically excluded from the inbox to prevent zombie history.
+
+## Two ways to call bridge
+
+- **CLI / hooks** (Claude Code, Reasonix, Codex terminals): run `bridge <cmd>` via Bash.
+- **MCP tools** (desktop apps + any MCP client): same actions exposed as `bridge_status`, `bridge_inbox`, `bridge_send`, `bridge_claim`, `bridge_done`, `bridge_review`, etc. Call `bridge_status` at the start of every turn.
 
 ## Troubleshooting
 
