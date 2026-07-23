@@ -6,8 +6,8 @@ Date: 2026-07-23
 
 - Source branch: `fix/cross-platform-reliability`
 - Base: `0f9662e`
-- Candidate: `0743613`
-- Range: `0f9662e..0743613`
+- Candidate code: `0743613`
+- Review range: `0f9662e..HEAD` (includes this acceptance report)
 - Canonical source: `C:\tmp\roundtable`
 
 ## Requirements addressed
@@ -75,7 +75,7 @@ send/status/claim/done exchange between two installed applications.
 
 ## ZCode checklist
 
-- [ ] Inspect `0f9662e..0743613`.
+- [ ] Inspect `0f9662e..HEAD`.
 - [ ] Run the full test and compile commands.
 - [ ] Confirm ZCode loads `agent-bridge@local` version 1.3.0.
 - [ ] Confirm a task becomes `acknowledged` only after ZCode checks in.
