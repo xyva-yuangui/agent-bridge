@@ -1,12 +1,13 @@
-"""Typed contracts and safe configuration helpers for desktop host adapters."""
+"""Typed contracts and safe host integration configuration helpers."""
 
 from __future__ import annotations
 
 import abc
-import base64
 import enum
 import json
+import os
 import re
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
@@ -31,8 +32,17 @@ class HostCapabilities:
     integration_version: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.protocol_version, int) or self.protocol_version < 1:
+        if not isinstance(self.surface, Surface):
+            raise TypeError("surface must be a Surface")
+        for name in ("can_ack", "can_open_terminal", "can_receive_context"):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError("{0} must be a bool".format(name))
+        if type(self.protocol_version) is not int:
+            raise TypeError("protocol_version must be an int")
+        if self.protocol_version < 1:
             raise ValueError("protocol_version must be an integer greater than zero")
+        if not isinstance(self.integration_version, str):
+            raise TypeError("integration_version must be a string")
         if not re.fullmatch(r"\d+\.\d+\.\d+", self.integration_version):
             raise ValueError("integration_version must be a semantic version")
 
@@ -59,6 +69,7 @@ class OperationResult:
     ok: bool
     status: DeliveryStatus
     message: str
+    acknowledged: bool = False
 
 
 @dataclass(frozen=True)
@@ -76,12 +87,36 @@ class TaskCard:
     body: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.task_id, str) or not self.task_id or len(self.task_id) > 128 or "\x00" in self.task_id:
-            raise ValueError("task_id must be a non-empty bounded string")
-        if not isinstance(self.subject, str) or not self.subject or len(self.subject) > 256 or "\x00" in self.subject:
-            raise ValueError("subject must be a non-empty bounded string")
-        if not isinstance(self.body, str) or len(self.body) > 8192 or "\x00" in self.body:
-            raise ValueError("body must be a bounded string")
+        _bounded_text("task_id", self.task_id, 128, required=True)
+        _bounded_text("subject", self.subject, 256, required=True)
+        _bounded_text("body", self.body, 8192)
+
+
+@dataclass(frozen=True)
+class TaskAcknowledgement:
+    """An integration-side ACK; it is validated against the queued card."""
+
+    host_identity: str
+    task_id: str
+    integration_version: str
+    protocol_version: int
+    delivery_token: str
+
+    def __post_init__(self) -> None:
+        _bounded_text("host_identity", self.host_identity, 64, required=True)
+        _bounded_text("task_id", self.task_id, 128, required=True)
+        _bounded_text("integration_version", self.integration_version, 32, required=True)
+        _bounded_text("delivery_token", self.delivery_token, 128, required=True)
+        if type(self.protocol_version) is not int or self.protocol_version < 1:
+            raise ValueError("protocol_version must be a positive int")
+
+    def as_shared_payload(self) -> dict:
+        return {
+            "host_identity": self.host_identity,
+            "task_id": self.task_id,
+            "integration_version": self.integration_version,
+            "protocol_version": self.protocol_version,
+        }
 
 
 @dataclass(frozen=True)
@@ -90,7 +125,6 @@ class HostIdentity:
     aliases: Tuple[str, ...] = ()
 
 
-# The only source of truth for public host names and accepted aliases.
 HOST_IDENTITIES = (
     HostIdentity("codex", ("openai-codex",)),
     HostIdentity("claude", ("claude-code",)),
@@ -107,30 +141,40 @@ def canonical_host_name(value: str) -> str:
     raise KeyError("unknown host: {0}".format(value))
 
 
-Acknowledgement = Callable[..., None]
+SharedAcknowledge = Callable[..., None]
 
 
 class HostAdapter(abc.ABC):
-    """Strict host contract; configuration writes are limited to managed data."""
+    """Strict host contract with an explicit, consumer-side ACK boundary."""
 
     name: str
     fixture_suffix: str
+    mechanism: str
+    relative_config_path: Tuple[str, ...]
+    relative_marker_path: Tuple[str, ...]
 
     def __init__(self, home: Path) -> None:
         self.home = Path(home)
 
     @property
-    @abc.abstractmethod
     def config_path(self) -> Path:
-        """The documented host configuration file."""
+        return self.home.joinpath(*self.relative_config_path)
+
+    @property
+    def marker_path(self) -> Path:
+        return self.home.joinpath(*self.relative_marker_path)
+
+    @property
+    def inbox_path(self) -> Path:
+        return self.home / ".agent-bridge" / "session-cards" / self.name
+
+    def task_card_path(self, task_id: str) -> Path:
+        _bounded_text("task_id", task_id, 128, required=True)
+        return self.inbox_path / (task_id + ".json")
 
     @abc.abstractmethod
     def capabilities(self) -> HostCapabilities:
         """Return actual capabilities, never aspirational ones."""
-
-    @abc.abstractmethod
-    def _host_present(self) -> bool:
-        """Whether the host's documented configuration location exists."""
 
     @abc.abstractmethod
     def _install_config(self) -> None:
@@ -140,26 +184,29 @@ class HostAdapter(abc.ABC):
     def _uninstall_config(self) -> None:
         """Remove only this integration's managed configuration."""
 
+    @abc.abstractmethod
+    def _consumer_is_installed(self) -> bool:
+        """Whether the host has this integration's actual consumer entrypoint."""
+
     def detect(self) -> HostDetection:
-        found = self._host_present()
-        return HostDetection(
-            self.name,
-            found,
-            self.config_path,
-            "configuration location found" if found else "configuration location is absent",
-        )
+        found = self._valid_installation_marker()
+        detail = "validated host installation marker found" if found else "host installation marker is absent or incompatible"
+        return HostDetection(self.name, found, self.config_path, detail)
 
     def plan_install(self) -> InstallPlan:
-        warning = "" if self.detect().found else "host is not detected; install creates its documented configuration"
-        return InstallPlan(self.name, self.config_path, ("install managed integration",), warning)
+        if not self.detect().found:
+            return InstallPlan(self.name, self.config_path, (), "host is not detected; no configuration will be written")
+        return InstallPlan(self.name, self.config_path, ("install managed session-card consumer",))
 
     def install(self, plan: Optional[InstallPlan] = None) -> OperationResult:
         actual_plan = plan or self.plan_install()
         if actual_plan.host != self.name or actual_plan.config_path != self.config_path:
             raise ValueError("install plan does not belong to this host")
+        if not self.detect().found:
+            return OperationResult(self.name, False, DeliveryStatus.FAILED, "host is not detected; integration was not installed")
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self._install_config()
-        return OperationResult(self.name, True, DeliveryStatus.QUEUED, "managed integration installed")
+        return OperationResult(self.name, True, DeliveryStatus.QUEUED, "managed session-card consumer installed")
 
     def uninstall(self) -> OperationResult:
         if not self.config_path.exists():
@@ -168,35 +215,94 @@ class HostAdapter(abc.ABC):
         return OperationResult(self.name, True, DeliveryStatus.QUEUED, "managed integration removed")
 
     def health_check(self) -> HealthCheck:
-        if self.detect().found:
+        if self.detect().found and self._consumer_is_installed():
             return HealthCheck(self.name, True, self.capabilities())
+        capabilities = self.capabilities()
         return HealthCheck(
             self.name,
             False,
-            HostCapabilities(Surface.TERMINAL_FALLBACK, False, False, False, PROTOCOL_VERSION, self.capabilities().integration_version),
+            HostCapabilities(Surface.TERMINAL_FALLBACK, False, False, False, capabilities.protocol_version, capabilities.integration_version),
             "host integration is unavailable; use the terminal fallback",
         )
 
-    def notify_in_app(self, task: TaskCard, acknowledge: Optional[Acknowledgement] = None) -> OperationResult:
+    def notify_in_app(self, task: TaskCard) -> OperationResult:
         if not isinstance(task, TaskCard):
             raise TypeError("task must be a TaskCard")
-        detection = self.detect()
-        capabilities = self.capabilities()
-        if not detection.found:
+        if not self.detect().found:
             return OperationResult(self.name, False, DeliveryStatus.FAILED, "host is not detected; task was not delivered")
+        capabilities = self.capabilities()
         if capabilities.surface == Surface.TERMINAL_FALLBACK or not capabilities.can_receive_context:
             return OperationResult(self.name, False, DeliveryStatus.FAILED, "host has no in-application task-card surface")
-        if acknowledge is not None and capabilities.can_ack:
-            try:
-                acknowledge(
-                    host_identity=self.name,
-                    task_id=task.task_id,
-                    integration_version=capabilities.integration_version,
-                    protocol_version=capabilities.protocol_version,
-                )
-            except Exception as error:
-                return OperationResult(self.name, False, DeliveryStatus.FAILED, "acknowledgement failed: {0}".format(error))
-        return OperationResult(self.name, True, DeliveryStatus.PLUGIN_DELIVERED, "task card accepted by host integration")
+        if not self._consumer_is_installed():
+            return OperationResult(self.name, False, DeliveryStatus.FAILED, "host session-card consumer is not installed")
+        token = secrets.token_urlsafe(24)
+        payload = {
+            "host_identity": self.name,
+            "task_id": task.task_id,
+            "subject": task.subject,
+            "body": task.body,
+            "integration_version": capabilities.integration_version,
+            "protocol_version": capabilities.protocol_version,
+            "delivery_token": token,
+        }
+        self._write_card_atomically(task.task_id, payload)
+        return OperationResult(self.name, True, DeliveryStatus.QUEUED, "session card queued for host consumer")
+
+    def acknowledge_integration(
+        self, acknowledgement: TaskAcknowledgement, shared_acknowledge: SharedAcknowledge
+    ) -> OperationResult:
+        """Accept only an explicit host consumer ACK matching a queued task card."""
+        if not isinstance(acknowledgement, TaskAcknowledgement):
+            raise TypeError("acknowledgement must be a TaskAcknowledgement")
+        if not callable(shared_acknowledge):
+            raise TypeError("shared_acknowledge must be callable")
+        if not self.detect().found or not self._consumer_is_installed():
+            return OperationResult(self.name, False, DeliveryStatus.FAILED, "host session-card consumer is unavailable")
+        capabilities = self.capabilities()
+        if (
+            acknowledgement.host_identity != self.name
+            or acknowledgement.integration_version != capabilities.integration_version
+            or acknowledgement.protocol_version != capabilities.protocol_version
+        ):
+            return OperationResult(self.name, False, DeliveryStatus.FAILED, "acknowledgement does not match host capabilities")
+        card = self._read_card(acknowledgement.task_id)
+        expected = acknowledgement.as_shared_payload()
+        if card is None or any(card.get(key) != value for key, value in expected.items()):
+            return OperationResult(self.name, False, DeliveryStatus.FAILED, "acknowledgement does not match a queued task card")
+        if card.get("delivery_token") != acknowledgement.delivery_token:
+            return OperationResult(self.name, False, DeliveryStatus.FAILED, "acknowledgement delivery token is invalid")
+        try:
+            shared_acknowledge(**expected)
+        except Exception as error:
+            return OperationResult(self.name, False, DeliveryStatus.FAILED, "shared acknowledgement failed: {0}".format(error))
+        return OperationResult(self.name, True, DeliveryStatus.AGENT_ACKNOWLEDGED, "host consumer acknowledged queued task card", True)
+
+    def integration_acknowledgement(self, task_id: str) -> TaskAcknowledgement:
+        """Read the host-consumed card and prepare its explicit ACK request."""
+        if not self.detect().found or not self._consumer_is_installed():
+            raise ValueError("host session-card consumer is unavailable")
+        card = self._read_card(task_id)
+        if card is None:
+            raise ValueError("queued task card is unavailable")
+        try:
+            acknowledgement = TaskAcknowledgement(
+                str(card["host_identity"]),
+                str(card["task_id"]),
+                str(card["integration_version"]),
+                card["protocol_version"],
+                str(card["delivery_token"]),
+            )
+        except (KeyError, ValueError) as error:
+            raise ValueError("queued task card is invalid") from error
+        if acknowledgement.host_identity != self.name or acknowledgement.task_id != task_id:
+            raise ValueError("queued task card does not belong to this host")
+        capabilities = self.capabilities()
+        if (
+            acknowledgement.integration_version != capabilities.integration_version
+            or acknowledgement.protocol_version != capabilities.protocol_version
+        ):
+            raise ValueError("queued task card does not match host capabilities")
+        return acknowledgement
 
     def launch(self, task: TaskCard) -> OperationResult:
         if not self.detect().found:
@@ -208,112 +314,131 @@ class HostAdapter(abc.ABC):
             return OperationResult(self.name, False, DeliveryStatus.FAILED, "host is not detected; terminal was not opened")
         return OperationResult(self.name, False, DeliveryStatus.FAILED, "use the platform terminal fallback")
 
+    def _valid_installation_marker(self) -> bool:
+        try:
+            marker = json.loads(self.marker_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return isinstance(marker, dict) and marker.get("host") == self.name and self.mechanism in marker.get("mechanisms", ())
+
+    def _write_card_atomically(self, task_id: str, payload: dict) -> None:
+        self.inbox_path.mkdir(parents=True, exist_ok=True)
+        destination = self.task_card_path(task_id)
+        temporary = destination.with_name(destination.name + "." + secrets.token_hex(8) + ".tmp")
+        try:
+            with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+                json.dump(payload, stream, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                stream.write("\n")
+            os.replace(temporary, destination)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def _read_card(self, task_id: str) -> Optional[dict]:
+        try:
+            card = json.loads(self.task_card_path(task_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return card if isinstance(card, dict) else None
+
 
 class ManagedTomlAdapter(HostAdapter):
-    """Managed TOML block support that leaves all unowned text untouched."""
+    """Named managed TOML table support that leaves user-owned text unchanged."""
 
-    relative_config_path: Tuple[str, ...]
-
-    @property
-    def config_path(self) -> Path:
-        return self.home.joinpath(*self.relative_config_path)
-
-    def _host_present(self) -> bool:
-        return self.config_path.parent.is_dir()
+    managed_table = "agent_bridge"
 
     def _install_config(self) -> None:
         source = self.config_path.read_text(encoding="utf-8") if self.config_path.exists() else ""
         cleaned = _remove_toml_block(source, self.name)
-        body = "integration_version = {0}\nprotocol_version = {1}\nsurface = \"session_card\"".format(
-            json.dumps(self.capabilities().integration_version), self.capabilities().protocol_version
+        capabilities = self.capabilities()
+        lines = (
+            "[{0}]".format(self.managed_table),
+            "host_identity = {0}".format(json.dumps(self.name)),
+            "integration_version = {0}".format(json.dumps(capabilities.integration_version)),
+            "protocol_version = {0}".format(capabilities.protocol_version),
+            "surface = \"session_card\"",
+            "inbox = {0}".format(json.dumps(str(self.inbox_path))),
+            "entrypoint = {0}".format(json.dumps(self._entrypoint())),
         )
-        block = "# >>> agent-bridge:{0} >>>\n{1}\n# <<< agent-bridge:{0} <<<\n".format(self.name, body)
+        block = "# >>> agent-bridge:{0} >>>\n{1}\n# <<< agent-bridge:{0} <<<\n".format(self.name, "\n".join(lines))
         self.config_path.write_text(_append_block(cleaned, block), encoding="utf-8")
 
     def _uninstall_config(self) -> None:
-        source = self.config_path.read_text(encoding="utf-8")
-        self.config_path.write_text(_remove_toml_block(source, self.name), encoding="utf-8")
+        self.config_path.write_text(_remove_toml_block(self.config_path.read_text(encoding="utf-8"), self.name), encoding="utf-8")
+
+    def _consumer_is_installed(self) -> bool:
+        try:
+            text = self.config_path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        return "# >>> agent-bridge:{0} >>>".format(self.name) in text and "entrypoint" in text
+
+    def _entrypoint(self) -> list:
+        return ["python", "-m", "agent_bridge.adapters.integration", "--host", self.name]
 
 
 class ManagedJsonAdapter(HostAdapter):
-    """JSON integration storage with a byte-exact restore of existing config."""
-
-    relative_config_path: Tuple[str, ...]
-
-    @property
-    def config_path(self) -> Path:
-        return self.home.joinpath(*self.relative_config_path)
-
-    def _host_present(self) -> bool:
-        return self.config_path.parent.is_dir()
+    """Structured JSON ownership that merges removal with concurrent user edits."""
 
     def _managed_config(self, root: dict) -> None:
         """Host-specific documented configuration mutation."""
 
     def _install_config(self) -> None:
-        original = self.config_path.read_text(encoding="utf-8") if self.config_path.exists() else "{}\n"
-        try:
-            root = json.loads(original)
-        except json.JSONDecodeError as error:
-            raise ValueError("cannot update invalid JSON host config") from error
-        if not isinstance(root, dict):
-            raise ValueError("host config must contain a JSON object")
-        existing = root.get("agent_bridge")
-        saved_original = _original_json_text(existing)
-        if saved_original is not None:
-            original_text = saved_original
-        elif existing is not None:
-            # Older managed JSON did not include a byte snapshot. Remove that
-            # owned data before recording a clean baseline for this repair.
-            root.pop("agent_bridge", None)
-            self._remove_legacy_managed(root)
-            original_text = json.dumps(root, ensure_ascii=False, indent=2) + "\n"
-        else:
-            # A fresh install keeps the complete original so uninstall can
-            # restore unrelated JSON byte-for-byte.
-            original_text = original
+        root = _read_json_object(self.config_path)
         self._managed_config(root)
+        capabilities = self.capabilities()
         root["agent_bridge"] = {
-            "integration_version": self.capabilities().integration_version,
-            "protocol_version": self.capabilities().protocol_version,
+            "host_identity": self.name,
+            "integration_version": capabilities.integration_version,
+            "protocol_version": capabilities.protocol_version,
             "surface": Surface.SESSION_CARD.value,
-            "original_config": base64.b64encode(original_text.encode("utf-8")).decode("ascii"),
+            "inbox": str(self.inbox_path),
+            "entrypoint": self._entrypoint(),
         }
-        self.config_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        _write_json_object(self.config_path, root)
 
     def _uninstall_config(self) -> None:
-        source = self.config_path.read_text(encoding="utf-8")
+        root = _read_json_object(self.config_path)
+        root.pop("agent_bridge", None)
+        self._remove_legacy_managed(root)
+        _write_json_object(self.config_path, root)
+
+    def _consumer_is_installed(self) -> bool:
         try:
-            root = json.loads(source)
-        except json.JSONDecodeError as error:
-            raise ValueError("cannot update invalid JSON host config") from error
-        managed = root.get("agent_bridge") if isinstance(root, dict) else None
-        original_text = _original_json_text(managed)
-        if original_text is not None:
-            self.config_path.write_text(original_text, encoding="utf-8")
-            return
-        if isinstance(root, dict):
-            root.pop("agent_bridge", None)
-            self._remove_legacy_managed(root)
-            self.config_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            managed = _read_json_object(self.config_path).get("agent_bridge")
+        except ValueError:
+            return False
+        return isinstance(managed, dict) and managed.get("host_identity") == self.name and managed.get("entrypoint") == self._entrypoint()
+
+    def _entrypoint(self) -> list:
+        return ["python", "-m", "agent_bridge.adapters.integration", "--host", self.name]
 
     def _remove_legacy_managed(self, root: dict) -> None:
-        """Remove pre-snapshot data owned by a host integration."""
+        """Remove pre-v2 data owned by a host integration."""
 
 
-def _original_json_text(managed: object) -> Optional[str]:
-    if not isinstance(managed, dict) or not isinstance(managed.get("original_config"), str):
-        return None
+def _read_json_object(path: Path) -> dict:
+    source = path.read_text(encoding="utf-8") if path.exists() else "{}\n"
     try:
-        return base64.b64decode(managed["original_config"].encode("ascii"), validate=True).decode("utf-8")
-    except (UnicodeDecodeError, ValueError):
-        return None
+        root = json.loads(source)
+    except json.JSONDecodeError as error:
+        raise ValueError("cannot update invalid JSON host config") from error
+    if not isinstance(root, dict):
+        raise ValueError("host config must contain a JSON object")
+    return root
+
+
+def _write_json_object(path: Path, root: dict) -> None:
+    path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _bounded_text(name: str, value: object, maximum: int, required: bool = False) -> None:
+    if not isinstance(value, str) or (required and not value) or len(value) > maximum or "\x00" in value:
+        raise ValueError("{0} must be a {1}bounded string".format(name, "non-empty " if required else ""))
 
 
 def _remove_toml_block(source: str, host: str) -> str:
-    pattern = re.compile(
-        r"(?ms)^# >>> agent-bridge:{0} >>>\r?\n.*?^# <<< agent-bridge:{0} <<<\r?\n?".format(re.escape(host))
-    )
+    pattern = re.compile(r"(?ms)^# >>> agent-bridge:{0} >>>\r?\n.*?^# <<< agent-bridge:{0} <<<\r?\n?".format(re.escape(host)))
     return pattern.sub("", source)
 
 

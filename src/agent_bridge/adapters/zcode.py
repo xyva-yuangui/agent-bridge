@@ -10,6 +10,8 @@ class ZCodeAdapter(ManagedJsonAdapter):
     name = "zcode"
     fixture_suffix = ".json"
     relative_config_path = (".zcode", "cli", "config.json")
+    relative_marker_path = (".zcode", "cli", "agent-bridge-host.json")
+    mechanism = "plugin_hook"
 
     def capabilities(self) -> HostCapabilities:
         return HostCapabilities(Surface.SESSION_CARD, True, False, True, PROTOCOL_VERSION, "1.0.0")

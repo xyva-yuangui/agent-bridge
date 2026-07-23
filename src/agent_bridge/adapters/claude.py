@@ -10,6 +10,8 @@ class ClaudeAdapter(ManagedJsonAdapter):
     name = "claude"
     fixture_suffix = ".json"
     relative_config_path = (".claude", "settings.json")
+    relative_marker_path = (".claude", "agent-bridge-host.json")
+    mechanism = "hook"
 
     def capabilities(self) -> HostCapabilities:
         return HostCapabilities(Surface.SESSION_CARD, True, False, True, PROTOCOL_VERSION, "1.0.0")

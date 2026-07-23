@@ -10,6 +10,8 @@ class ReasonixAdapter(ManagedTomlAdapter):
     name = "reasonix"
     fixture_suffix = ".toml"
     relative_config_path = (".reasonix", "config.toml")
+    relative_marker_path = (".reasonix", "agent-bridge-host.json")
+    mechanism = "plugin"
 
     def capabilities(self) -> HostCapabilities:
         return HostCapabilities(Surface.SESSION_CARD, True, False, True, PROTOCOL_VERSION, "1.0.0")
