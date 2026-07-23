@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-bridge"
+version = "2.0.0"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+bridge = "agent_bridge.cli:main"
+bridge-mcp = "agent_bridge.mcp:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
