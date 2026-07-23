@@ -239,6 +239,15 @@ def ensure_dirs():
 BOARD_VERSION = 1
 VALID_STATES = {"pending", "accepted", "working", "completed", "failed", "canceled",
                 "input_required", "review_requested", "review_approved", "changes_requested"}
+TRANSITIONS = {
+    "claim": ({"pending", "changes_requested"}, "working", "assignee"),
+    "question": ({"working"}, "input_required", "assignee"),
+    "answer": ({"input_required"}, "pending", "sender"),
+    "request_review": ({"working"}, "review_requested", "assignee"),
+    "approve": ({"review_requested"}, "completed", "sender"),
+    "changes": ({"review_requested"}, "changes_requested", "sender"),
+    "done": ({"pending", "working", "changes_requested"}, "completed", "assignee"),
+}
 # ponytail: activity.jsonl rotation — keep it bounded so hook status never times out
 MAX_ACTIVITY_ENTRIES = 10000
 # ponytail: auto-cleanup — prevent board.json from growing unbounded
@@ -429,6 +438,68 @@ def _new_task_id() -> str:
 
 def _task_status(task: dict) -> str:
     return task.get("status", "pending")
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _transition_task(task: dict, actor: str, action: str) -> dict:
+    """Validate and apply one task-state transition."""
+    allowed, target_status, role = TRANSITIONS[action]
+    owner_field = "to" if role == "assignee" else "from"
+    expected_actor = task.get(owner_field)
+    if actor != expected_actor:
+        if role == "sender":
+            raise SystemExit(
+                f"error: task {task['id']} was sent by {expected_actor}, not {actor}"
+            )
+        raise SystemExit(f"error: task {task['id']} is not assigned to {actor}")
+    current = _task_status(task)
+    if current not in allowed:
+        raise SystemExit(
+            f"error: task {task['id']} is {current}; cannot {action}"
+        )
+    task["status"] = target_status
+    task["updated"] = _now()
+    return task
+
+
+def _queue_delivery(task: dict, target: str, detail: str = "queued") -> None:
+    task["delivery"] = {
+        "target": target,
+        "status": "queued",
+        "attempted_at": _now(),
+        "detail": detail,
+    }
+
+
+def _ack_pending_tasks(project_id: str, agent: str) -> int:
+    """A status/inbox check is an explicit delivery acknowledgment."""
+    bp = board_path(project_id)
+    if not bp.exists():
+        return 0
+    acknowledged = 0
+
+    def _ack(board):
+        nonlocal acknowledged
+        for task in board["tasks"]:
+            delivery = task.get("delivery") or {}
+            if delivery.get("target") != agent:
+                continue
+            if delivery.get("status") == "acknowledged":
+                continue
+            if _task_status(task) in ("completed", "failed", "canceled"):
+                continue
+            delivery["status"] = "acknowledged"
+            delivery["acknowledged_at"] = _now()
+            delivery["detail"] = f"acknowledged by {agent}"
+            task["delivery"] = delivery
+            acknowledged += 1
+        return board
+
+    atomic_update_board(bp, _ack)
+    return acknowledged
 
 
 def _inbox_filter(task: dict, me: str, max_age_days: int = MAX_INBOX_AGE_DAYS) -> bool:
@@ -804,6 +875,7 @@ def cmd_status(args):
     _auto_stale_working(pid, name)
     # ponytail: silently clean old completed tasks every turn
     _auto_clean(pid, name)
+    _ack_pending_tasks(pid, name)
     bp = board_path(pid)
     board = read_board(bp)
     pending = [t for t in board["tasks"] if _inbox_filter(t, name)]
@@ -851,6 +923,7 @@ def cmd_send(args):
         "files": args.files.split(",") if args.files else [],
         "project": pid,
     }
+    _queue_delivery(task, target)
     def _append(board):
         board["tasks"].append(task)
         return board
@@ -921,6 +994,7 @@ def cmd_inbox(args):
     pid = _project(args)
     # ponytail: auto-fail stale working tasks before checking inbox
     _auto_stale_working(pid, name)
+    _ack_pending_tasks(pid, name)
     bp = board_path(pid)
     board = read_board(bp)
     mine = [t for t in board["tasks"] if _inbox_filter(t, name)]
@@ -965,12 +1039,13 @@ def cmd_claim(args):
     def _claim(board):
         for t in board["tasks"]:
             if t["id"] == args.task_id:
-                if t["to"] != name:
-                    raise SystemExit(f"❌ task {args.task_id} is not assigned to you")
-                if t["status"] not in ("pending", "input_required", "changes_requested"):
-                    raise SystemExit(f"❌ task {args.task_id} is already {t['status']}")
-                t["status"] = "working"
-                t["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                _transition_task(t, name, "claim")
+                delivery = t.get("delivery") or {}
+                delivery["target"] = name
+                delivery["status"] = "acknowledged"
+                delivery["acknowledged_at"] = _now()
+                delivery["detail"] = f"claimed by {name}"
+                t["delivery"] = delivery
                 return board
         raise SystemExit(f"❌ task {args.task_id} not found")
     try:
@@ -991,12 +1066,9 @@ def cmd_done(args):
         nonlocal subject
         for t in board["tasks"]:
             if t["id"] == args.task_id:
-                if t["to"] != name:
-                    raise SystemExit(f"❌ task {args.task_id} is not assigned to you")
+                _transition_task(t, name, "done")
                 subject = t["subject"]
-                t["status"] = "completed"
                 t["result"] = args.result
-                t["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 if args.files:
                     t["files"] = args.files.split(",")
                 return board
@@ -1052,11 +1124,9 @@ def cmd_question(args):
     def _q(board):
         for t in board["tasks"]:
             if t["id"] == args.task_id:
-                if t["to"] != name:
-                    raise SystemExit(f"❌ task {args.task_id} is not assigned to you")
-                t["status"] = "input_required"
+                _transition_task(t, name, "question")
                 t["question"] = args.body
-                t["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                _queue_delivery(t, t["from"], "question awaiting sender")
                 return board
         raise SystemExit(f"❌ task {args.task_id} not found")
     try:
@@ -1074,11 +1144,9 @@ def cmd_answer(args):
     def _a(board):
         for t in board["tasks"]:
             if t["id"] == args.task_id:
-                if t["from"] != name:
-                    raise SystemExit(f"❌ task {args.task_id} was sent by {t['from']}, not you")
-                t["status"] = "working"
+                _transition_task(t, name, "answer")
                 t["answer"] = args.body
-                t["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                _queue_delivery(t, t["to"], "answer ready for assignee")
                 return board
         raise SystemExit(f"❌ task {args.task_id} not found")
     try:
@@ -1097,10 +1165,8 @@ def cmd_review(args):
         def _req(board):
             for t in board["tasks"]:
                 if t["id"] == args.task_id:
-                    if t["to"] != name:
-                        raise SystemExit(f"❌ task {args.task_id} is not assigned to you")
-                    t["status"] = "review_requested"
-                    t["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    _transition_task(t, name, "request_review")
+                    _queue_delivery(t, t["from"], "review requested")
                     return board
             raise SystemExit(f"❌ task {args.task_id} not found")
         try:
@@ -1126,11 +1192,13 @@ def cmd_review(args):
         def _verdict(board):
             for t in board["tasks"]:
                 if t["id"] == args.task_id:
-                    t["status"] = "review_approved" if verdict == "approve" else "changes_requested"
+                    action = "approve" if verdict == "approve" else "changes"
+                    _transition_task(t, name, action)
                     t["review_verdict"] = verdict
                     if args.body:
                         t["review_comment"] = args.body
-                    t["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    if verdict == "changes":
+                        _queue_delivery(t, t["to"], "review changes requested")
                     return board
             raise SystemExit(f"❌ task {args.task_id} not found")
         try:

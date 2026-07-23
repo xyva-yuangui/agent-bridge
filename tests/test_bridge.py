@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
-from tests.support import load_bridge, read_board, run_bridge
+from tests.support import load_bridge, read_board, run_bridge, write_agent
 
 
 OLD_TIMESTAMP = "2000-01-01T00:00:00Z"
@@ -158,6 +159,107 @@ class StorageTests(BridgeTestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--all or --days", result.stderr)
         self.assertEqual(len(read_board(self.home)["tasks"]), 1)
+
+
+class LifecycleTests(BridgeTestCase):
+    def setUp(self):
+        super().setUp()
+        write_agent(self.home, "alice", skills=["planning"])
+        write_agent(self.home, "bob", skills=["review"])
+        write_agent(self.home, "mallory", skills=["testing"])
+
+    def run_as(self, name: str, *args: str):
+        return run_bridge(
+            self.home,
+            "--as",
+            name,
+            *args,
+            extra_env={"PYTHONUTF8": "1"},
+        )
+
+    def send_task(self) -> str:
+        result = self.run_as(
+            "alice",
+            "send",
+            "--to",
+            "bob",
+            "--subject",
+            "workflow",
+            "--no-wake",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        match = re.search(r"\b[0-9a-f]{12}\b", result.stdout)
+        self.assertIsNotNone(match, result.stdout)
+        return match.group(0)
+
+    def test_answer_returns_task_to_assignee_inbox(self):
+        task_id = self.send_task()
+        self.assertEqual(self.run_as("bob", "claim", task_id).returncode, 0)
+        self.assertEqual(
+            self.run_as("bob", "question", task_id, "--body", "Need input").returncode,
+            0,
+        )
+
+        answer = self.run_as("alice", "answer", task_id, "--body", "Answer")
+        inbox = self.run_as("bob", "inbox")
+
+        self.assertEqual(answer.returncode, 0, answer.stderr)
+        self.assertIn(task_id, inbox.stdout)
+        self.assertEqual(self.task(task_id)["status"], "pending")
+
+    def test_review_approve_completes_task(self):
+        task_id = self.send_task()
+        self.assertEqual(self.run_as("bob", "claim", task_id).returncode, 0)
+        self.assertEqual(self.run_as("bob", "review", task_id).returncode, 0)
+
+        verdict = self.run_as(
+            "alice",
+            "review",
+            task_id,
+            "--verdict",
+            "approve",
+            "--body",
+            "accepted",
+        )
+
+        self.assertEqual(verdict.returncode, 0, verdict.stderr)
+        task = self.task(task_id)
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["review_verdict"], "approve")
+
+    def test_non_sender_cannot_issue_review_verdict(self):
+        task_id = self.send_task()
+        self.assertEqual(self.run_as("bob", "claim", task_id).returncode, 0)
+        self.assertEqual(self.run_as("bob", "review", task_id).returncode, 0)
+
+        verdict = self.run_as("mallory", "review", task_id, "--verdict", "approve")
+
+        self.assertNotEqual(verdict.returncode, 0)
+        self.assertIn("sent by alice", verdict.stderr)
+        self.assertEqual(self.task(task_id)["status"], "review_requested")
+
+    def test_input_required_task_cannot_be_claimed(self):
+        task_id = self.send_task()
+        self.assertEqual(self.run_as("bob", "claim", task_id).returncode, 0)
+        self.assertEqual(
+            self.run_as("bob", "question", task_id, "--body", "Need input").returncode,
+            0,
+        )
+
+        claim = self.run_as("bob", "claim", task_id)
+
+        self.assertNotEqual(claim.returncode, 0)
+        self.assertIn("input_required", claim.stderr)
+
+    def test_status_acknowledges_pending_delivery(self):
+        task_id = self.send_task()
+
+        status = self.run_as("bob", "status", "--oneliner")
+
+        self.assertEqual(status.returncode, 0, status.stderr)
+        delivery = self.task(task_id).get("delivery", {})
+        self.assertEqual(delivery.get("status"), "acknowledged")
+        self.assertTrue(delivery.get("acknowledged_at"))
 
 
 if __name__ == "__main__":
