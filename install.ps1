@@ -341,7 +341,7 @@ def upsert_scalar(source, section, key, value):
     body = match.group(2)
     key_pattern = re.compile(rf"(?m)^{re.escape(key)}\s*=.*$")
     if key_pattern.search(body):
-        body = key_pattern.sub(line, body, count=1)
+        body = key_pattern.sub(lambda _match: line, body, count=1)
     else:
         body = body.rstrip() + "\n" + line + "\n"
     return source[:match.start(2)] + body + source[match.end(2):]
@@ -359,11 +359,16 @@ def ensure_array_value(source, section, key, value):
     line_match = line_pattern.search(body)
     if not line_match:
         body = body.rstrip() + f"\n{key} = [{value_json}]\n"
-    elif value not in line_match.group(2):
-        values = line_match.group(2).strip()
-        replacement = line_match.group(1) + "[" + (
-            values + ", " if values else ""
-        ) + value_json + "]"
+    else:
+        raw_values = line_match.group(2).strip()
+        try:
+            values = json.loads("[" + raw_values + "]")
+        except (json.JSONDecodeError, TypeError):
+            values = []
+        values = list(dict.fromkeys(str(item) for item in values))
+        if value not in values:
+            values.append(value)
+        replacement = line_match.group(1) + json.dumps(values)
         body = body[:line_match.start()] + replacement + body[line_match.end():]
     return source[:match.start(2)] + body + source[match.end(2):]
 

@@ -10,6 +10,11 @@ from pathlib import Path
 
 from tests.support import ROOT
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.9/3.10 runtime compatibility
+    tomllib = None
+
 
 WINDOWS_INSTALLER = ROOT / "install.ps1"
 POSIX_INSTALLER = ROOT / "install.sh"
@@ -161,6 +166,19 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
                 .count("# >>> agent-bridge:reasonix >>>"),
                 1,
             )
+            if tomllib is not None:
+                reasonix = tomllib.loads(
+                    (root / ".reasonix" / "config.toml").read_text(encoding="utf-8")
+                )
+                allow_write = reasonix["sandbox"]["allow_write"]
+                self.assertEqual(len(allow_write), 1, reasonix)
+                self.assertTrue(
+                    allow_write[0].lower().endswith("\\.agent-bridge"),
+                    reasonix,
+                )
+                tomllib.loads(
+                    (root / ".codex" / "config.toml").read_text(encoding="utf-8")
+                )
 
             uninstall = subprocess.run(
                 [
