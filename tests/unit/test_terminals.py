@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -79,3 +81,16 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("'task; 123'", result.instructions)
         self.assertNotIn("show task; 123", result.instructions)
         self.assertIn(str(self.workspace.resolve()), result.instructions)
+
+    @patch("agent_bridge.terminals._is_windows", return_value=True)
+    @patch("agent_bridge.terminals.subprocess.Popen", side_effect=OSError("wt unavailable"))
+    def test_windows_fallback_renders_task_metacharacters_as_non_shell_data(self, ignored_popen, ignored_windows) -> None:
+        for task_id in ("task&calc", "task;Start-Process"):
+            with self.subTest(task_id=task_id):
+                result = open_task_terminal(None, task_id, self.workspace)
+
+                self.assertFalse(result.opened)
+                self.assertEqual(result.method, "instructions")
+                self.assertIn("not a shell command", result.instructions)
+                self.assertIn(json.dumps([sys.executable, "-m", "agent_bridge.cli", "show", task_id]), result.instructions)
+                self.assertNotIn("inspect task " + task_id, result.instructions)

@@ -26,7 +26,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(store.scalar("PRAGMA journal_mode"), "wal")
         self.assertEqual(store.scalar("PRAGMA foreign_keys"), 1)
         self.assertEqual(store.scalar("PRAGMA busy_timeout"), 5000)
-        self.assertEqual(store.scalar("SELECT MAX(version) FROM schema_migrations"), 1)
+        self.assertEqual(store.scalar("SELECT MAX(version) FROM schema_migrations"), 2)
 
     def test_task_and_outbox_rollback_together(self):
         self.store = Store.open(self.db_path)
@@ -128,17 +128,17 @@ class StoreTests(unittest.TestCase):
 
     def test_non_initial_migration_creates_readable_restorable_backup(self):
         store = Store.open(self.db_path)
-        initial_migrations = list(store._migration_sources())
+        v2_migrations = list(store._migration_sources())
         store.close()
-        second_migration = (2, "CREATE TABLE migration_backup_probe (id INTEGER PRIMARY KEY);")
+        third_migration = (3, "CREATE TABLE migration_backup_probe (id INTEGER PRIMARY KEY);")
 
         with mock.patch.object(
-            Store, "_migration_sources", return_value=initial_migrations + [second_migration]
+            Store, "_migration_sources", return_value=v2_migrations + [third_migration]
         ):
             upgraded = Store.open(self.db_path)
             upgraded.close()
 
-        backups = list(self.root.glob("agent-bridge.sqlite3.before-v2.*.bak"))
+        backups = list(self.root.glob("agent-bridge.sqlite3.before-v3.*.bak"))
         self.assertEqual(len(backups), 1)
         restored_path = self.root / "restored.sqlite3"
         restored_path.write_bytes(backups[0].read_bytes())
@@ -146,10 +146,30 @@ class StoreTests(unittest.TestCase):
         try:
             self.assertEqual(restored.execute(
                 "SELECT MAX(version) FROM schema_migrations"
-            ).fetchone()[0], 1)
+            ).fetchone()[0], 2)
             self.assertIsNone(restored.execute(
                 "SELECT 1 FROM sqlite_master WHERE name = 'migration_backup_probe'"
             ).fetchone())
             self.assertEqual(restored.execute("PRAGMA integrity_check").fetchone()[0], "ok")
         finally:
             restored.close()
+
+    def test_v1_database_upgrades_to_v2_launch_reservations(self):
+        source_store = Store.open(self.db_path)
+        migrations = list(source_store._migration_sources())
+        source_store.close()
+        v1_migrations = [migration for migration in migrations if migration[0] == 1]
+        legacy_path = self.root / "legacy-v1.sqlite3"
+
+        with mock.patch.object(Store, "_migration_sources", return_value=v1_migrations):
+            legacy = Store.open(legacy_path)
+            legacy.close()
+
+        upgraded = Store.open(legacy_path)
+        try:
+            self.assertEqual(upgraded.scalar("SELECT MAX(version) FROM schema_migrations"), 2)
+            self.assertIsNotNone(upgraded.scalar(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'launch_reservations'"
+            ))
+        finally:
+            upgraded.close()

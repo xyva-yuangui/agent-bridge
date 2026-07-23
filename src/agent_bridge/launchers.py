@@ -106,7 +106,7 @@ def launch_agent(decision: LaunchDecision) -> LaunchResult:
         kwargs["start_new_session"] = True
     try:
         process = subprocess.Popen(list(decision.argv), **kwargs)
-    except OSError as error:
+    except (OSError, ValueError) as error:
         return LaunchResult(False, "launch failed: {0}".format(error))
     return LaunchResult(True, pid=process.pid)
 
@@ -159,15 +159,19 @@ def load_agent_profile(store: Store, name: str) -> AgentProfile:
         argv = _string_tuple(json.loads(row["launch_argv_json"]))
         allowlist = _string_tuple(json.loads(row["workspace_allowlist_json"]))
         policy = ExecutionPolicy(str(row["execution_policy"]))
-    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        max_concurrency = int(row["max_concurrency"])
+        cooldown_seconds = int(row["cooldown_seconds"])
+        if max_concurrency < 1 or cooldown_seconds < 0:
+            raise ValueError("invalid launch limits")
+    except (TypeError, ValueError, OverflowError, json.JSONDecodeError) as error:
         raise LaunchPolicyError("invalid local launch profile") from error
     return AgentProfile(
         name=str(row["name"]),
         execution_policy=policy,
         launch_argv=argv,
         terminal_preference=str(row["terminal_preference"]),
-        max_concurrency=int(row["max_concurrency"]),
-        cooldown_seconds=int(row["cooldown_seconds"]),
+        max_concurrency=max_concurrency,
+        cooldown_seconds=cooldown_seconds,
         workspace_allowlist=allowlist,
     )
 
@@ -309,7 +313,7 @@ def _safe_argv(argv: Sequence[str]) -> Tuple[str, ...]:
     cleaned = tuple(argv)
     if any(not isinstance(value, str) or not value for value in cleaned):
         raise LaunchPolicyError("launch argv contains an empty argument")
-    if any(any(character in _SHELL_METACHARACTERS for character in value) for value in cleaned):
+    if any("\x00" in value or any(character in _SHELL_METACHARACTERS for character in value) for value in cleaned):
         raise LaunchPolicyError("launch argv contains shell metacharacters")
     return cleaned
 

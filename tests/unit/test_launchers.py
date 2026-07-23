@@ -7,8 +7,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_bridge.launchers import LaunchPolicyError, evaluate_launch, launch_agent
+from agent_bridge.launchers import LaunchPolicyError, evaluate_launch, launch_agent, load_agent_profile
 from agent_bridge.models import AgentProfile, ExecutionPolicy
+from agent_bridge.store import Store
 
 
 class LauncherPolicyTests(unittest.TestCase):
@@ -45,10 +46,21 @@ class LauncherPolicyTests(unittest.TestCase):
             evaluate_launch(self.profile(), self.other, 0, None, requested_auto=True)
 
     def test_rejects_empty_or_shell_like_configured_argv(self) -> None:
-        for argv in ((), ("agent.exe", ""), ("agent.exe", "resume; rm")):
+        for argv in ((), ("agent.exe", ""), ("agent.exe", "resume; rm"), ("agent.exe", "bad\x00arg")):
             with self.subTest(argv=argv):
                 with self.assertRaisesRegex(LaunchPolicyError, "argv"):
                     evaluate_launch(self.profile(launch_argv=argv), self.workspace, 0, None, requested_auto=True)
+
+    def test_invalid_numeric_profile_values_raise_a_policy_error(self) -> None:
+        store = Store.open(Path(self.directory.name) / "profile.sqlite3")
+        try:
+            with store.transaction(immediate=True) as connection:
+                connection.execute("INSERT INTO agents(name) VALUES ('zcode')")
+                connection.execute("UPDATE agents SET max_concurrency = 'invalid' WHERE name = 'zcode'")
+            with self.assertRaisesRegex(LaunchPolicyError, "invalid local launch profile"):
+                load_agent_profile(store, "zcode")
+        finally:
+            store.close()
 
     def test_rejects_concurrency_and_cooldown_before_launch(self) -> None:
         profile = self.profile(max_concurrency=1, cooldown_seconds=30)

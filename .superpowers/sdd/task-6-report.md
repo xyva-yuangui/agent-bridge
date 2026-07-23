@@ -128,3 +128,44 @@ git diff --check
 ```
 
 Result: `Ran 64 tests ... OK`; compilation and whitespace checks passed.
+
+## Re-review P1/P2 RED/GREEN (2026-07-24)
+
+### RED
+
+Updated store expectations for schema v2, added v1-to-v2 and synthetic
+v2-to-v3 backup coverage, and added launcher/terminal regressions for malformed
+numeric values, embedded-NUL argv, and Windows task IDs containing `&` and `;`.
+Then ran:
+
+```powershell
+$env:PYTHONPATH=(Join-Path $PWD 'src')
+python -m unittest tests.unit.test_store tests.unit.test_launchers tests.unit.test_terminals -v
+```
+
+Result: `FAILED (failures=3, errors=1)` as expected. An embedded NUL was
+accepted, malformed numeric profile values leaked `ValueError`, and the Windows
+fallback emitted copyable-looking raw task text such as `task&calc` and
+`task;Start-Process`.
+
+### GREEN
+
+- Store tests now assert version 2, use a synthetic migration 3 with a backup
+  baseline at version 2, and create a real v1 database before verifying upgrade
+  to the launch-reservation schema.
+- `_safe_argv` rejects embedded NULs; `launch_agent` also converts a defensive
+  `Popen` `ValueError` into a controlled failed result. Profile numeric limits
+  are parsed and range-checked inside the policy-error boundary.
+- If Windows Terminal cannot be opened, the fallback deliberately presents a
+  JSON argv array labelled **not a shell command**, rather than a string that
+  can be pasted into cmd.exe or PowerShell. This keeps `&` and `;` task text as
+  data. POSIX still renders a shell-quoted command with `shlex.join`.
+
+```powershell
+$env:PYTHONPATH=(Join-Path $PWD 'src')
+python -m unittest tests.unit.test_store tests.unit.test_launchers tests.unit.test_terminals tests.integration.test_launch_deduplication tests.integration.test_dispatcher tests.integration.test_dispatcher_faults tests.integration.test_cli_v2 tests.integration.test_mcp_v2 tests.integration.test_service_workflows -v
+python -m compileall -q src tests
+git diff --check
+```
+
+Result: all focused tests passed; compilation and whitespace checks passed.
