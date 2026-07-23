@@ -422,7 +422,7 @@ def enforce_workspace(pid: str):
     wsr = str(Path(ws).resolve())
     cwd = str(Path.cwd().resolve())
     if not _under(cwd, wsr):
-        print(f"🔒 project '{pid}' is bound to {wsr}; you are in {cwd} — refusing cross-project access",
+        print(f"[blocked] project '{pid}' is bound to {wsr}; you are in {cwd} — refusing cross-project access",
               file=sys.stderr)
         sys.exit(2)
 
@@ -847,7 +847,7 @@ def cmd_clean(args):
         if not removed:
             print("[empty] nothing to clean")
         else:
-            print(f"🔍 dry-run: {len(removed)} task(s) would be removed:")
+            print(f"[dry-run] {len(removed)} task(s) would be removed:")
             for t in removed:
                 print(f"  [{t['id']}] [{t['status']}] {t['subject']}")
     else:
@@ -1062,7 +1062,7 @@ def cmd_status(args):
             print(f"[empty] agent-bridge{tag}: no pending tasks for {name}")
         else:
             senders = {t["from"] for t in pending}
-            print(f"📥 agent-bridge{tag}: {n} pending (from {', '.join(sorted(senders))}) — run bridge inbox")
+            print(f"[inbox] agent-bridge{tag}: {n} pending (from {', '.join(sorted(senders))}) — run bridge inbox")
     else:
         print(f"agent-bridge{tag}: I am {name}, {n} pending, {len(board['tasks'])} total on board")
 
@@ -1161,7 +1161,7 @@ def cmd_agents(args):
     agents = load_agents()
     if not agents:
         print("[empty] no agents registered")
-        print("💡 register at install: install.sh ... --strengths \"hard reasoning, architecture (GPT-5.5)\"")
+        print("[info] register capabilities with install.ps1 or install.sh")
         return
     # Descriptive matrix. Routing is NOT a fixed table — the coordinator reads this
     # plus the project's CONTEXT.md and decides who fits THIS project's needs.
@@ -1192,13 +1192,13 @@ def cmd_inbox(args):
         print(f"  [{t['id']}] [{t['status']}] {t['subject']} (from {t['from']})")
         # show the content agents need to actually do the work
         if t.get("body"):
-            print(f"        ↳ {t['body']}")
+            print(f"        body: {t['body']}")
         if t.get("files"):
-            print(f"        📎 files: {', '.join(t['files'])}")
+            print(f"        files: {', '.join(t['files'])}")
         if t.get("question"):
-            print(f"        ❓ question: {t['question']}")
+            print(f"        question: {t['question']}")
         if t.get("answer"):
-            print(f"        💬 answer: {t['answer']}")
+            print(f"        answer: {t['answer']}")
         if t.get("review_comment"):
             print(f"        [changes] review: {t['review_comment']}")
 
@@ -1217,6 +1217,15 @@ def cmd_show(args):
         v = t.get(k)
         if v:
             print(f"{k:14} {', '.join(v) if isinstance(v, list) else v}")
+    delivery = t.get("delivery") or {}
+    if delivery.get("status"):
+        print(f"{'delivery':14} {delivery['status']}")
+    if delivery.get("detail"):
+        print(f"{'delivery_detail':14} {delivery['detail']}")
+    if delivery.get("attempted_at"):
+        print(f"{'delivery_at':14} {delivery['attempted_at']}")
+    if delivery.get("acknowledged_at"):
+        print(f"{'acknowledged_at':14} {delivery['acknowledged_at']}")
 
 
 def cmd_claim(args):
@@ -1325,7 +1334,7 @@ def cmd_question(args):
     try:
         atomic_update_board(bp, _q)
         _attempt_delivery(pid, args.task_id, target, f"Question: {subject}")
-        print(f"❓ question on {args.task_id}: {args.body}")
+        print(f"[question] {args.task_id}: {args.body}")
     except SystemExit as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
@@ -1385,7 +1394,7 @@ def cmd_review(args):
             rid = _new_task_id()
             with open(rp / f"{rid}.json", "w") as rf:
                 json.dump(review, rf, indent=2)
-            print(f"👀 review requested on {args.task_id} (review {rid})")
+            print(f"[review] requested on {args.task_id} (review {rid})")
         except SystemExit as e:
             print(str(e), file=sys.stderr)
             sys.exit(1)

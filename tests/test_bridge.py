@@ -331,6 +331,39 @@ class PlatformTests(BridgeTestCase):
 
         self.assertEqual(delivery["status"], "failed")
 
+    def test_show_includes_delivery_status_and_detail(self):
+        self.write_board(
+            [
+                {
+                    "id": "task-1",
+                    "subject": "review",
+                    "status": "pending",
+                    "from": "codex",
+                    "to": "zcode",
+                    "created": RECENT_TIMESTAMP,
+                    "updated": RECENT_TIMESTAMP,
+                    "delivery": {
+                        "status": "queued",
+                        "detail": "notification shown; awaiting acknowledgment",
+                    },
+                }
+            ]
+        )
+
+        shown = run_bridge(
+            self.home,
+            "--as",
+            "codex",
+            "show",
+            "task-1",
+            extra_env={"PYTHONUTF8": "1"},
+        )
+
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("delivery       queued", shown.stdout)
+        self.assertIn("delivery_detail", shown.stdout)
+        self.assertIn("awaiting acknowledgment", shown.stdout)
+
     def test_send_rejects_unregistered_target(self):
         write_agent(self.home, "alice", skills=["planning"])
 
