@@ -484,7 +484,7 @@ def _invoke_bounded(
         _start_worker(worker, deadline_at)
         started = True
         if _remaining(deadline_at) <= EFFECT_CLEANUP_RESERVE_SECONDS:
-            if not _terminate_worker(worker, deadline_at):
+            if not _terminate_worker(worker, deadline_at, conclusive=True):
                 raise RuntimeError("delivery worker started too late and did not terminate")
             return False, None
         wait_seconds = min(timeout_seconds, _effect_wait_budget(deadline_at))
@@ -532,7 +532,7 @@ def _after_effect_bounded(
         _start_worker(worker, deadline_at)
         started = True
         if _remaining(deadline_at) <= EFFECT_CLEANUP_RESERVE_SECONDS:
-            if not _terminate_worker(worker, deadline_at):
+            if not _terminate_worker(worker, deadline_at, conclusive=True):
                 raise RuntimeError("delivery hook worker started too late and did not terminate")
             return False, None
         wait_seconds = min(timeout_seconds, _effect_wait_budget(deadline_at))
@@ -597,12 +597,20 @@ def _after_effect_worker(
         sender.close()
 
 
-def _terminate_worker(worker: Any, deadline_at: float) -> bool:
+def _terminate_worker(worker: Any, deadline_at: float, conclusive: bool = False) -> bool:
     worker.terminate()
-    worker.join(min(WORKER_TERMINATE_SECONDS, _remaining(deadline_at)))
+    terminate_wait = WORKER_TERMINATE_SECONDS if conclusive else min(
+        WORKER_TERMINATE_SECONDS, _remaining(deadline_at)
+    )
+    worker.join(terminate_wait)
     if worker.is_alive() and hasattr(worker, "kill"):
         worker.kill()
-        worker.join(min(WORKER_KILL_SECONDS, _remaining(deadline_at)))
+        if conclusive:
+            worker.join()
+        else:
+            worker.join(min(WORKER_KILL_SECONDS, _remaining(deadline_at)))
+    elif worker.is_alive() and conclusive:
+        worker.join()
     return not worker.is_alive()
 
 

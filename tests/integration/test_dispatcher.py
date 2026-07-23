@@ -207,6 +207,23 @@ class DispatcherTests(unittest.TestCase):
             for child in multiprocessing.active_children()
         ))
 
+    def test_worker_starting_after_deadline_is_joined_without_effect(self) -> None:
+        self._outbox_item()
+        channel = self._recording()
+
+        def slow_start(worker, deadline_at):
+            time.sleep(0.75)
+            worker.start()
+
+        with patch("agent_bridge.dispatcher._start_worker", side_effect=slow_start):
+            Dispatcher(self.store, {"notification": channel}).run_burst(0.6)
+
+        self.assertEqual(list(channel.effects), [])
+        self.assertFalse(any(
+            child.name == "agent-bridge-delivery" and child.is_alive()
+            for child in multiprocessing.active_children()
+        ))
+
     def test_retry_preserves_existing_channel_evidence(self) -> None:
         self._outbox_item()
         Dispatcher(self.store, {"notification": self._recording()}).run_burst()
