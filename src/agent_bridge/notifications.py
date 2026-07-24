@@ -121,8 +121,18 @@ def _run_capped_helper(path: Path, payload: bytes, timeout: float, limit: int) -
     readers = [threading.Thread(target=drain, args=(0, process.stdout), daemon=True), threading.Thread(target=drain, args=(1, process.stderr), daemon=True)]
     for reader in readers: reader.start()
     assert process.stdin is not None
+    write_done = threading.Event()
+    def write_input() -> None:
+        try:
+            process.stdin.write(payload)
+            process.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            write_done.set()
+    writer = threading.Thread(target=write_input, daemon=True)
+    writer.start()
     try:
-        process.stdin.write(payload); process.stdin.close()
         deadline = time.monotonic() + timeout
         while process.poll() is None and not overflow.is_set() and time.monotonic() < deadline:
             time.sleep(0.005)
@@ -135,6 +145,9 @@ def _run_capped_helper(path: Path, payload: bytes, timeout: float, limit: int) -
     finally:
         if process.poll() is None:
             process.kill(); process.wait()
+        if process.stdin is not None:
+            process.stdin.close()
+        writer.join(1.0)
         for reader in readers: reader.join(1.0)
         for pipe in (process.stdout, process.stderr):
             if pipe is not None: pipe.close()
