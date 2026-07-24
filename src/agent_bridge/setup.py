@@ -132,9 +132,14 @@ def _install_runtime(home: Path) -> None:
 
 def _install_profiles(home: Path, names: Tuple[str, ...]) -> None:
     for name in names:
-        _write_owned_json(_data_root(home) / "agents" / name / "agent.json", {
+        profile = _data_root(home) / "agents" / name / "agent.json"
+        receipt = _data_root(home) / "agents" / name / "agent-bridge-profile.json"
+        if profile.exists() and not receipt.exists():
+            raise RuntimeError("refusing to overwrite unowned agent profile: " + name)
+        _write_owned_json(profile, {
             "name": name, "skills": [], "strengths": "local host integration", "last_seen": "managed",
         })
+        _write_owned_json(receipt, {"owner": OWNER, "profile": str(profile), "sha256": hashlib.sha256(profile.read_bytes()).hexdigest()})
 
 
 def _native_paths(home: Path) -> Tuple[Path, Path]:
