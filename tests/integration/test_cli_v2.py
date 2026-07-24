@@ -74,6 +74,22 @@ class CliV2Tests(unittest.TestCase):
         for command in REQUIRED_COMMANDS:
             self.assertIn(command, result.stdout)
 
+    def test_tui_command_runs_the_on_demand_controller(self):
+        from agent_bridge import cli
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store.open(Path(directory) / "agent-bridge.sqlite3")
+            service = BridgeService(store)
+            try:
+                with patch("agent_bridge.cli.open_service", return_value=service), \
+                     patch("agent_bridge.tui.controller.default_input_adapter", return_value=object()), \
+                     patch("agent_bridge.tui.controller.run_tui", return_value=0) as run_tui:
+                    self.assertEqual(cli.main(["--as", "zcode", "tui", "--project", "demo"]), 0)
+                self.assertEqual(run_tui.call_args.kwargs["actor"], "zcode")
+                self.assertEqual(run_tui.call_args.kwargs["project_id"], "demo")
+            finally:
+                store.close()
+
     def test_json_workflow_uses_service_views(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

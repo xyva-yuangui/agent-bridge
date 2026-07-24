@@ -8,12 +8,14 @@ import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
 from .models import DeliveryStatus, TaskState
 from .outbox import enqueue, utc_now
 from .state_machine import authorize_transition
 from .store import Store
+from .terminals import OpenResult, open_task_terminal
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,26 @@ class TaskPage:
 
     def __getitem__(self, index: int) -> TaskView:
         return self.tasks[index]
+
+
+@dataclass(frozen=True)
+class AgentView:
+    """Safe, read-only agent presence data for terminal and host views."""
+
+    name: str
+    capabilities: Tuple[str, ...]
+    health: str
+    execution_policy: str
+    terminal_preference: str
+
+
+@dataclass(frozen=True)
+class DeliveryEvidence:
+    """Most recent delivery evidence for a task, without exposing storage rows."""
+
+    status: str
+    channel: str = ""
+    attempts: int = 0
 
 
 MAX_INBOX_PAGE_SIZE = 100
@@ -242,6 +264,75 @@ class BridgeService:
 
     def board(self, project_id: str) -> List[TaskView]:
         return self._query_tasks("project_id = ?", (project_id,))
+
+    def board_page(
+        self, project_id: str, limit: int = MAX_INBOX_PAGE_SIZE, cursor: Optional[str] = None
+    ) -> TaskPage:
+        """Return one bounded project-board page for UI clients."""
+        return self._query_task_page("project_id = ?", (project_id,), limit, cursor)
+
+    def agents(self) -> Tuple[AgentView, ...]:
+        """Return UI-safe agent presence information through the application API."""
+        rows = self.store.connection.execute(
+            "SELECT name, capabilities_json, integration_health, execution_policy, terminal_preference "
+            "FROM agents ORDER BY name"
+        ).fetchall()
+        views = []
+        for row in rows:
+            try:
+                capabilities = tuple(str(item) for item in json.loads(row["capabilities_json"]))
+            except (TypeError, ValueError):
+                capabilities = ()
+            views.append(AgentView(
+                str(row["name"]), capabilities, str(row["integration_health"]),
+                str(row["execution_policy"]), str(row["terminal_preference"]),
+            ))
+        return tuple(views)
+
+    def delivery_evidence(self, task_id: str) -> DeliveryEvidence:
+        """Return the newest delivery proof, or queued when delivery work remains."""
+        row = self.store.connection.execute(
+            "SELECT channel, status, attempts FROM delivery_attempts WHERE task_id = ? "
+            "ORDER BY updated_at DESC, id DESC LIMIT 1", (task_id,)
+        ).fetchone()
+        if row is not None:
+            return DeliveryEvidence(str(row["status"]), str(row["channel"]), int(row["attempts"]))
+        queued = self.store.connection.execute(
+            "SELECT 1 FROM outbox WHERE completed_at IS NULL "
+            "AND json_extract(payload_json, '$.task_id') = ? LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        return DeliveryEvidence("queued" if queued is not None else "unknown")
+
+    def retry_delivery(self, task_id: str) -> DeliveryEvidence:
+        """Add a fresh, durable delivery request without mutating task lifecycle state."""
+        with self.store.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT sender, assignee, revision FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError("unknown task: {0}".format(task_id))
+            timestamp = utc_now()
+            enqueue(
+                connection,
+                "{0}:{1}:task.retry:{2}".format(task_id, row["revision"], uuid.uuid4().hex),
+                "task.retry",
+                {"actor": str(row["sender"]), "delivery_status": DeliveryStatus.QUEUED.value,
+                 "recipient": str(row["assignee"]), "task_id": task_id},
+                timestamp,
+            )
+        return DeliveryEvidence(DeliveryStatus.QUEUED.value)
+
+    def open_terminal(self, task_id: str, adapter: object = None) -> OpenResult:
+        """Open the selected task through the safe terminal-opening service boundary."""
+        task = self.show(task_id)
+        row = self.store.connection.execute(
+            "SELECT path FROM projects WHERE id = ?", (task.project_id,)
+        ).fetchone()
+        workspace = Path(str(row["path"])) if row is not None else Path()
+        if not workspace.is_dir():
+            return OpenResult(False, "instructions", instructions="workspace is unavailable for task " + task.id)
+        return open_task_terminal(adapter, task.id, workspace)
 
     def _artifact_paths(self, task_id: str) -> Tuple[str, ...]:
         rows = self.store.connection.execute(

@@ -31,7 +31,7 @@ from .version import BRIDGE_VERSION, SCHEMA_VERSION
 
 
 MCP_EXCLUDED_COMMANDS = frozenset(("dispatch", "tui", "setup", "uninstall", "open-action"))
-UNAVAILABLE_COMMANDS = frozenset(("tui", "setup", "uninstall"))
+UNAVAILABLE_COMMANDS = frozenset(("setup", "uninstall"))
 
 
 class CommandUnavailable(RuntimeError):
@@ -385,6 +385,8 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch = command("dispatch"); dispatch.add_argument("--burst", action="store_true")
     for name in UNAVAILABLE_COMMANDS:
         command(name, help="reserved for a later v2 component")
+    tui = command("tui", help="open the on-demand terminal dashboard")
+    tui.add_argument("--project", default="default")
     open_action = command("open-action")
     action_source = open_action.add_mutually_exclusive_group(required=True)
     action_source.add_argument("--activation-uri")
@@ -399,6 +401,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     arguments = parser.parse_args(argv)
     service = open_service(arguments.data_root)
     try:
+        if arguments.command == "tui":
+            # Keep interactive terminal ownership outside the JSON command
+            # renderer.  The controller itself handles non-VT fallback output.
+            from .tui.controller import default_input_adapter, run_tui
+            return run_tui(
+                service, default_input_adapter(), sys.stdout,
+                actor=str(arguments.identity).strip() or "unknown", project_id=str(arguments.project),
+            )
         result = execute_command(service, str(arguments.identity).strip() or "unknown", arguments.command, vars(arguments))
         if arguments.command == "status" and arguments.oneliner and not arguments.as_json:
             print("agent-bridge {0}: {1} assigned task(s)".format(arguments.identity, len(result["tasks"])))
