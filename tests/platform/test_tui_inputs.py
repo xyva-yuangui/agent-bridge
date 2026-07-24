@@ -68,6 +68,18 @@ class InputAdapterTests(unittest.TestCase):
         self.assertIsNone(adapter.read_key(0.25))
         self.assertEqual(waits, [0.25])
 
+    def test_posix_adapter_consumes_complete_csi_sequences(self) -> None:
+        from agent_bridge.tui.input_posix import PosixInputAdapter
+
+        class Stream:
+            def __init__(self, text): self.values = iter(text)
+            def isatty(self): return True
+            def read(self, count): return next(self.values)
+        for sequence, expected in (("\x1b[A", "up"), ("\x1b[5~", "previous_page"), ("\x1b[6~", "next_page")):
+            with self.subTest(sequence=sequence):
+                stream = Stream(sequence)
+                self.assertEqual(PosixInputAdapter(stream, select_fn=lambda *args: ([stream], [], [])).read_key(.25).value, expected)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -61,13 +61,21 @@ class PosixInputAdapter:
         ready, _, _ = self._select([self.stream], [], [], 0.01)
         if not ready:
             return None
-        sequence = first
+        ready, _, _ = self._select([self.stream], [], [], 0.01)
+        if not ready:
+            return None
+        introducer = self.stream.read(1)
+        if introducer != "[":
+            # Plain Escape and Alt chords are deliberately inert, but fully consumed.
+            return parse_key(first + introducer)
+        sequence = first + introducer
         for ignored in range(16):
             ready, _, _ = self._select([self.stream], [], [], 0.01)
             if not ready:
                 break
             sequence += self.stream.read(1)
-            if len(sequence) > 1 and "@" <= sequence[-1] <= "~":
+            # CSI final bytes follow the '[' introducer and any parameter/intermediate bytes.
+            if "@" <= sequence[-1] <= "~":
                 break
         return parse_key(sequence)
 
