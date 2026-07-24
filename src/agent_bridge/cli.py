@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import uuid
+from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
@@ -308,11 +309,14 @@ def _activity_since(value: Any) -> Optional[str]:
 
 def _activation_uri(value: str) -> tuple[str, str]:
     """Parse only the helper's opaque, query-free activation URI."""
-    prefix = "agent-bridge://action/"
-    if not value.startswith(prefix) or "?" in value or "#" in value or value.count("/") != 3:
+    parsed = urlsplit(value)
+    if parsed.scheme != "agent-bridge" or parsed.netloc != "action" or parsed.username or parsed.password or parsed.port is not None or parsed.query or parsed.fragment:
         raise ValueError("invalid activation URI")
-    action, separator, notification_id = value[len(prefix):].partition("/")
-    if not separator or action not in ("view", "claim", "snooze"):
+    parts = parsed.path.split("/")
+    if len(parts) != 3 or parts[0] or parts[1] not in ("view", "claim", "snooze"):
+        raise ValueError("invalid activation URI")
+    action, notification_id = parts[1], parts[2]
+    if "%" in parsed.path:
         raise ValueError("invalid activation URI")
     if not notification_id or len(notification_id) > 256 or not all(
         character.isascii() and (character.isalnum() or character in "._-") for character in notification_id

@@ -164,10 +164,17 @@ function Install-WindowsNotifier {
     $destination = Join-Path $script:NotifierHome "agent-bridge-windows-notify.exe"
     Copy-Item -LiteralPath $source -Destination $destination -Force
     $json = (@($PythonPath, "-m", "agent_bridge.cli") | ConvertTo-Json -Compress)
+    $env:AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER = $destination
     [Environment]::SetEnvironmentVariable("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", $destination, "User")
     $request = '{"operation":"register","activation_argv":' + $json + '}'
-    $request | & $destination | Out-Null
-    if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $destination -Force; throw "Windows notifier registration failed." }
+    try {
+        $result = $request | & $destination | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0 -or -not $result.ok -or $result.status -ne "os_posted") { throw "Windows notifier registration returned an invalid result." }
+    } catch {
+        [Environment]::SetEnvironmentVariable("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", $null, "User")
+        Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        throw
+    }
 }
 
 function Get-ExistingWakeArgv {
