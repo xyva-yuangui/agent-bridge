@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from ..models import DeliveryStatus
+from ..atomic_fs import ExchangeUnsupported, exchange, fsync_parent
 from ..version import PROTOCOL_VERSION
 
 
@@ -644,18 +645,16 @@ def _atomic_write(path: Path, text: str, expected_source: Optional[str] = None) 
                 return _AtomicWriteResult(False, path.read_text(encoding="utf-8") if path.exists() else "")
             return _AtomicWriteResult(True)
         if os.name != "nt":
-            # POSIX fallback is guarded by the caller's sibling config lock;
-            # recheck after the test seam and refuse a changed source.
-            displaced = path.read_text(encoding="utf-8") if path.exists() else ""
-            if displaced != expected_source:
-                return _AtomicWriteResult(False, displaced)
-            os.replace(str(temporary), str(path))
             try:
-                parent_descriptor = os.open(str(path.parent), os.O_RDONLY)
-                os.fsync(parent_descriptor); os.close(parent_descriptor)
-            except OSError:
-                pass
-            return _AtomicWriteResult(True, expected_source)
+                exchange(path, temporary)
+            except ExchangeUnsupported as error:
+                raise RuntimeError("atomic config exchange unsupported") from error
+            displaced = temporary.read_text(encoding="utf-8")
+            if displaced != expected_source:
+                exchange(path, temporary)  # restore exact displaced content
+                return _AtomicWriteResult(False, displaced)
+            fsync_parent(path)
+            return _AtomicWriteResult(True, displaced)
         backup = Path(tempfile.mktemp(prefix=path.name + ".", suffix=".bak", dir=str(path.parent)))
         replaced = ctypes.windll.kernel32.ReplaceFileW(str(path), str(temporary), str(backup), 0, None, None)
         if not replaced:
