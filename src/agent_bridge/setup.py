@@ -131,17 +131,22 @@ def _install_runtime(home: Path) -> None:
     stage = data / (".skill-stage-" + next(tempfile._get_candidate_names()))
     backup = data / (".skill-backup-" + next(tempfile._get_candidate_names()))
     try:
-        shutil.copytree(root / "scripts", stage / "scripts")
-        # A repair can be launched through the copied runtime itself.  In
-        # that case ``root`` is the owned ``skill`` directory rather than a
-        # source checkout, so retain the same package instead of requiring
-        # PYTHONPATH or a successful pip install.
-        source_package = root / "src" / "agent_bridge"
-        if not source_package.is_dir():
-            source_package = root / "runtime" / "agent_bridge"
-        if not source_package.is_dir():
-            raise RuntimeError("Agent Bridge runtime source package is missing")
-        shutil.copytree(source_package, stage / "runtime" / "agent_bridge")
+        scripts = stage / "scripts"; scripts.mkdir(parents=True)
+        (scripts / "bridge.py").write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\nfrom pathlib import Path\n"
+            "runtime = Path(__file__).resolve().parent.parent / 'runtime'\n"
+            "if runtime.is_dir(): sys.path.insert(0, str(runtime))\n"
+            "from agent_bridge.cli import main\n"
+            "if __name__ == '__main__': raise SystemExit(main())\n",
+            encoding="utf-8",
+        )
+        # The installed distribution is authoritative.  Resolving relative to
+        # a checkout worked only in development and made a wheel install fail
+        # when setup first created the self-contained repair runtime.
+        package = resources.files("agent_bridge")
+        with resources.as_file(package) as source_package:
+            shutil.copytree(source_package, stage / "runtime" / "agent_bridge", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         for name in ("SKILL.md", "README.md", "README.zh-CN.md"):
             if (root / name).is_file(): shutil.copy2(root / name, stage / name)
         if skill.exists(): os.replace(skill, backup)

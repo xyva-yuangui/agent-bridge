@@ -6,28 +6,26 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing vX.Y.Z tag to verify
+        description: Existing annotated vX.Y.Z tag to release
         required: true
         type: string
       sign:
-        description: Sign/notarize when required credentials are configured
+        description: Sign and notarize a manual release (tag releases always sign)
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
-  contents: read
+  contents: write
   attestations: write
   id-token: write
 
 jobs:
-  release:
-    runs-on: macos-latest
-    env:
-      REQUESTED_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
-      SIGNING_REQUESTED: "true"
-      AGENT_BRIDGE_CODESIGN_IDENTITY: ${{ secrets.AGENT_BRIDGE_CODESIGN_IDENTITY }}
-      AGENT_BRIDGE_NOTARY_PROFILE: ${{ secrets.AGENT_BRIDGE_NOTARY_PROFILE }}
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      signing: ${{ steps.release.outputs.signing }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,68 +34,192 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Require a clean annotated release tag
+      - id: release
+        name: Require an annotated, version-matched release tag
+        env:
+          REQUESTED_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+          MANUAL_SIGN: ${{ inputs.sign }}
+          AGENT_BRIDGE_CODESIGN_IDENTITY: ${{ secrets.AGENT_BRIDGE_CODESIGN_IDENTITY }}
+          AGENT_BRIDGE_NOTARY_PROFILE: ${{ secrets.AGENT_BRIDGE_NOTARY_PROFILE }}
         shell: bash
         run: |
+          set -euo pipefail
           test -n "$REQUESTED_TAG"
           test "$(git cat-file -t "$REQUESTED_TAG")" = tag
           git describe --exact-match --tags HEAD | grep -Fx "$REQUESTED_TAG"
-          test -z "$(git status --porcelain)"
           test "${REQUESTED_TAG#v}" = "$(python -c 'from pathlib import Path; import re; print(re.search(r"version = \"([^\"]+)\"", Path("pyproject.toml").read_text()).group(1))')"
-      - name: Install build tooling
-        run: python -m pip install --upgrade pip build
-      - name: Test before artifacts
+          if [[ "$GITHUB_REF_TYPE" == tag || "$MANUAL_SIGN" == true ]]; then
+            test -n "$AGENT_BRIDGE_CODESIGN_IDENTITY"
+            test -n "$AGENT_BRIDGE_NOTARY_PROFILE"
+            signing=true
+          else
+            signing=false
+          fi
+          echo "tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+          echo "signing=$signing" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: validate
+    runs-on: windows-latest
+    env:
+      REQUESTED_TAG: ${{ needs.validate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build and verify the locked Windows helper
+        shell: pwsh
         run: |
-          python -m pip install .
-          python -m unittest discover -s tests -v
-          python -m compileall -q src scripts tests
+          ./native/windows-notify/scripts/verify-release.ps1
+          Copy-Item native/windows-notify/dist/windows-x86_64/agent-bridge-windows-notify.exe src/agent_bridge/native/windows-x86_64/agent-bridge-windows-notify.exe -Force
+          if ((Get-FileHash native/windows-notify/dist/windows-x86_64/agent-bridge-windows-notify.exe).Hash -ne (Get-FileHash src/agent_bridge/native/windows-x86_64/agent-bridge-windows-notify.exe).Hash) { throw 'staged helper differs from verified helper' }
+      - name: Build and exercise the packaged Windows wheel
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+          New-Item -ItemType Directory -Force release | Out-Null
+          $wheel = Get-ChildItem dist/*.whl | Select-Object -First 1
+          $platformWheel = Join-Path release ($wheel.Name -replace '-py3-none-any\.whl$', '-py3-none-win_amd64.whl')
+          python scripts/retag_wheel.py $wheel.FullName $platformWheel --tag py3-none-win_amd64
+          python -m venv .release-venv
+          .\.release-venv\Scripts\python -m pip install --force-reinstall --no-deps $platformWheel
+          Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+          .\.release-venv\Scripts\bridge --version
+          .\.release-venv\Scripts\bridge setup --dry-run --auto
+          Copy-Item install.ps1,README.md,LICENSE release/
+          Compress-Archive -Path $platformWheel,release/install.ps1,release/README.md,release/LICENSE -DestinationPath release/agent-bridge-windows-x86_64-portable.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: platform-windows
+          path: release/*
+          if-no-files-found: error
+
+  macos:
+    needs: validate
+    runs-on: macos-latest
+    env:
+      REQUESTED_TAG: ${{ needs.validate.outputs.tag }}
+      SIGNING_REQUIRED: ${{ needs.validate.outputs.signing }}
+      AGENT_BRIDGE_CODESIGN_IDENTITY: ${{ secrets.AGENT_BRIDGE_CODESIGN_IDENTITY }}
+      AGENT_BRIDGE_NOTARY_PROFILE: ${{ secrets.AGENT_BRIDGE_NOTARY_PROFILE }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build, sign, notarize, and verify universal helper before staging
+        shell: bash
+        run: |
+          set -euo pipefail
           native/macos-notify/scripts/build-universal2.sh
-      - name: Build wheel and sdist
-        run: python -m build
-      - name: Create portable source archive
+          binary=native/macos-notify/dist/AgentBridgeNotifier.app/Contents/MacOS/AgentBridgeNotifier
+          test -s "$binary"
+          file "$binary"
+          lipo -archs "$binary" | grep -qw x86_64
+          lipo -archs "$binary" | grep -qw arm64
+          if [[ "$SIGNING_REQUIRED" == true ]]; then
+            native/macos-notify/scripts/sign-and-notarize.sh
+            codesign --verify --deep --strict native/macos-notify/dist/AgentBridgeNotifier.app
+            spctl --assess --type execute --verbose=4 native/macos-notify/dist/AgentBridgeNotifier.app
+          else
+            echo 'UNSIGNED MANUAL ARTIFACT: explicit workflow_dispatch sign=false'
+          fi
+          rm -rf src/agent_bridge/native/macos-universal2
+          mkdir -p src/agent_bridge/native/macos-universal2
+          cp -R native/macos-notify/dist/AgentBridgeNotifier.app src/agent_bridge/native/macos-universal2/
+      - name: Build and exercise packaged macOS wheel
         shell: bash
         run: |
+          python -m pip install --upgrade pip build
+          python -m build
           mkdir -p release
-          git archive --format=zip --prefix="agent-bridge-${REQUESTED_TAG#v}/" HEAD > "release/agent-bridge-${REQUESTED_TAG#v}-portable.zip"
-          cp dist/* release/
-      - name: Generate SPDX SBOM and checksums
+          wheel=$(echo dist/*.whl)
+          platform_wheel="release/$(basename "$wheel" | sed 's/-py3-none-any\.whl$/-py3-none-macosx_11_0_universal2.whl/')"
+          python scripts/retag_wheel.py "$wheel" "$platform_wheel" --tag py3-none-macosx_11_0_universal2
+          python -m venv .release-venv
+          .release-venv/bin/pip install --force-reinstall --no-deps "$platform_wheel"
+          unset PYTHONPATH
+          .release-venv/bin/bridge --version
+          .release-venv/bin/bridge setup --dry-run --auto
+          mkdir -p release/agent-bridge-macos-universal2-portable
+          cp "$platform_wheel" install.sh README.md LICENSE release/agent-bridge-macos-universal2-portable/
+          ditto -c -k --keepParent release/agent-bridge-macos-universal2-portable release/agent-bridge-macos-universal2-portable.zip
+          rm -rf release/agent-bridge-macos-universal2-portable
+      - uses: actions/upload-artifact@v4
+        with:
+          name: platform-macos
+          path: release/*
+          if-no-files-found: error
+
+  python:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Test and build source distribution
         shell: bash
         run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build
+          python -m build
+          python -m venv .release-venv
+          .release-venv/bin/pip install --force-reinstall --no-deps dist/*.whl
+          unset PYTHONPATH
+          .release-venv/bin/bridge doctor
+          mkdir -p release
+          cp dist/*.tar.gz release/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: platform-python
+          path: release/*
+          if-no-files-found: error
+
+  aggregate:
+    needs: [validate, windows, macos, python]
+    runs-on: ubuntu-latest
+    env:
+      REQUESTED_TAG: ${{ needs.validate.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: incoming
+      - name: Verify the complete signed artifact inventory and create SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find incoming -type f -exec cp {} release/ \;
+          for required in '*-py3-none-win_amd64.whl' agent-bridge-windows-x86_64-portable.zip '*-py3-none-macosx_11_0_universal2.whl' agent-bridge-macos-universal2-portable.zip; do
+            test -n "$(find release -maxdepth 1 -name "$required" -print -quit)"
+          done
+          test -n "$(find release -name '*.tar.gz' -print -quit)"
           python - <<'PY'
-          import json, os
+          import hashlib, json, os
           from pathlib import Path
-          version = os.environ["REQUESTED_TAG"].removeprefix("v")
-          sbom = {"spdxVersion": "SPDX-2.3", "dataLicense": "CC0-1.0", "SPDXID": "SPDXRef-DOCUMENT", "name": "agent-bridge-" + version, "documentNamespace": "https://agent-bridge.invalid/spdx/" + version, "packages": [{"SPDXID": "SPDXRef-AgentBridge", "name": "agent-bridge", "versionInfo": version, "downloadLocation": "NOASSERTION", "licenseConcluded": "Apache-2.0", "licenseDeclared": "Apache-2.0", "filesAnalyzed": False}]}
-          Path("release/agent-bridge.spdx.json").write_text(json.dumps(sbom, indent=2) + "\n", encoding="utf-8")
+          release = Path('release')
+          files = sorted(path for path in release.iterdir() if path.is_file())
+          artifact_hashes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
+          version = os.environ['REQUESTED_TAG'].removeprefix('v')
+          common = {'name': 'agent-bridge', 'version': version, 'hashes': artifact_hashes}
+          (release / 'agent-bridge.spdx.json').write_text(json.dumps({'spdxVersion': 'SPDX-2.3', 'dataLicense': 'CC0-1.0', 'SPDXID': 'SPDXRef-DOCUMENT', 'name': f'agent-bridge-{version}', 'documentNamespace': f'https://agent-bridge.invalid/spdx/{version}', 'packages': [{'SPDXID': 'SPDXRef-AgentBridge', 'name': 'agent-bridge', 'versionInfo': version, 'downloadLocation': 'NOASSERTION', 'licenseConcluded': 'Apache-2.0', 'filesAnalyzed': False}], 'externalDocumentRefs': [], 'annotations': [common]}, indent=2) + '\n')
+          (release / 'agent-bridge.cyclonedx.json').write_text(json.dumps({'bomFormat': 'CycloneDX', 'specVersion': '1.5', 'serialNumber': f'urn:uuid:agent-bridge-{version}', 'version': 1, 'metadata': {'component': {'type': 'application', 'name': 'agent-bridge', 'version': version}}, 'components': [{'type': 'file', 'name': name, 'hashes': [{'alg': 'SHA-256', 'content': digest}]} for name, digest in artifact_hashes.items()]}, indent=2) + '\n')
           PY
-          (cd release && shasum -a 256 * > SHA256SUMS.txt)
-      - name: Install and inspect release artifacts
-        shell: bash
-        run: |
-          python -m venv /tmp/agent-bridge-release-venv
-          /tmp/agent-bridge-release-venv/bin/pip install --force-reinstall --no-deps dist/*.whl
-          cd /tmp
-          /tmp/agent-bridge-release-venv/bin/bridge --version
-          /tmp/agent-bridge-release-venv/bin/bridge --help
-          /tmp/agent-bridge-release-venv/bin/bridge doctor
-          /tmp/agent-bridge-release-venv/bin/bridge setup --dry-run --auto
-          unzip -l "$GITHUB_WORKSPACE"/dist/*.whl | grep -E 'integrations/(codex|claude|reasonix|zcode)/manifest.json'
-          (cd "$GITHUB_WORKSPACE"/release && shasum -a 256 -c SHA256SUMS.txt)
-      - name: Sign and notarize release helper before final artifacts
-        shell: bash
-        run: |
-          test -n "$AGENT_BRIDGE_CODESIGN_IDENTITY"
-          test -n "$AGENT_BRIDGE_NOTARY_PROFILE"
-          native/macos-notify/scripts/sign-and-notarize.sh
-          codesign --verify --deep --strict native/macos-notify/dist/AgentBridgeNotifier.app
-          spctl --assess --type execute --verbose=4 native/macos-notify/dist/AgentBridgeNotifier.app
+          (cd release && sha256sum * > SHA256SUMS.txt)
+          (cd release && sha256sum -c SHA256SUMS.txt)
       - uses: actions/attest-build-provenance@v1
         with:
           subject-path: release/*
-      - uses: actions/upload-artifact@v4
-        with:
-          name: agent-bridge-${{ env.REQUESTED_TAG }}
-          path: release/*
       - name: Publish verified GitHub release
         uses: softprops/action-gh-release@v2
         with:

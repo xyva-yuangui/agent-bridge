@@ -40,3 +40,40 @@ Windows helper as degraded while database integrity and schema checks passed.
 Generated `build/`, `src/agent_bridge.egg-info/`, and `artifacts/local-dist/`
 are intentionally removed after inspection; release CI regenerates and
 publishes signed evidence from a clean tag.
+
+## Release pipeline and package-only acceptance (2026-07-24)
+
+`.github/workflows/release.yml` now separates validation, Windows, macOS,
+source-distribution, and aggregate publication jobs.  The Windows job runs the
+locked Rust build and `verify-release.ps1`, stages the verified helper into the
+package, retags a `win_amd64` wheel, installs that wheel with `--no-deps`, and
+publishes a portable ZIP.  The macOS job builds a universal2 application,
+checks `file` and both `lipo` architectures, and signs/notarizes it **before**
+staging and packaging.  Tag runs require signing credentials; an explicitly
+selected `workflow_dispatch sign=false` run is visibly marked as an unsigned
+manual artifact.
+
+The aggregate job refuses a missing platform artifact, produces and verifies
+`SHA256SUMS.txt`, and emits both SPDX and CycloneDX SBOMs only after platform
+staging/signing has completed.  It is the sole publisher and attestation
+subject.
+
+`tests/installers/test_package_only_install.py` proves the normal Windows
+installer invocation (without the development-fallback switch) installs into a
+temporary user site, has no `PYTHONPATH`, imports `agent_bridge` from that site
+rather than `src/`, and starts the real host MCP entrypoint.  The test is
+skipped only on machines without PowerShell or local setuptools; the Windows
+CI matrix supplies both.
+
+Using the locally available Python 3.14 setuptools/wheel toolchain, this
+revision was also built with `pip wheel --no-build-isolation --no-deps`, retagged
+to `py3-none-win_amd64` by `scripts/retag_wheel.py`, and installed into a fresh
+virtual environment with `--force-reinstall --no-deps` and no `PYTHONPATH`.
+`bridge --version` returned `2.0.0`; `bridge setup --dry-run --auto` completed;
+and the imported module origin was the venv's `site-packages`, not `src/`.
+The generated wheel, build directories, egg-info, and virtual environment were
+removed immediately after the check.
+
+The Chinese README was rewritten as valid UTF-8 after detecting mojibake.  It
+now documents the explicit development fallback, four-host support, and the
+real-machine macOS release requirement.

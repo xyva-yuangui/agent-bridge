@@ -113,6 +113,17 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("git cat-file -t", release)
         self.assertIn("native/windows-x86_64/*.exe", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
+    def test_release_is_a_signed_platform_pipeline_with_aggregate_inventory(self) -> None:
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8").lower()
+        for token in (
+            "windows:", "macos:", "python:", "aggregate:", "platform-windows", "platform-macos",
+            "actions/download-artifact@v4", "actions/upload-artifact@v4", "verify-release.ps1",
+            "sign-and-notarize.sh", "before staging", "unsigned manual artifact", "cyclonedx",
+            "sha256sum -c", "softprops/action-gh-release", "retag_wheel.py",
+        ):
+            self.assertIn(token, release)
+        self.assertTrue((ROOT / "scripts" / "retag_wheel.py").is_file())
+
     def test_packaged_windows_helper_matches_the_verified_release_input(self) -> None:
         packaged = ROOT / "src" / "agent_bridge" / "native" / "windows-x86_64" / "agent-bridge-windows-notify.exe"
         verified = ROOT / "native" / "windows-notify" / "dist" / "windows-x86_64" / "agent-bridge-windows-notify.exe"
