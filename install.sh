@@ -64,3 +64,4 @@ if [ -n "$identity" ] || [ -n "$wake_cmd" ]; then
   echo "--as and --wake-cmd are legacy options; setup uses local host scope only." >&2
 fi
 "$python_path" "${bridge_args[@]}"
+printf '%s\n' "OK agent-bridge lifecycle completed"

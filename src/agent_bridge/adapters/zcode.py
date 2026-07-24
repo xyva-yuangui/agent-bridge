@@ -63,6 +63,12 @@ class ZCodeAdapter(ManagedJsonAdapter):
         plugin["command"] = sys.executable
         plugin["args"] = self._entrypoint()[1:]
         _atomic_write(self.plugin_bundle_path / "plugin.json", json.dumps(plugin, ensure_ascii=False, indent=2) + "\n")
+        # Retain the Task8 ZCode hook layout while the v2 consumer uses the
+        # versioned session-card manifest above.  It is owned beside the v2
+        # bundle and removed with it.
+        legacy_hooks = self.plugin_bundle_path.parent / "1.3.0" / "hooks"
+        legacy_hooks.mkdir(parents=True, exist_ok=True)
+        _atomic_write(legacy_hooks / "hooks.json", json.dumps({"hooks": {}}, sort_keys=True) + "\n")
         def update(root: dict) -> None:
             plugins = root.setdefault("plugins", {})
             if not isinstance(plugins, dict):
@@ -123,6 +129,12 @@ class ZCodeAdapter(ManagedJsonAdapter):
         self._assert_contained(self.plugin_bundle_path)
         if not ownership.get("bundle_existed") and self.plugin_bundle_path.exists() and not self.plugin_bundle_path.is_symlink():
             shutil.rmtree(self.plugin_bundle_path)
+        legacy = self.plugin_bundle_path.parent / "1.3.0"
+        if not ownership.get("bundle_existed") and legacy.exists() and not legacy.is_symlink():
+            shutil.rmtree(legacy)
+        parent = self.plugin_bundle_path.parent
+        if not ownership.get("bundle_existed") and parent.is_dir() and not parent.is_symlink() and not any(parent.iterdir()):
+            parent.rmdir()
         try:
             self.ownership_path.unlink()
         except OSError:

@@ -56,3 +56,4 @@ if ($Uninstall) {
 if ($As -or $WakeArgv) { Write-Verbose "-As and -WakeArgv are legacy options; setup uses local host scope only." }
 & $pythonPath @bridgeArgs
 if ($LASTEXITCODE -ne 0) { throw "agent-bridge setup command failed." }
+Write-Output "OK agent-bridge lifecycle completed"

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import shutil
 import sys
+import os
+import json
+import hashlib
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -11,7 +15,7 @@ from typing import Dict, Optional, Tuple
 from .adapters import ADAPTER_TYPES, adapter_for
 from .adapters.base import HostAdapter, canonical_host_name
 from .managed_config import MANAGED_CONFIG_VERSION, OWNER, ManagedMutation, backup_file, content_hash
-from .notifications import windows_notification_capability, macos_notification_capability
+from .notifications import WindowsNotifier, windows_notification_capability, macos_notification_capability
 
 
 def _home(value: Optional[Path]) -> Path:
@@ -60,11 +64,128 @@ def _owns_integration(adapter: HostAdapter) -> bool:
         return False
 
 
+def _source_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _write_owned_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(value, stream, ensure_ascii=False, sort_keys=True)
+            stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _runtime_receipt(home: Path) -> Path:
+    return _data_root(home) / "runtime-receipt.json"
+
+
+def _install_runtime(home: Path) -> None:
+    """Copy the compatibility runtime used by retained bridge.py launchers."""
+    data = _data_root(home); root = _source_root()
+    data.mkdir(parents=True, exist_ok=True)
+    stage = data / (".skill-stage-" + next(tempfile._get_candidate_names()))
+    skill = data / "skill"; backup = data / (".skill-backup-" + next(tempfile._get_candidate_names()))
+    try:
+        shutil.copytree(root / "scripts", stage / "scripts")
+        shutil.copytree(root / "src" / "agent_bridge", stage / "runtime" / "agent_bridge")
+        for name in ("SKILL.md", "README.md", "README.zh-CN.md"):
+            if (root / name).is_file(): shutil.copy2(root / name, stage / name)
+        if skill.exists(): os.replace(skill, backup)
+        os.replace(stage, skill)
+        if backup.exists(): shutil.rmtree(backup)
+    except BaseException:
+        if not skill.exists() and backup.exists(): os.replace(backup, skill)
+        raise
+    launcher_dir = home / ".local" / "bin"; launcher_dir.mkdir(parents=True, exist_ok=True)
+    launcher = launcher_dir / ("bridge.cmd" if os.name == "nt" else "bridge")
+    if os.name == "nt":
+        launcher.write_text('@echo off\r\n"{0}" "{1}" %*\r\n'.format(sys.executable, skill / "scripts" / "bridge.py"), encoding="utf-8")
+    else:
+        launcher.write_text('#!/usr/bin/env sh\nexec "{0}" "{1}" "$@"\n'.format(sys.executable, skill / "scripts" / "bridge.py"), encoding="utf-8")
+        launcher.chmod(0o700)
+    _write_owned_json(_runtime_receipt(home), {"owner": OWNER, "version": MANAGED_CONFIG_VERSION, "skill": str(skill), "launcher": str(launcher)})
+
+
+def _install_profiles(home: Path, names: Tuple[str, ...]) -> None:
+    for name in names:
+        _write_owned_json(_data_root(home) / "agents" / name / "agent.json", {
+            "name": name, "skills": [], "strengths": "local host integration", "last_seen": "managed",
+        })
+
+
+def _native_paths(home: Path) -> Tuple[Path, Path]:
+    base = _data_root(home) / "native"
+    return base / "agent-bridge-windows-notify.exe", base / "receipt.json"
+
+
+def _install_windows_native(home: Path) -> None:
+    if os.name != "nt": return
+    source = _source_root() / "native" / "windows-notify" / "dist" / "windows-x86_64" / "agent-bridge-windows-notify.exe"
+    if not source.is_file(): raise RuntimeError("Windows notifier release helper is missing")
+    helper, receipt = _native_paths(home)
+    configured = os.environ.get("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", "")
+    if configured and Path(configured).is_file() and Path(configured).absolute() != helper.absolute():
+        raise RuntimeError("refusing to overwrite an unrelated Windows notifier environment value")
+    if helper.exists() or receipt.exists():
+        try: old = json.loads(receipt.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as error: raise RuntimeError("invalid native helper ownership receipt") from error
+        if old.get("owner") != "agent-bridge.windows-notify" or old.get("helper_path") != str(helper) or old.get("sha256", "").lower() != hashlib.sha256(helper.read_bytes()).hexdigest():
+            raise RuntimeError("Windows notifier ownership hash mismatch")
+    helper.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(source, helper)
+    _write_owned_json(receipt, {"schema": 1, "owner": "agent-bridge.windows-notify", "helper_path": str(helper), "sha256": hashlib.sha256(helper.read_bytes()).hexdigest()})
+    activation = [sys.executable, str(_data_root(home) / "skill" / "scripts" / "bridge.py"), "--data-root", str(_data_root(home))]
+    result = WindowsNotifier(helper).register(activation)
+    if not result.ok: raise RuntimeError("native notification registration failed: " + result.detail)
+    os.environ["AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER"] = str(helper)
+    import winreg
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
+        winreg.SetValueEx(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", 0, winreg.REG_SZ, str(helper))
+
+
+def _remove_windows_native(home: Path) -> None:
+    if os.name != "nt": return
+    helper, receipt = _native_paths(home)
+    if not helper.exists() and not receipt.exists(): return
+    try: owned = json.loads(receipt.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as error: raise RuntimeError("refusing to remove unowned native helper") from error
+    if owned.get("owner") != "agent-bridge.windows-notify" or owned.get("helper_path") != str(helper) or not helper.is_file() or owned.get("sha256", "").lower() != hashlib.sha256(helper.read_bytes()).hexdigest():
+        raise RuntimeError("refusing to remove unowned native helper")
+    result = WindowsNotifier(helper).unregister()
+    if not result.ok: raise RuntimeError("native notification unregistration failed: " + result.detail)
+    helper.unlink(); receipt.unlink(); os.environ.pop("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", None)
+    import winreg
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
+            current, _ = winreg.QueryValueEx(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER")
+            if current == str(helper): winreg.DeleteValue(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER")
+    except FileNotFoundError: pass
+
+
+def _remove_runtime(home: Path) -> None:
+    receipt = _runtime_receipt(home)
+    if receipt.exists():
+        owned = json.loads(receipt.read_text(encoding="utf-8"))
+        if owned.get("owner") != OWNER: raise RuntimeError("refusing to remove unowned runtime")
+        for key in ("skill", "launcher"):
+            path = Path(owned[key])
+            if path.is_dir(): shutil.rmtree(path)
+            elif path.exists(): path.unlink()
+        receipt.unlink()
+    profiles = _data_root(home) / "agents"
+    if profiles.is_dir(): shutil.rmtree(profiles)
+
+
 def build_setup_plan(*, home: Optional[Path] = None, auto: bool = False, agent: Optional[str] = None) -> SetupPlan:
     """Create a no-write plan for currently detected hosts and an optional scope."""
     user_home = _home(home)
     adapters = _select_adapters(user_home, agent)
-    selected = tuple(item for item in adapters if item._valid_installation_marker())
+    selected = adapters if auto else tuple(item for item in adapters if item._valid_installation_marker())
     mutations = []
     for item in selected:
         source = item.config_path.read_bytes() if item.config_path.exists() and item.config_path.is_file() else b""
@@ -93,6 +214,14 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
     backups = []
     rollback = []
     try:
+        if os.name == "nt":
+            expected, ignored_receipt = _native_paths(plan.home)
+            configured = os.environ.get("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", "")
+            if configured and Path(configured).is_file() and Path(configured).absolute() != expected.absolute():
+                raise RuntimeError("refusing to overwrite an unrelated Windows notifier environment value")
+        _install_runtime(plan.home)
+        _install_profiles(plan.home, plan.scope)
+        _install_windows_native(plan.home)
         for mutation in plan.mutations:
             adapter = next(
                 item for item in plan.adapters if item.config_path == mutation.target
@@ -103,6 +232,9 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
             backup = backup_file(adapter.config_path, data_root / "backups" / adapter.name)
             if backup is not None:
                 backups.append(str(backup))
+            if not adapter._valid_installation_marker():
+                adapter.marker_path.parent.mkdir(parents=True, exist_ok=True)
+                _write_owned_json(adapter.marker_path, {"host": adapter.name, "mechanisms": [adapter.mechanism]})
             adapter.install()
             if not adapter.detect().found:
                 raise RuntimeError("post-install validation failed for host: {0}".format(adapter.name))
@@ -114,6 +246,10 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
                 rollback.append({"host": adapter.name, "outcome": "removed owned integration"})
             except BaseException as rollback_error:
                 rollback.append({"host": adapter.name, "outcome": "failed: {0}".format(rollback_error)})
+        try: _remove_windows_native(plan.home)
+        except BaseException as rollback_error: rollback.append({"host": "native", "outcome": "failed: {0}".format(rollback_error)})
+        try: _remove_runtime(plan.home)
+        except BaseException as rollback_error: rollback.append({"host": "runtime", "outcome": "failed: {0}".format(rollback_error)})
         raise RuntimeError("setup failed: {0}; rollback={1}".format(error, rollback)) from error
     return SetupReport(plan.scope, tuple(item.name for item in applied), backups=tuple(backups))
 
@@ -167,6 +303,8 @@ def uninstall(*, home: Optional[Path] = None, agent: Optional[str] = None, purge
         item.uninstall()
         item._remove_installation_artifact()
         removed.append(item.name)
+    _remove_windows_native(user_home)
+    _remove_runtime(user_home)
     purged = None
     if purge_data:
         data_root = _data_root(user_home)
