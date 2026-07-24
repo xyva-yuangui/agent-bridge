@@ -1,0 +1,7 @@
+{
+  "name": "zcode",
+  "skills": ["review"],
+  "strengths": "Code review",
+  "wake_argv": ["zcode", "--resume"],
+  "last_seen": "2026-07-23T00:00:00Z"
+}

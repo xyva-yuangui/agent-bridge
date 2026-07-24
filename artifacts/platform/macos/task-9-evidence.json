@@ -1,0 +1,27 @@
+{
+  "task": 9,
+  "platform": "macos",
+  "status": "pending_real_machine_validation",
+  "reason": "No authenticated in-scope macOS runner is configured in this Windows worktree.",
+  "required_commands": [
+    "swift test --package-path native/macos-notify",
+    "native/macos-notify/scripts/build-universal2.sh",
+    "native/macos-notify/scripts/sign-and-notarize.sh",
+    "codesign -dvvv --entitlements :- native/macos-notify/dist/AgentBridgeNotifier.app",
+    "spctl -a -vv native/macos-notify/dist/AgentBridgeNotifier.app",
+    "AGENT_BRIDGE_MACOS_NOTIFY_ACTIVATION_ARGV='[\"/absolute/path/to/bridge\"]' bridge doctor --strict"
+  ],
+  "manual_checks": [
+    "authorization status",
+    "Notification Center persistence",
+    "View action",
+    "Claim action",
+    "Snooze action",
+    "fixed activation argv and terminal fallback",
+    "Intel and Apple Silicon universal2 slices",
+    "cold app launch from a notification action",
+    "short (<=30 second) expiry cleanup removes pending and delivered requests",
+    "long expiry reports unsupported rather than claiming delivery expiry",
+    "doctor separates signed, ad-hoc, unsigned, notarized, and Gatekeeper state"
+  ]
+}

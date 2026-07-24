@@ -1,0 +1,39 @@
+﻿agent-bridge-windows-notify 0.1.0 MIT
+cfg-if 1.0.4 MIT OR Apache-2.0
+itoa 1.0.18 MIT OR Apache-2.0
+memchr 2.8.3 Unlicense OR MIT
+proc-macro2 1.0.107 MIT OR Apache-2.0
+quote 1.0.47 MIT OR Apache-2.0
+serde 1.0.229 MIT OR Apache-2.0
+serde_core 1.0.229 MIT OR Apache-2.0
+serde_derive 1.0.229 MIT OR Apache-2.0
+serde_json 1.0.151 MIT OR Apache-2.0
+syn 2.0.119 MIT OR Apache-2.0
+syn 3.0.3 MIT OR Apache-2.0
+unicode-ident 1.0.24 (MIT OR Apache-2.0) AND Unicode-3.0
+windows 0.58.0 MIT OR Apache-2.0
+windows_aarch64_gnullvm 0.48.5 MIT OR Apache-2.0
+windows_aarch64_gnullvm 0.52.6 MIT OR Apache-2.0
+windows_aarch64_msvc 0.48.5 MIT OR Apache-2.0
+windows_aarch64_msvc 0.52.6 MIT OR Apache-2.0
+windows_i686_gnu 0.48.5 MIT OR Apache-2.0
+windows_i686_gnu 0.52.6 MIT OR Apache-2.0
+windows_i686_gnullvm 0.52.6 MIT OR Apache-2.0
+windows_i686_msvc 0.48.5 MIT OR Apache-2.0
+windows_i686_msvc 0.52.6 MIT OR Apache-2.0
+windows_x86_64_gnu 0.48.5 MIT OR Apache-2.0
+windows_x86_64_gnu 0.52.6 MIT OR Apache-2.0
+windows_x86_64_gnullvm 0.48.5 MIT OR Apache-2.0
+windows_x86_64_gnullvm 0.52.6 MIT OR Apache-2.0
+windows_x86_64_msvc 0.48.5 MIT OR Apache-2.0
+windows_x86_64_msvc 0.52.6 MIT OR Apache-2.0
+windows-core 0.58.0 MIT OR Apache-2.0
+windows-implement 0.58.0 MIT OR Apache-2.0
+windows-interface 0.58.0 MIT OR Apache-2.0
+windows-result 0.2.0 MIT OR Apache-2.0
+windows-strings 0.1.0 MIT OR Apache-2.0
+windows-sys 0.48.0 MIT OR Apache-2.0
+windows-targets 0.48.5 MIT OR Apache-2.0
+windows-targets 0.52.6 MIT OR Apache-2.0
+winreg 0.52.0 MIT
+zmij 1.0.23 MIT

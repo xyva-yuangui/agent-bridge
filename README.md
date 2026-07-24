@@ -2,64 +2,32 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-<p align="center">
-  <img src="https://img.shields.io/badge/version-1.3.0-blue" alt="version">
-  <img src="https://img.shields.io/badge/python-3.9+-green" alt="python">
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="platform">
-  <img src="https://img.shields.io/badge/license-MIT-brightgreen" alt="license">
-  <img src="https://img.shields.io/badge/dependencies-zero-success" alt="dependencies">
-</p>
+Agent Bridge is a local-first task board for Codex, Claude Code, Reasonix, and
+ZCode. It uses Python's standard library, keeps data under `~/.agent-bridge`,
+and has no resident daemon, network listener, cloud synchronization, or default
+telemetry.
 
-**Make your AI coding agents work as a team. Local. Zero config. No cloud.**
+[License](LICENSE) (Apache-2.0) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) ·
+[Architecture](docs/architecture/v2.md) · [Windows](docs/installation/windows.md) ·
+[macOS](docs/installation/macos.md) · [Migration](docs/installation/migration-v1.md) ·
+[Release checklist](docs/release/checklist.md)
 
-You have Codex, Claude Code, Reasonix, ZCode — but they don't talk to each other. **agent-bridge** gives them a shared task board on your machine. Delegate work, ask questions, review code — without leaving your terminal. One command to install, zero dependencies, nothing leaves your machine.
+## Requirements and support boundary
 
-> The CLI is `bridge`. Everything lives in `~/.agent-bridge/`. That's it.
+- Python 3.9+ (release CI covers Python 3.9–3.13)
+- Windows 10/11 with PowerShell 5.1+, or macOS/Linux with Bash
+- A local filesystem; network shares and cloud-sync folders are unsupported
 
----
+The packaged Windows notification helper targets x86-64. Windows on ARM is
+not currently a native release target; macOS ships a universal2 helper for
+Intel and Apple Silicon inside the portable ZIP.
 
-## Why agent-bridge?
-
-| | Without | With agent-bridge |
-|---|---|---|
-| **Task handoff** | Copy-paste between terminals | `bridge send --to codex "Design auth"` |
-| **Status tracking** | "Did you finish that?" | `bridge board` — see everything at a glance |
-| **Code review** | Slack, PR, context switching | `bridge review <id> --verdict approve` |
-| **Context sharing** | Scattered across chats | `bridge context --add "decided on JWT"` |
-| **Maintenance** | Manual cleanup | Auto-cleans stale tasks, archives old ones |
-
----
-
-## Quick start
-
-```bash
-# 1. Install — auto-detect all agents on this machine
-# Windows:
-.\install.ps1 -Auto
-
-# macOS / Linux:
-./install.sh --auto
-
-# 2. Send a task (auto-wakes the target)
-bridge send --to codex --subject "Design the auth module" --body "JWT + refresh"
-
-# 3. The other agent picks it up
-bridge inbox            # see what's assigned to me
-bridge claim <id>       # I'm on it
-bridge done <id> --result "see auth/design.md"
-
-bridge board            # everyone's tasks at a glance
-```
-
-The whole loop: **send → claim → done**. Everything else is extra.
-
----
-
-## Requirements
-
-- **Windows 10/11** with PowerShell 5.1+, or **macOS / Linux** with Bash
-- **Python 3.9+** (standard library only — zero pip installs)
-- One or more supported agent applications
+The four integrations ship as versioned session-card templates. `bridge setup
+status` reports the actual capability for Codex, Claude Code, Reasonix, or
+ZCode; when a host is unavailable, use the terminal fallback. Windows source
+and CI checks exist. macOS source/CI checks do not prove notification
+permission, actions, signing, Gatekeeper, notarization, or Intel/Apple Silicon
+behavior: those remain real-machine release requirements.
 
 ## Supported agents
 
@@ -175,77 +143,90 @@ No cloud, no server, no account. Everything lives in `~/.agent-bridge/`. One mac
 **Windows (PowerShell):**
 ```powershell
 .\install.ps1 -Auto
-.\install.ps1 -Agent codex -As codex
-.\install.ps1 -Auto -Uninstall
+.\install.ps1 -Agent codex -As codex -Python C:\path\to\python.exe
+bridge setup status
 ```
 
 **macOS / Linux:**
 ```bash
 ./install.sh --auto
-./install.sh --agent codex --as codex
-./install.sh --auto --uninstall
+./install.sh --agent codex --as codex --python /usr/bin/python3
+bridge setup status
 ```
 
-Both installers are idempotent. Restart agent applications after install to load MCP and hook configuration.
+The installers configure detected hosts conservatively. They create a
+receipted launcher and only their own PATH entry/configuration. Restart hosts
+after setup, then run `bridge doctor --strict`.
 
----
-
-## Core commands
+## Workflow
 
 ```text
-bridge status [--oneliner]         bridge inbox
-bridge send --to NAME --subject TEXT [--body TEXT] [--no-wake] [--skill TAG]
-bridge claim ID                    bridge done ID --result TEXT
-bridge show ID                     bridge board
-bridge question ID --body TEXT     bridge answer ID --body TEXT
-bridge review ID [--verdict approve|changes] [--body TEXT]
-bridge agents                      bridge activity [--since TS]
-bridge project init|list|show      bridge context --show|--add TEXT
-bridge clean --days N|--all [--dry-run]  bridge doctor [--strict]
-bridge whoami                      bridge wake AGENT
-bridge who-coordinates             bridge log --what TEXT
+send -> pending -> claim -> working -> done -> completed
+                         -> question -> input_required
+input_required -> answer -> pending
+working -> request review -> review_requested
+review_requested -> approve -> completed
+review_requested -> changes -> changes_requested -> claim -> working
 ```
-
-The MCP server exposes the same 20 workflows as MCP tools (`bridge_send`, `bridge_inbox`, …).
-
-### Task lifecycle
-
-```
-send → pending → claim → working → done → completed
-                          ↘ question → input_required → answer → pending
-                          ↘ review → review_requested → approve → completed
-                                                   ↘ changes → changes_requested → claim → working
-```
-
-Only the assignee can claim, ask, review, or finish. Only the sender can answer questions and issue verdicts.
-
----
-
-## Troubleshooting
 
 ```bash
-bridge doctor --strict       # full health check
-bridge status --oneliner     # quick inbox count
-bridge agents                # see who's available
+bridge send --to reasonix --subject "Review the patch" --body "Run tests"
+bridge inbox
+bridge claim <task-id>
+bridge question <task-id> --body "Which target?"
+bridge answer <task-id> --body "Python 3.9+"
+bridge review <task-id>
+bridge review <task-id> --verdict approve --body "Accepted"
+bridge done <task-id> --result "Implemented and tested"
 ```
 
-If a task stays `wake_launched`, the agent started but hasn't checked in. Restart the target application and verify its hook/MCP config.
+Only the assignee can claim, ask, request review, or finish a task; only the
+sender can answer or give a review verdict.
 
----
+## Delivery honesty
 
-## Test
+Each delivery attempt has one observable status:
+
+- `queued`, `dispatching`, `os_posted`, `plugin_delivered`, `viewed`
+- `launch_started`, `agent_acknowledged`, `claimed`, `retry_wait`, `failed`
+
+`os_posted`, `plugin_delivered`, and `launch_started` are not acknowledgements.
+An acknowledgement requires the target to use `status` or `inbox`; claiming is
+stronger evidence. Notification failure does not erase a stored task.
+
+## Operations
 
 ```bash
-python -m unittest discover -s tests -v    # 29 tests
-python -m compileall -q scripts tests      # syntax check
+bridge --version
+bridge --help
+bridge status --oneliner
+bridge doctor --strict
+bridge setup --repair
+bridge setup --dry-run
+bridge tui
+bridge migrate path/to/v1-board.json
+bridge export backup.json
+bridge uninstall
+bridge uninstall --purge-data
 ```
 
-Windows coverage includes isolated install/reinstall/uninstall, dependency-free notification, GBK output, MCP calls, and 40-process concurrent writes.
+`bridge uninstall` preserves task data unless `--purge-data` is explicitly
+requested and the command first prints the exact data root. When recovery is
+needed, run `bridge setup status`, `bridge doctor`, and `bridge inbox`; there
+is no daemon to restart.
 
-## Contributing
+## Development and release verification
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+```bash
+python -m unittest discover -s tests -v
+python -m compileall -q src scripts tests
+python -m build
+```
 
-## License
-
-[MIT](LICENSE)
+The primary release download is one cross-platform
+`agent-bridge-<version>-portable.zip`. It contains the offline bootstrap
+wheel, both native helpers (the macOS app is an internal component), both
+install scripts, host integration manifests, docs, checksums, and an inventory.
+Wheels and the sdist remain supplementary verification artifacts. See the
+[release checklist](docs/release/checklist.md) for real-machine native-helper,
+signing, notarization, and portable-ZIP installation verification.

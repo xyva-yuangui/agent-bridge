@@ -1,0 +1,5 @@
+[agent]
+model = "普通模型"
+
+[sandbox]
+allow_write = ["C:\\work\\keep"]

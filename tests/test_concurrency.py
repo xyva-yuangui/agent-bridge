@@ -1,69 +1,43 @@
+"""v2 multi-process SQLite concurrency regression coverage."""
+
 from __future__ import annotations
 
 import concurrent.futures
-import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import run_bridge, write_agent
+from agent_bridge.service import BridgeService
+from agent_bridge.store import Store
 
 
 class ConcurrencyTests(unittest.TestCase):
-    def test_concurrent_sends_preserve_every_task_and_valid_json(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            home = Path(temp_dir)
-            write_agent(home, "target", skills=["review"])
-            seed = run_bridge(
-                home,
-                "--as",
-                "seed",
-                "send",
-                "--to",
-                "target",
-                "--subject",
-                "seed",
-                "--no-wake",
-                extra_env={
-                    "PYTHONUTF8": "1",
-                    "AGENT_BRIDGE_DISABLE_NOTIFY": "1",
-                },
-            )
-            self.assertEqual(seed.returncode, 0, seed.stderr)
+    def test_concurrent_v2_sends_preserve_all_tasks_and_outbox_rows(self) -> None:
+        """Service sends are intentionally synchronous: no detached worker owns the temp DB."""
+        for repetition in range(5):
+            with self.subTest(repetition=repetition), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                database = home / "agent-bridge.sqlite3"
 
-            def send(index: int):
-                return run_bridge(
-                    home,
-                    "--as",
-                    f"sender-{index}",
-                    "send",
-                    "--to",
-                    "target",
-                    "--subject",
-                    f"job-{index}",
-                    "--no-wake",
-                    extra_env={
-                        "PYTHONUTF8": "1",
-                        "AGENT_BRIDGE_DISABLE_NOTIFY": "1",
-                    },
-                )
+                def send(index: int):
+                    store = Store.open(database)
+                    try:
+                        return BridgeService(store).send_task(
+                            "sender-{}".format(index), "zcode", "job-{}".format(index), "body"
+                        )
+                    finally:
+                        store.close()
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=40) as pool:
-                results = list(pool.map(send, range(40)))
-
-            failures = [
-                (result.returncode, result.stdout, result.stderr)
-                for result in results
-                if result.returncode != 0
-            ]
-            self.assertEqual(failures, [])
-            board_path = home / "projects" / "default" / "board.json"
-            board = json.loads(board_path.read_text(encoding="utf-8"))
-            self.assertEqual(len(board["tasks"]), 41)
-            self.assertEqual(
-                {task["subject"] for task in board["tasks"]},
-                {"seed", *(f"job-{index}" for index in range(40))},
-            )
+                with concurrent.futures.ThreadPoolExecutor(max_workers=20) as pool:
+                    tasks = list(pool.map(send, range(30)))
+                self.assertEqual({task.subject for task in tasks}, {"job-{}".format(index) for index in range(30)})
+                verify = Store.open(database)
+                try:
+                    self.assertEqual(30, verify.scalar("SELECT COUNT(*) FROM tasks"))
+                    self.assertEqual(30, verify.scalar("SELECT COUNT(*) FROM outbox WHERE completed_at IS NULL"))
+                    self.assertEqual(0, verify.scalar("SELECT COUNT(*) FROM dispatcher_leases"))
+                finally:
+                    verify.close()
 
 
 if __name__ == "__main__":

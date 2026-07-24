@@ -1,0 +1,4 @@
+{
+  "permissions": {"allow": ["读取"]},
+  "hooks": {"OtherHook": [{"command": "keep-this"}]}
+}

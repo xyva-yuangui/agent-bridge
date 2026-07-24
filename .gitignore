@@ -1,3 +1,8 @@
 .worktrees/
+.superpowers/
 __pycache__/
 *.pyc
+build/
+dist/
+*.egg-info/
+/native/windows-notify/target/

@@ -1,0 +1,6 @@
+# user-managed Codex configuration
+[features]
+experimental = true
+
+[mcp_servers.unrelated]
+command = "C:\\Tools\\普通\\server.exe"

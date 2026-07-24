@@ -1,0 +1,4 @@
+{
+  "plugins": {"enabledPlugins": {"keep-plugin@local": true}},
+  "ui": {"language": "中文"}
+}

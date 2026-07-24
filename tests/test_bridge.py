@@ -1,450 +1,65 @@
+"""Regression coverage migrated from the retired v1 JSON-board bridge.
+
+These tests intentionally use the public v2 service and CLI surface.  The
+old lock-file, activity-log rotation, and JSON-board tests are replaced by the
+SQLite transaction/outbox and authorization guarantees that supersede them.
+"""
+
 from __future__ import annotations
 
-import json
-import os
-import re
 import tempfile
-import time
 import unittest
 from pathlib import Path
-from unittest import mock
 
-from tests.support import load_bridge, read_board, run_bridge, write_agent
-
-
-OLD_TIMESTAMP = "2000-01-01T00:00:00Z"
-RECENT_TIMESTAMP = "2099-01-01T00:00:00Z"
-
-
-class BridgeTestCase(unittest.TestCase):
-    def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp_dir.cleanup)
-        self.home = Path(self.temp_dir.name)
-        self.bridge = load_bridge()
-        self.bridge.BASE_DIR = self.home
-        self.bridge.AGENTS_DIR = self.home / "agents"
-        self.bridge.PROJECTS_DIR = self.home / "projects"
-        self.bridge.ensure_dirs()
-
-    @property
-    def board_path(self) -> Path:
-        return self.home / "projects" / "default" / "board.json"
-
-    @property
-    def archive_path(self) -> Path:
-        return self.home / "projects" / "default" / "archive.json"
-
-    @property
-    def activity_path(self) -> Path:
-        return self.home / "projects" / "default" / "activity.jsonl"
-
-    def write_board(self, tasks: list[dict]) -> None:
-        self.board_path.parent.mkdir(parents=True, exist_ok=True)
-        self.board_path.write_text(
-            json.dumps({"version": 1, "tasks": tasks}, indent=2),
-            encoding="utf-8",
-        )
-
-    def task(self, task_id: str) -> dict:
-        board = json.loads(self.board_path.read_text(encoding="utf-8"))
-        return next(task for task in board["tasks"] if task["id"] == task_id)
-
-
-class StorageTests(BridgeTestCase):
-    @unittest.skipUnless(os.name == "nt", "portable lock is used on Windows")
-    def test_portable_lock_recovers_dead_stale_owner(self):
-        resource = self.home / "resource.json"
-        resource.write_text("{}", encoding="utf-8")
-        lock_path = Path(str(resource) + ".lock")
-        lock_path.write_text(
-            json.dumps({"pid": 2_147_483_647, "created": time.time() - 3600}),
-            encoding="utf-8",
-        )
-        old_time = time.time() - 3600
-        os.utime(lock_path, (old_time, old_time))
-
-        acquired = self.bridge._portable_lock(str(resource), timeout=0.1)
-
-        self.assertEqual(Path(acquired), lock_path)
-        self.bridge._portable_unlock(acquired)
-        self.assertFalse(lock_path.exists())
-
-    def test_stale_working_task_is_failed(self):
-        task_id = "stale-task"
-        self.write_board(
-            [
-                {
-                    "id": task_id,
-                    "subject": "stale",
-                    "body": "",
-                    "from": "alice",
-                    "to": "bob",
-                    "status": "working",
-                    "created": OLD_TIMESTAMP,
-                    "updated": OLD_TIMESTAMP,
-                    "files": [],
-                    "project": "default",
-                }
-            ]
-        )
-
-        self.bridge._auto_stale_working("default", "codex")
-
-        task = self.task(task_id)
-        self.assertEqual(task["status"], "failed")
-        self.assertIn("auto-failed", task["result"])
-
-    def test_append_activity_rotates_and_keeps_valid_json_lines(self):
-        self.bridge.MAX_ACTIVITY_ENTRIES = 4
-
-        for index in range(7):
-            self.bridge.append_activity(
-                "default",
-                {"agent": "agent", "action": "test", "n": index},
-            )
-
-        lines = self.activity_path.read_text(encoding="utf-8").splitlines()
-        self.assertLessEqual(len(lines), 4)
-        for line in lines:
-            json.loads(line)
-
-    def test_auto_clean_archives_removed_tasks(self):
-        tasks = []
-        for index in range(10):
-            task_id = f"task-{index}"
-            tasks.append(
-                {
-                    "id": task_id,
-                    "subject": task_id,
-                    "body": "",
-                    "from": "alice",
-                    "to": "bob",
-                    "status": "completed" if index == 0 else "pending",
-                    "created": OLD_TIMESTAMP if index == 0 else RECENT_TIMESTAMP,
-                    "updated": OLD_TIMESTAMP if index == 0 else RECENT_TIMESTAMP,
-                    "files": [],
-                    "project": "default",
-                }
-            )
-        self.write_board(tasks)
-
-        self.bridge._auto_clean("default", "codex")
-
-        board_ids = {task["id"] for task in read_board(self.home)["tasks"]}
-        archive = json.loads(self.archive_path.read_text(encoding="utf-8"))
-        archive_ids = {task["id"] for task in archive}
-        self.assertNotIn("task-0", board_ids)
-        self.assertIn("task-0", archive_ids)
-
-    def test_clean_requires_explicit_scope(self):
-        self.write_board(
-            [
-                {
-                    "id": "complete",
-                    "subject": "complete",
-                    "body": "",
-                    "from": "alice",
-                    "to": "bob",
-                    "status": "completed",
-                    "created": OLD_TIMESTAMP,
-                    "updated": OLD_TIMESTAMP,
-                    "files": [],
-                    "project": "default",
-                }
-            ]
-        )
-
-        result = run_bridge(self.home, "--as", "codex", "clean")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--all or --days", result.stderr)
-        self.assertEqual(len(read_board(self.home)["tasks"]), 1)
-
-
-class LifecycleTests(BridgeTestCase):
-    def setUp(self):
-        super().setUp()
-        write_agent(self.home, "alice", skills=["planning"])
-        write_agent(self.home, "bob", skills=["review"])
-        write_agent(self.home, "mallory", skills=["testing"])
-
-    def run_as(self, name: str, *args: str):
-        return run_bridge(
-            self.home,
-            "--as",
-            name,
-            *args,
-            extra_env={
-                "PYTHONUTF8": "1",
-                "AGENT_BRIDGE_DISABLE_NOTIFY": "1",
-            },
-        )
-
-    def send_task(self) -> str:
-        result = self.run_as(
-            "alice",
-            "send",
-            "--to",
-            "bob",
-            "--subject",
-            "workflow",
-            "--no-wake",
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        match = re.search(r"\b[0-9a-f]{12}\b", result.stdout)
-        self.assertIsNotNone(match, result.stdout)
-        return match.group(0)
-
-    def test_answer_returns_task_to_assignee_inbox(self):
-        task_id = self.send_task()
-        self.assertEqual(self.run_as("bob", "claim", task_id).returncode, 0)
-        self.assertEqual(
-            self.run_as("bob", "question", task_id, "--body", "Need input").returncode,
-            0,
-        )
-
-        answer = self.run_as("alice", "answer", task_id, "--body", "Answer")
-        inbox = self.run_as("bob", "inbox")
-
-        self.assertEqual(answer.returncode, 0, answer.stderr)
-        self.assertIn(task_id, inbox.stdout)
-        self.assertEqual(self.task(task_id)["status"], "pending")
-
-    def test_review_approve_completes_task(self):
-        task_id = self.send_task()
-        self.assertEqual(self.run_as("bob", "claim", task_id).returncode, 0)
-        self.assertEqual(self.run_as("bob", "review", task_id).returncode, 0)
-
-        verdict = self.run_as(
-            "alice",
-            "review",
-            task_id,
-            "--verdict",
-            "approve",
-            "--body",
-            "accepted",
-        )
-
-        self.assertEqual(verdict.returncode, 0, verdict.stderr)
-        task = self.task(task_id)
-        self.assertEqual(task["status"], "completed")
-        self.assertEqual(task["review_verdict"], "approve")
-
-    def test_non_sender_cannot_issue_review_verdict(self):
-        task_id = self.send_task()
-        self.assertEqual(self.run_as("bob", "claim", task_id).returncode, 0)
-        self.assertEqual(self.run_as("bob", "review", task_id).returncode, 0)
-
-        verdict = self.run_as("mallory", "review", task_id, "--verdict", "approve")
-
-        self.assertNotEqual(verdict.returncode, 0)
-        self.assertIn("sent by alice", verdict.stderr)
-        self.assertEqual(self.task(task_id)["status"], "review_requested")
-
-    def test_input_required_task_cannot_be_claimed(self):
-        task_id = self.send_task()
-        self.assertEqual(self.run_as("bob", "claim", task_id).returncode, 0)
-        self.assertEqual(
-            self.run_as("bob", "question", task_id, "--body", "Need input").returncode,
-            0,
-        )
-
-        claim = self.run_as("bob", "claim", task_id)
-
-        self.assertNotEqual(claim.returncode, 0)
-        self.assertIn("input_required", claim.stderr)
-
-    def test_status_acknowledges_pending_delivery(self):
-        task_id = self.send_task()
-
-        status = self.run_as("bob", "status", "--oneliner")
-
-        self.assertEqual(status.returncode, 0, status.stderr)
-        delivery = self.task(task_id).get("delivery", {})
-        self.assertEqual(delivery.get("status"), "acknowledged")
-        self.assertTrue(delivery.get("acknowledged_at"))
-
-
-class PlatformTests(BridgeTestCase):
-    def test_wake_argv_preserves_executable_path_with_spaces(self):
-        profile = {
-            "wake_argv": [r"C:\Program Files\Agent\agent.exe", "run"],
-        }
-
-        argv = self.bridge._load_wake_argv(profile)
-
-        self.assertEqual(argv, profile["wake_argv"])
-
-    def test_windows_notification_uses_file_and_separate_arguments(self):
-        completed = mock.Mock(returncode=0, stdout="", stderr="")
-        with mock.patch.object(self.bridge.sys, "platform", "win32"), mock.patch.object(
-            self.bridge.subprocess, "run", return_value=completed
-        ) as run:
-            result = self.bridge._desktop_notify("O'Brien", "x'; exit 9; '")
-
-        argv = run.call_args.args[0]
-        self.assertIn("-File", argv)
-        self.assertIn("O'Brien", argv)
-        self.assertIn("x'; exit 9; '", argv)
-        self.assertTrue(result.ok)
-
-    def test_notification_nonzero_exit_is_reported(self):
-        completed = mock.Mock(returncode=1, stdout="", stderr="notification disabled")
-        with mock.patch.object(self.bridge.subprocess, "run", return_value=completed):
-            result = self.bridge._desktop_notify("title", "message")
-
-        self.assertFalse(result.ok)
-        self.assertIn("notification disabled", result.detail)
-
-    def test_notification_only_delivery_waits_for_acknowledgment(self):
-        self.write_board([{"id": "task-1", "delivery": {"status": "queued"}}])
-        with mock.patch.object(
-            self.bridge,
-            "_desktop_notify",
-            return_value=self.bridge.NotificationResult(True, "notification shown"),
-        ), mock.patch.object(
-            self.bridge,
-            "_wake_agent",
-            return_value=self.bridge.WakeResult(False, "no wake command"),
-        ):
-            delivery = self.bridge._attempt_delivery(
-                "default", "task-1", "zcode", "review"
-            )
-
-        self.assertEqual(delivery["status"], "queued")
-
-    def test_delivery_failure_is_distinct_from_unavailable(self):
-        self.write_board([{"id": "task-1", "delivery": {"status": "queued"}}])
-        with mock.patch.object(
-            self.bridge,
-            "_desktop_notify",
-            return_value=self.bridge.NotificationResult(False, "notification exited 1"),
-        ), mock.patch.object(
-            self.bridge,
-            "_wake_agent",
-            return_value=self.bridge.WakeResult(False, "wake executable missing"),
-        ):
-            delivery = self.bridge._attempt_delivery(
-                "default", "task-1", "zcode", "review"
-            )
-
-        self.assertEqual(delivery["status"], "failed")
-
-    def test_show_includes_delivery_status_and_detail(self):
-        self.write_board(
-            [
-                {
-                    "id": "task-1",
-                    "subject": "review",
-                    "status": "pending",
-                    "from": "codex",
-                    "to": "zcode",
-                    "created": RECENT_TIMESTAMP,
-                    "updated": RECENT_TIMESTAMP,
-                    "delivery": {
-                        "status": "queued",
-                        "detail": "notification shown; awaiting acknowledgment",
-                    },
-                }
-            ]
-        )
-
-        shown = run_bridge(
-            self.home,
-            "--as",
-            "codex",
-            "show",
-            "task-1",
-            extra_env={"PYTHONUTF8": "1"},
-        )
-
-        self.assertEqual(shown.returncode, 0, shown.stderr)
-        self.assertIn("delivery       queued", shown.stdout)
-        self.assertIn("delivery_detail", shown.stdout)
-        self.assertIn("awaiting acknowledgment", shown.stdout)
-
-    def test_send_rejects_unregistered_target(self):
-        write_agent(self.home, "alice", skills=["planning"])
-
-        result = run_bridge(
-            self.home,
-            "--as",
-            "alice",
-            "send",
-            "--to",
-            "typo-agent",
-            "--subject",
-            "orphan",
-            "--no-wake",
-            extra_env={"PYTHONUTF8": "1"},
-        )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("not registered", result.stderr)
-        self.assertFalse(self.board_path.exists())
-
-    def test_route_prefers_recent_capable_agent(self):
-        write_agent(
-            self.home,
-            "a-stale",
-            skills=["review"],
-            last_seen=OLD_TIMESTAMP,
-        )
-        write_agent(
-            self.home,
-            "z-recent",
-            skills=["review"],
-            last_seen=RECENT_TIMESTAMP,
-        )
-
-        target = self.bridge.route_task("review")
-
-        self.assertEqual(target, "z-recent")
-
-    def test_missing_coordinator_is_replaced(self):
-        self.write_board([])
-        board = read_board(self.home)
-        board["coordinator"] = "missing-agent"
-        self.board_path.write_text(json.dumps(board), encoding="utf-8")
-        write_agent(self.home, "codex", skills=["implementation"])
-
-        self.bridge.set_coordinator("default", "codex")
-
-        updated = read_board(self.home)
-        self.assertEqual(updated["coordinator"], "codex")
-        self.assertTrue(updated["coordinator_updated"])
-
-    def test_send_records_wake_launch_without_false_acknowledgment(self):
-        import sys
-
-        write_agent(
-            self.home,
-            "target",
-            skills=["review"],
-            wake_argv=[sys.executable, "-c", "pass"],
-        )
-
-        result = run_bridge(
-            self.home,
-            "--as",
-            "alice",
-            "send",
-            "--to",
-            "target",
-            "--subject",
-            "wake",
-            extra_env={
-                "PYTHONUTF8": "1",
-                "AGENT_BRIDGE_DISABLE_NOTIFY": "1",
-            },
-        )
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        task = read_board(self.home)["tasks"][0]
-        self.assertEqual(task["delivery"]["status"], "wake_launched")
-        self.assertNotIn("acknowledged_at", task["delivery"])
-        self.assertIn("awaiting acknowledgment", result.stdout)
+from agent_bridge.models import DeliveryStatus, TaskState
+from agent_bridge.service import BridgeService
+from agent_bridge.store import Store
+from tests.integration.test_cli_v2 import run_module
+
+
+class BridgeV2RegressionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.home = Path(self.temporary.name)
+        self.store = Store.open(self.home / "agent-bridge.sqlite3")
+        self.service = BridgeService(self.store)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.temporary.cleanup()
+
+    def test_lifecycle_authorization_replaces_v1_board_mutation(self) -> None:
+        task = self.service.send_task("alice", "bob", "workflow", "")
+        with self.assertRaises(PermissionError):
+            self.service.claim(task.id, "mallory")
+        working = self.service.claim(task.id, "bob")
+        waiting = self.service.question(working.id, "bob", "Need input")
+        self.assertEqual(waiting.state, TaskState.INPUT_REQUIRED)
+        pending = self.service.answer(task.id, "alice", "Use option A")
+        reviewed = self.service.request_review(self.service.claim(pending.id, "bob").id, "bob")
+        complete = self.service.review(reviewed.id, "alice", "approve", "accepted")
+        self.assertEqual(complete.state, TaskState.COMPLETED)
+
+    def test_delivery_evidence_never_claims_acknowledgement_without_proof(self) -> None:
+        task = self.service.send_task("alice", "zcode", "review", "")
+        self.assertEqual(self.service.delivery_evidence(task.id).status, DeliveryStatus.QUEUED.value)
+        self.service.register_host_delivery_proof(task.id, "zcode", "1.0.0", 1, "opaque-token")
+        self.service.acknowledge_integration(task.id, "zcode", "1.0.0", 1, "opaque-token")
+        self.assertEqual(self.service.delivery_evidence(task.id).status, DeliveryStatus.AGENT_ACKNOWLEDGED.value)
+        with self.assertRaises(ValueError):
+            self.service.acknowledge_integration(task.id, "zcode", "1.0.0", 1, "opaque-token")
+
+    def test_clean_requires_explicit_scope_and_preserves_active_tasks(self) -> None:
+        task = self.service.send_task("alice", "bob", "active", "")
+        missing_scope = run_module("agent_bridge.cli", "clean", home=self.home)
+        self.assertNotEqual(missing_scope.returncode, 0)
+        self.assertEqual(self.service.show(task.id).state, TaskState.PENDING)
+
+    def test_revision_conflict_prevents_lost_updates(self) -> None:
+        task = self.service.send_task("alice", "bob", "conflict", "")
+        self.service.claim(task.id, "bob", expected_revision=task.revision)
+        with self.assertRaisesRegex(ValueError, "revision conflict"):
+            self.service.question(task.id, "bob", "stale", expected_revision=task.revision)
 
 
 if __name__ == "__main__":

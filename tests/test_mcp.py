@@ -64,7 +64,7 @@ class McpParityTests(unittest.TestCase):
 
         self.assertEqual(
             responses[0]["result"]["serverInfo"]["version"],
-            "1.3.0",
+            "2.0.0",
         )
         tool_names = {
             tool["name"] for tool in responses[1]["result"]["tools"]

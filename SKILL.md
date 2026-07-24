@@ -67,10 +67,16 @@ name ordering only as a tie-breaker.
 ## Delivery interpretation
 
 - `queued`: stored, not attempted yet.
-- `wake_launched`: process launched, awaiting agent check-in.
-- `acknowledged`: target checked status/inbox or claimed.
-- `unavailable`: no usable channel.
-- `failed`: attempt failed.
+- `dispatching`: a dispatcher currently owns the attempt.
+- `os_posted` / `plugin_delivered`: a delivery channel accepted the notification;
+  the task is not acknowledged yet.
+- `viewed`: the target opened the delivery surface.
+- `launch_started`: a wake process started; it is not an acknowledgment.
+- `agent_acknowledged`: the target checked status or inbox.
+- `claimed`: the assignee claimed the task.
+- `retry_wait`: a failed attempt is scheduled for retry.
+- `failed`: the delivery attempt failed.
 
 Do not tell a user that another agent received or accepted work unless the
-delivery is `acknowledged` or the agent responded through the task lifecycle.
+delivery is `agent_acknowledged`, `claimed`, or the agent responded through the
+task lifecycle.

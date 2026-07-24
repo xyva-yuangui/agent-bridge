@@ -1,0 +1,6 @@
+[features]
+experimental = true
+
+# >>> agent-bridge:codex >>>
+integration_version = "0.1.0"
+# <<< agent-bridge:codex <<<

@@ -7,602 +7,104 @@ param(
     [string]$Python,
     [string[]]$WakeArgv,
     [switch]$Uninstall,
+    [switch]$PurgeData,
+    [switch]$DevSourceFallback,
     [string]$InstallRoot = $env:USERPROFILE
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-$script:SourceRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$script:UserRoot = [IO.Path]::GetFullPath($InstallRoot)
-$script:BridgeHome = Join-Path $script:UserRoot ".agent-bridge"
-$script:SkillHome = Join-Path $script:BridgeHome "skill"
-$script:LauncherHome = Join-Path $script:UserRoot ".local\bin"
+$sourceRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$userRoot = [IO.Path]::GetFullPath($InstallRoot)
 
 function Resolve-Python {
     param([string]$Requested)
-    $candidates = New-Object System.Collections.Generic.List[string]
-    if ($Requested) {
-        $candidates.Add($Requested)
-    }
-    foreach ($name in @("python3.exe", "python.exe", "python3", "python")) {
-        $command = Get-Command $name -ErrorAction SilentlyContinue
-        if ($command -and $command.Source) {
-            $candidates.Add($command.Source)
-        }
-    }
+    $candidates = @()
+    if ($Requested) { $candidates += $Requested }
+    $candidates += "python3.exe", "python.exe", "python3", "python"
     foreach ($candidate in $candidates) {
         try {
-            $resolved = (Resolve-Path -LiteralPath $candidate -ErrorAction Stop).Path
-            & $resolved -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)"
-            if ($LASTEXITCODE -eq 0) {
-                return $resolved
-            }
-        } catch {
-            continue
-        }
+            $command = Get-Command $candidate -ErrorAction Stop
+            $path = (Resolve-Path -LiteralPath $command.Source -ErrorAction Stop).Path
+            & $path -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)"
+            if ($LASTEXITCODE -eq 0) { return $path }
+        } catch { continue }
     }
-    throw "Python 3.9 or newer was not found. Pass -Python with an absolute executable path."
-}
-
-function ConvertTo-TomlLiteral {
-    param([string]$Value)
-    return "'" + $Value.Replace("'", "''") + "'"
-}
-
-function Set-ManagedBlock {
-    param(
-        [string]$Path,
-        [string]$Name,
-        [string]$Body
-    )
-    $parent = Split-Path -Parent $Path
-    New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    $start = "# >>> agent-bridge:$Name >>>"
-    $end = "# <<< agent-bridge:$Name <<<"
-    $content = ""
-    if (Test-Path -LiteralPath $Path) {
-        $content = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path
-        if ($null -eq $content) {
-            $content = ""
-        }
-    }
-    $pattern = "(?ms)^" + [regex]::Escape($start) + ".*?^" + [regex]::Escape($end) + "\s*"
-    $content = [regex]::Replace($content, $pattern, "")
-    $block = "$start`r`n$Body`r`n$end`r`n"
-    $content = $content.TrimEnd() + "`r`n`r`n" + $block
-    [IO.File]::WriteAllText($Path, $content.TrimStart(), (New-Object Text.UTF8Encoding($false)))
-}
-
-function Remove-ManagedBlock {
-    param(
-        [string]$Path,
-        [string]$Name
-    )
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return
-    }
-    $start = "# >>> agent-bridge:$Name >>>"
-    $end = "# <<< agent-bridge:$Name <<<"
-    $content = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path
-    if ($null -eq $content) {
-        $content = ""
-    }
-    $pattern = "(?ms)^" + [regex]::Escape($start) + ".*?^" + [regex]::Escape($end) + "\s*"
-    $content = [regex]::Replace($content, $pattern, "")
-    [IO.File]::WriteAllText($Path, $content.TrimEnd() + "`n", (New-Object Text.UTF8Encoding($false)))
-}
-
-function Install-Shared {
-    param([string]$PythonPath)
-    New-Item -ItemType Directory -Force -Path $script:BridgeHome | Out-Null
-    $stage = Join-Path $script:BridgeHome (".skill-stage-" + $PID)
-    $backup = Join-Path $script:BridgeHome (".skill-backup-" + $PID)
-    foreach ($candidate in @($stage, $backup)) {
-        if (Test-Path -LiteralPath $candidate) {
-            Remove-Item -LiteralPath $candidate -Recurse -Force
-        }
-    }
-    New-Item -ItemType Directory -Force -Path (Join-Path $stage "scripts") | Out-Null
-    # The complete directory includes bridge.py, bridge_mcp.py, and notify_windows.ps1.
-    Copy-Item -Path (Join-Path $script:SourceRoot "scripts\*") -Destination (Join-Path $stage "scripts") -Recurse -Force
-    foreach ($name in @("SKILL.md", "README.md", "README.zh-CN.md")) {
-        $source = Join-Path $script:SourceRoot $name
-        if (Test-Path -LiteralPath $source) {
-            Copy-Item -LiteralPath $source -Destination (Join-Path $stage $name) -Force
-        }
-    }
-    try {
-        if (Test-Path -LiteralPath $script:SkillHome) {
-            Move-Item -LiteralPath $script:SkillHome -Destination $backup
-        }
-        Move-Item -LiteralPath $stage -Destination $script:SkillHome
-        if (Test-Path -LiteralPath $backup) {
-            Remove-Item -LiteralPath $backup -Recurse -Force
-        }
-    } catch {
-        if ((-not (Test-Path -LiteralPath $script:SkillHome)) -and (Test-Path -LiteralPath $backup)) {
-            Move-Item -LiteralPath $backup -Destination $script:SkillHome
-        }
-        throw
-    }
-
-    New-Item -ItemType Directory -Force -Path $script:LauncherHome | Out-Null
-    $bridgeScript = Join-Path $script:SkillHome "scripts\bridge.py"
-    $launcher = Join-Path $script:LauncherHome "bridge.cmd"
-    $launcherText = "@echo off`r`n`"$PythonPath`" `"$bridgeScript`" %*`r`n"
-    [IO.File]::WriteAllText($launcher, $launcherText, [Text.Encoding]::ASCII)
-
-    $skillLinkParent = Join-Path $script:UserRoot ".agents\skills"
-    $skillLink = Join-Path $skillLinkParent "agent-bridge"
-    New-Item -ItemType Directory -Force -Path $skillLinkParent | Out-Null
-    if (Test-Path -LiteralPath $skillLink) {
-        Remove-Item -LiteralPath $skillLink -Recurse -Force
-    }
-    try {
-        New-Item -ItemType Junction -Path $skillLink -Target $script:SkillHome | Out-Null
-    } catch {
-        Copy-Item -LiteralPath $script:SkillHome -Destination $skillLink -Recurse -Force
-    }
-
-    if ($script:UserRoot.TrimEnd("\") -ieq $env:USERPROFILE.TrimEnd("\")) {
-        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-        $parts = @($userPath -split ";" | Where-Object { $_ })
-        if (-not ($parts | Where-Object { $_.TrimEnd("\") -ieq $script:LauncherHome.TrimEnd("\") })) {
-            $newPath = (($parts + $script:LauncherHome) -join ";")
-            [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-        }
-    }
-}
-
-function Get-ExistingWakeArgv {
-    param([string]$Name)
-    $profilePath = Join-Path $script:BridgeHome "agents\$Name\agent.json"
-    if (-not (Test-Path -LiteralPath $profilePath)) {
-        return @()
-    }
-    try {
-        $profile = Get-Content -Raw -Encoding UTF8 -LiteralPath $profilePath | ConvertFrom-Json
-        if ($profile.wake_argv) {
-            return @($profile.wake_argv | ForEach-Object { [string]$_ })
-        }
-        if ($profile.wake -and ([string]$profile.wake -match '^(.+?\.exe)(?:\s+(.*))?$')) {
-            $result = @($Matches[1])
-            if ($Matches[2]) {
-                $result += @($Matches[2] -split '\s+' | Where-Object { $_ })
-            }
-            return $result
-        }
-    } catch {
-        return @()
-    }
-    return @()
-}
-
-function Find-WakeArgv {
-    param([string]$Name)
-    $names = switch ($Name) {
-        "codex" { @("codex.exe", "codex") }
-        "claude" { @("claude.exe", "claude") }
-        "reasonix" { @("reasonix-cli.exe", "reasonix-cli", "reasonix") }
-        "zcode" { @("zcode.exe", "zcode") }
-    }
-    foreach ($commandName in $names) {
-        $command = Get-Command $commandName -ErrorAction SilentlyContinue
-        if ($command -and $command.Source) {
-            $args = @($command.Source)
-            if ($Name -eq "codex") { $args += "exec" }
-            if ($Name -eq "reasonix") { $args += "run" }
-            return $args
-        }
-    }
-    return @(Get-ExistingWakeArgv -Name $Name)
-}
-
-function Register-AgentProfile {
-    param(
-        [string]$Name,
-        [string[]]$Wake
-    )
-    $skills = switch ($Name) {
-        "codex" { @("architecture", "hard-reasoning", "complex-impl", "orchestrate") }
-        "claude" { @("frontend", "ui", "writing", "analysis") }
-        "reasonix" { @("review", "plan", "headless", "refactor") }
-        "zcode" { @("review", "testing", "implementation", "acceptance") }
-    }
-    $strengths = ($skills -join ", ")
-    $profile = [ordered]@{
-        name = $Name
-        skills = $skills
-        strengths = $strengths
-        last_seen = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
-    }
-    if ($Wake -and $Wake.Count -gt 0) {
-        $profile["wake_argv"] = @($Wake)
-    }
-    $directory = Join-Path $script:BridgeHome "agents\$Name"
-    New-Item -ItemType Directory -Force -Path $directory | Out-Null
-    $json = $profile | ConvertTo-Json -Depth 8
-    [IO.File]::WriteAllText((Join-Path $directory "agent.json"), $json + "`n", (New-Object Text.UTF8Encoding($false)))
-}
-
-function Configure-Codex {
-    param([string]$PythonPath)
-    $config = Join-Path $script:UserRoot ".codex\config.toml"
-    $mcp = Join-Path $script:SkillHome "scripts\bridge_mcp.py"
-    $body = @"
-[mcp_servers.agent_bridge]
-command = $(ConvertTo-TomlLiteral $PythonPath)
-args = [$(ConvertTo-TomlLiteral $mcp), '--as', 'codex']
-startup_timeout_sec = 15
-tool_timeout_sec = 60
-"@
-    Set-ManagedBlock -Path $config -Name "codex-mcp" -Body $body
-    $directive = @"
-At the start of every turn, call agent-bridge status and inbox. Handle pending bridge tasks before replying. Use agent-bridge to coordinate work with registered agents.
-"@
-    Set-ManagedBlock -Path (Join-Path $script:UserRoot "AGENTS.md") -Name "directive" -Body $directive
-}
-
-function Set-JsonPromptHook {
-    param(
-        [string]$Path,
-        [string]$Identity,
-        [string]$PythonPath
-    )
-    $parent = Split-Path -Parent $Path
-    New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    $root = New-Object PSObject
-    if (Test-Path -LiteralPath $Path) {
-        try {
-            $root = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path | ConvertFrom-Json
-        } catch {
-            throw "Cannot update invalid JSON config: $Path"
-        }
-    }
-    if (-not $root.PSObject.Properties["hooks"]) {
-        $root | Add-Member -NotePropertyName hooks -NotePropertyValue (New-Object PSObject)
-    }
-    $hooks = $root.hooks
-    $current = @()
-    if ($hooks.PSObject.Properties["UserPromptSubmit"]) {
-        $current = @($hooks.UserPromptSubmit | Where-Object {
-            (($_ | ConvertTo-Json -Depth 12 -Compress) -notmatch '\.agent-bridge.*bridge\.py')
-        })
-    }
-    $bridgeScript = Join-Path $script:SkillHome "scripts\bridge.py"
-    $command = "`"$PythonPath`" `"$bridgeScript`" --as $Identity status --oneliner"
-    $entry = [ordered]@{
-        matcher = ""
-        hooks = @([ordered]@{ type = "command"; command = $command; timeout = 10 })
-    }
-    $updated = @($current + $entry)
-    if ($hooks.PSObject.Properties["UserPromptSubmit"]) {
-        $hooks.UserPromptSubmit = $updated
-    } else {
-        $hooks | Add-Member -NotePropertyName UserPromptSubmit -NotePropertyValue $updated
-    }
-    $json = $root | ConvertTo-Json -Depth 20
-    [IO.File]::WriteAllText($Path, $json + "`n", (New-Object Text.UTF8Encoding($false)))
-}
-
-function Remove-JsonPromptHook {
-    param([string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return
-    }
-    $root = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path | ConvertFrom-Json
-    if ($root.PSObject.Properties["hooks"] -and $root.hooks.PSObject.Properties["UserPromptSubmit"]) {
-        $root.hooks.UserPromptSubmit = @($root.hooks.UserPromptSubmit | Where-Object {
-            (($_ | ConvertTo-Json -Depth 12 -Compress) -notmatch '\.agent-bridge.*bridge\.py')
-        })
-    }
-    $json = $root | ConvertTo-Json -Depth 20
-    [IO.File]::WriteAllText($Path, $json + "`n", (New-Object Text.UTF8Encoding($false)))
-}
-
-function Configure-Claude {
-    param([string]$PythonPath)
-    Set-JsonPromptHook -Path (Join-Path $script:UserRoot ".claude\settings.json") -Identity "claude" -PythonPath $PythonPath
-}
-
-function Configure-Reasonix {
-    param([string]$PythonPath)
-    $directivePath = Join-Path $script:UserRoot ".reasonix\agent-bridge-directive.md"
-    $directive = "At the start of every turn, run agent-bridge status and inbox. Handle pending tasks before replying."
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $directivePath) | Out-Null
-    [IO.File]::WriteAllText($directivePath, $directive + "`n", (New-Object Text.UTF8Encoding($false)))
-    $mcp = Join-Path $script:SkillHome "scripts\bridge_mcp.py"
-    $config = Join-Path $script:UserRoot ".reasonix\config.toml"
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $config) | Out-Null
-    $editor = @'
-import json
-import re
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-directive, bridge_home, python, mcp = sys.argv[2:]
-text = path.read_text(encoding="utf-8") if path.exists() else ""
-text = re.sub(
-    r"(?ms)^# >>> agent-bridge:reasonix >>>.*?^# <<< agent-bridge:reasonix <<<\s*",
-    "",
-    text,
-)
-
-def upsert_scalar(source, section, key, value):
-    pattern = re.compile(
-        rf"(?ms)(^\[{re.escape(section)}\]\s*\r?\n)(.*?)(?=^\[|\Z)"
-    )
-    match = pattern.search(source)
-    line = f"{key} = {json.dumps(value)}"
-    if not match:
-        return source.rstrip() + f"\n\n[{section}]\n{line}\n"
-    body = match.group(2)
-    key_pattern = re.compile(rf"(?m)^{re.escape(key)}\s*=.*$")
-    if key_pattern.search(body):
-        body = key_pattern.sub(lambda _match: line, body, count=1)
-    else:
-        body = body.rstrip() + "\n" + line + "\n"
-    return source[:match.start(2)] + body + source[match.end(2):]
-
-def ensure_array_value(source, section, key, value):
-    pattern = re.compile(
-        rf"(?ms)(^\[{re.escape(section)}\]\s*\r?\n)(.*?)(?=^\[|\Z)"
-    )
-    match = pattern.search(source)
-    value_json = json.dumps(value)
-    if not match:
-        return source.rstrip() + f"\n\n[{section}]\n{key} = [{value_json}]\n"
-    body = match.group(2)
-    line_pattern = re.compile(rf"(?m)^({re.escape(key)}\s*=\s*)\[(.*?)\]\s*$")
-    line_match = line_pattern.search(body)
-    if not line_match:
-        body = body.rstrip() + f"\n{key} = [{value_json}]\n"
-    else:
-        raw_values = line_match.group(2).strip()
-        try:
-            values = json.loads("[" + raw_values + "]")
-        except (json.JSONDecodeError, TypeError):
-            values = []
-        values = list(dict.fromkeys(str(item) for item in values))
-        if value not in values:
-            values.append(value)
-        replacement = line_match.group(1) + json.dumps(values)
-        body = body[:line_match.start()] + replacement + body[line_match.end():]
-    return source[:match.start(2)] + body + source[match.end(2):]
-
-plugin_pattern = re.compile(
-    r"(?ms)^\[\[plugins\]\]\s*\r?\n.*?(?=^\[\[?[A-Za-z0-9_.-]+\]\]?\s*$|\Z)"
-)
-text = plugin_pattern.sub(
-    lambda match: "" if re.search(
-        r"(?m)^name\s*=\s*['\"]agent-bridge['\"]\s*$",
-        match.group(0),
-    ) else match.group(0),
-    text,
-)
-text = upsert_scalar(text, "agent", "system_prompt_file", directive)
-text = ensure_array_value(text, "sandbox", "allow_write", bridge_home)
-plugin = (
-    "# >>> agent-bridge:reasonix >>>\n"
-    "[[plugins]]\n"
-    "name = \"agent-bridge\"\n"
-    f"command = {json.dumps(python)}\n"
-    f"args = [{json.dumps(mcp)}, \"--as\", \"reasonix\"]\n"
-    "# <<< agent-bridge:reasonix <<<\n"
-)
-path.write_text(text.rstrip() + "\n\n" + plugin, encoding="utf-8")
-'@
-    $editorPath = Join-Path $script:BridgeHome (".reasonix-config-" + $PID + ".py")
-    [IO.File]::WriteAllText($editorPath, $editor, (New-Object Text.UTF8Encoding($false)))
-    try {
-        & $PythonPath $editorPath $config $directivePath $script:BridgeHome $PythonPath $mcp
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to update Reasonix config."
-        }
-    } finally {
-        if (Test-Path -LiteralPath $editorPath) {
-            Remove-Item -LiteralPath $editorPath -Force
-        }
-    }
-}
-
-function Configure-ZCode {
-    param([string]$PythonPath)
-    $pluginRoot = Join-Path $script:UserRoot ".zcode\cli\plugins\cache\local\agent-bridge\1.3.0"
-    $manifestDir = Join-Path $pluginRoot ".zcode-plugin"
-    $hooksDir = Join-Path $pluginRoot "hooks"
-    New-Item -ItemType Directory -Force -Path $manifestDir, $hooksDir | Out-Null
-    $manifest = [ordered]@{
-        name = "agent-bridge"
-        version = "1.3.0"
-        description = "Local cross-agent coordination and task delivery."
-        author = [ordered]@{ name = "agent-bridge contributors" }
-        license = "MIT"
-    } | ConvertTo-Json -Depth 8
-    [IO.File]::WriteAllText(
-        (Join-Path $manifestDir "plugin.json"),
-        $manifest + "`n",
-        (New-Object Text.UTF8Encoding($false))
-    )
-    $bridgeScript = Join-Path $script:SkillHome "scripts\bridge.py"
-    $command = "`"$PythonPath`" `"$bridgeScript`" --as zcode status --oneliner"
-    $hookConfig = [ordered]@{
-        hooks = [ordered]@{
-            UserPromptSubmit = @(
-                [ordered]@{
-                    matcher = "*"
-                    hooks = @(
-                        [ordered]@{
-                            type = "command"
-                            command = $command
-                            async = $false
-                        }
-                    )
-                }
-            )
-        }
-    } | ConvertTo-Json -Depth 12
-    [IO.File]::WriteAllText(
-        (Join-Path $hooksDir "hooks.json"),
-        $hookConfig + "`n",
-        (New-Object Text.UTF8Encoding($false))
-    )
-
-    $configPath = Join-Path $script:UserRoot ".zcode\cli\config.json"
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $configPath) | Out-Null
-    $config = New-Object PSObject
-    if (Test-Path -LiteralPath $configPath) {
-        $config = Get-Content -Raw -Encoding UTF8 -LiteralPath $configPath | ConvertFrom-Json
-    }
-    if (-not $config.PSObject.Properties["plugins"]) {
-        $config | Add-Member -NotePropertyName plugins -NotePropertyValue (New-Object PSObject)
-    }
-    if (-not $config.plugins.PSObject.Properties["enabledPlugins"]) {
-        $config.plugins | Add-Member -NotePropertyName enabledPlugins -NotePropertyValue (New-Object PSObject)
-    }
-    $enabled = $config.plugins.enabledPlugins
-    if ($enabled.PSObject.Properties["agent-bridge@local"]) {
-        $enabled."agent-bridge@local" = $true
-    } else {
-        $enabled | Add-Member -NotePropertyName "agent-bridge@local" -NotePropertyValue $true
-    }
-    $json = $config | ConvertTo-Json -Depth 20
-    [IO.File]::WriteAllText($configPath, $json + "`n", (New-Object Text.UTF8Encoding($false)))
-}
-
-function Uninstall-Agent {
-    param([string[]]$Names)
-    foreach ($name in $Names) {
-        switch ($name) {
-            "codex" {
-                Remove-ManagedBlock -Path (Join-Path $script:UserRoot ".codex\config.toml") -Name "codex-mcp"
-                Remove-ManagedBlock -Path (Join-Path $script:UserRoot "AGENTS.md") -Name "directive"
-            }
-            "claude" {
-                Remove-JsonPromptHook -Path (Join-Path $script:UserRoot ".claude\settings.json")
-            }
-            "reasonix" {
-                $reasonixConfig = Join-Path $script:UserRoot ".reasonix\config.toml"
-                Remove-ManagedBlock -Path $reasonixConfig -Name "reasonix"
-                if (Test-Path -LiteralPath $reasonixConfig) {
-                    $reasonixText = Get-Content -Raw -Encoding UTF8 -LiteralPath $reasonixConfig
-                    if ($null -eq $reasonixText) { $reasonixText = "" }
-                    $reasonixText = [regex]::Replace(
-                        $reasonixText,
-                        "(?m)^\s*system_prompt_file\s*=\s*['`"][^'`"]*agent-bridge-directive\.md['`"]\s*\r?\n?",
-                        ""
-                    )
-                    $reasonixText = [regex]::Replace(
-                        $reasonixText,
-                        "['`"][^'`"]*\.agent-bridge[^'`"]*['`"]\s*,?\s*",
-                        ""
-                    )
-                    $reasonixText = $reasonixText -replace "\[\s*,", "[" -replace ",\s*\]", "]"
-                    [IO.File]::WriteAllText(
-                        $reasonixConfig,
-                        $reasonixText.TrimEnd() + "`n",
-                        (New-Object Text.UTF8Encoding($false))
-                    )
-                }
-                $directive = Join-Path $script:UserRoot ".reasonix\agent-bridge-directive.md"
-                if (Test-Path -LiteralPath $directive) {
-                    Remove-Item -LiteralPath $directive -Force
-                }
-            }
-            "zcode" {
-                $plugin = Join-Path $script:UserRoot ".zcode\cli\plugins\cache\local\agent-bridge"
-                if (Test-Path -LiteralPath $plugin) {
-                    Remove-Item -LiteralPath $plugin -Recurse -Force
-                }
-                $configPath = Join-Path $script:UserRoot ".zcode\cli\config.json"
-                if (Test-Path -LiteralPath $configPath) {
-                    $config = Get-Content -Raw -Encoding UTF8 -LiteralPath $configPath | ConvertFrom-Json
-                    if (
-                        $config.PSObject.Properties["plugins"] -and
-                        $config.plugins.PSObject.Properties["enabledPlugins"] -and
-                        $config.plugins.enabledPlugins.PSObject.Properties["agent-bridge@local"]
-                    ) {
-                        $config.plugins.enabledPlugins.PSObject.Properties.Remove("agent-bridge@local")
-                    }
-                    $json = $config | ConvertTo-Json -Depth 20
-                    [IO.File]::WriteAllText($configPath, $json + "`n", (New-Object Text.UTF8Encoding($false)))
-                }
-            }
-        }
-    }
-    $launcher = Join-Path $script:LauncherHome "bridge.cmd"
-    $skillLink = Join-Path $script:UserRoot ".agents\skills\agent-bridge"
-    if (Test-Path -LiteralPath $launcher) {
-        Remove-Item -LiteralPath $launcher -Force
-    }
-    if (Test-Path -LiteralPath $skillLink) {
-        Remove-Item -LiteralPath $skillLink -Recurse -Force
-    }
-    foreach ($name in $Names) {
-        $profile = Join-Path $script:BridgeHome "agents\$name"
-        if (Test-Path -LiteralPath $profile) {
-            Remove-Item -LiteralPath $profile -Recurse -Force
-        }
-    }
-    if (Test-Path -LiteralPath $script:SkillHome) {
-        Remove-Item -LiteralPath $script:SkillHome -Recurse -Force
-    }
-    Write-Output "agent-bridge program files removed; project boards were preserved in $script:BridgeHome"
-}
-
-function Install-Agent {
-    param(
-        [string]$Name,
-        [string]$PythonPath,
-        [string[]]$ExplicitWake
-    )
-    $wake = @($ExplicitWake)
-    if (-not $wake -or $wake.Count -eq 0) {
-        $wake = @(Find-WakeArgv -Name $Name)
-    }
-    Register-AgentProfile -Name $Name -Wake $wake
-    switch ($Name) {
-        "codex" { Configure-Codex -PythonPath $PythonPath }
-        "claude" { Configure-Claude -PythonPath $PythonPath }
-        "reasonix" { Configure-Reasonix -PythonPath $PythonPath }
-        "zcode" { Configure-ZCode -PythonPath $PythonPath }
-    }
-}
-
-$agents = @()
-if ($Auto) {
-    $agents = @("codex", "claude", "reasonix", "zcode")
-} elseif ($Agent) {
-    $agents = @($Agent)
-} elseif ($As) {
-    $agents = @($As)
-} else {
-    throw "Choose -Auto or -Agent codex|claude|reasonix|zcode."
-}
-
-if ($Uninstall) {
-    Uninstall-Agent -Names $agents
-    exit 0
+    throw "Python 3.9 or newer was not found. Pass -Python with an executable path."
 }
 
 $pythonPath = Resolve-Python -Requested $Python
-Install-Shared -PythonPath $pythonPath
-foreach ($name in $agents) {
-    $explicit = @()
-    if (($agents.Count -eq 1) -and $WakeArgv) {
-        $explicit = @($WakeArgv)
+$bridgeArgs = @("-m", "agent_bridge.cli")
+
+# Removal is deliberately independent of bootstrap.  Downloading/reinstalling
+# a package just to remove it can replace a healthy user installation and can
+# never be made safe for a shared interpreter.
+if ($Uninstall) {
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    & $pythonPath -c "import agent_bridge.cli" 2>$null
+    $packageImportable = $LASTEXITCODE -eq 0
+    & $pythonPath -c "import importlib.metadata as m, pathlib, site; d=m.distribution('agent-bridge'); root=pathlib.Path(d.locate_file('')).resolve(); user=pathlib.Path(site.USER_SITE).resolve(); raise SystemExit(0 if root == user or user in root.parents else 1)" 2>$null
+    $userOwnedPackage = $LASTEXITCODE -eq 0
+    $ErrorActionPreference = $previousPreference
+    if (-not $packageImportable) {
+        $ownedRuntime = Join-Path $userRoot ".agent-bridge\skill\runtime"
+        if (-not (Test-Path -LiteralPath (Join-Path $ownedRuntime "agent_bridge\cli.py"))) {
+            throw "Agent Bridge is not importable and its owned runtime is absent; refusing to install anything during uninstall."
+        }
+        $runtimeProgram = "import sys; sys.path.insert(0, sys.argv[1]); from agent_bridge.cli import main; raise SystemExit(main(sys.argv[2:]))"
+        $bridgeArgs = @("-c", $runtimeProgram, $ownedRuntime)
     }
-    Install-Agent -Name $name -PythonPath $pythonPath -ExplicitWake $explicit
+    $bridgeArgs += "uninstall", "--home", $userRoot
+    if ($Agent) { $bridgeArgs += "--agent", $Agent }
+    if ($PurgeData) { $bridgeArgs += "--purge-data" }
+    & $pythonPath @bridgeArgs
+    if ($LASTEXITCODE -ne 0) { throw "agent-bridge uninstall command failed." }
+    # Only a distribution located in this interpreter's user site can have
+    # been installed by this script (--user). pip removes files from that
+    # distribution's RECORD only; global, venv, and unrelated packages stay.
+    $sharedRuntime = Join-Path $userRoot ".agent-bridge\runtime-receipt.json"
+    if ($userOwnedPackage -and -not (Test-Path -LiteralPath $sharedRuntime)) {
+        & $pythonPath -m pip uninstall --disable-pip-version-check --yes agent-bridge
+        if ($LASTEXITCODE -ne 0) { throw "Agent Bridge lifecycle was removed, but its user-owned Python distribution could not be removed." }
+    } elseif (Test-Path -LiteralPath $sharedRuntime) {
+        Write-Verbose "Retaining the shared Agent Bridge distribution because other host integrations remain."
+    } else {
+        Write-Verbose "Retaining Agent Bridge distribution outside this interpreter's user site."
+    }
+    Write-Output "OK agent-bridge lifecycle completed"
+    exit 0
 }
 
-$doctorIdentity = if ($As) { $As } elseif ($Agent) { $Agent } else { "codex" }
-$env:AGENT_BRIDGE_HOME = $script:BridgeHome
-$env:AGENT_BRIDGE_CONFIG_HOME = $script:UserRoot
-$env:PYTHONUTF8 = "1"
-& $pythonPath (Join-Path $script:SkillHome "scripts\bridge.py") --as $doctorIdentity doctor --strict
-if ($LASTEXITCODE -ne 0) {
-    throw "agent-bridge doctor --strict failed."
+$bootstrapWheel = Join-Path $sourceRoot "bootstrap\agent_bridge-2.0.0-py3-none-any.whl"
+$bootstrapMetadata = Join-Path $sourceRoot "bootstrap\agent_bridge-2.0.0.bootstrap.json"
+if (Test-Path -LiteralPath $bootstrapWheel) {
+    if (-not (Test-Path -LiteralPath $bootstrapMetadata)) { throw "Offline bootstrap metadata is missing; use a complete release archive." }
+    & $pythonPath -c "import hashlib,json,sys; wheel, metadata=sys.argv[1:]; value=json.load(open(metadata, encoding='utf-8')); actual=hashlib.sha256(open(wheel,'rb').read()).hexdigest(); raise SystemExit(0 if value.get('version') == '2.0.0' and value.get('wheel') == wheel.rsplit('\\',1)[-1] and value.get('sha256') == actual else 1)" $bootstrapWheel $bootstrapMetadata
+    if ($LASTEXITCODE -ne 0) { throw "Offline bootstrap metadata does not match its wheel; use a complete verified release archive." }
+    & $pythonPath -m pip install --disable-pip-version-check --no-index --no-deps --force-reinstall --user $bootstrapWheel
+} else {
+    & $pythonPath -c "import setuptools.build_meta"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Offline bootstrap wheel is missing and setuptools.build_meta is unavailable. Use a complete release archive containing bootstrap/agent_bridge-2.0.0-py3-none-any.whl."
+    }
+    & $pythonPath -m pip install --disable-pip-version-check --no-build-isolation --no-deps --force-reinstall --user $sourceRoot
 }
-Write-Output "agent-bridge installed for: $($agents -join ', ')"
+if ($LASTEXITCODE -ne 0) {
+    if (-not ($DevSourceFallback -or $env:AGENT_BRIDGE_DEV_SOURCE_FALLBACK -eq "1")) {
+        throw "Package installation failed. Re-run after fixing pip, or explicitly pass -DevSourceFallback for a degraded checkout-only run."
+    }
+    Write-Warning "DEGRADED development fallback: importing this checkout through PYTHONPATH."
+    $sourcePackage = Join-Path $sourceRoot "src"
+    $env:PYTHONPATH = if ($env:PYTHONPATH) { "$sourcePackage;$env:PYTHONPATH" } else { $sourcePackage }
+}
+
+$bridgeArgs += "setup", "--home", $userRoot
+if ($Auto) { $bridgeArgs += "--auto" }
+if ($Agent) { $bridgeArgs += "--agent", $Agent }
+if (-not $Auto -and -not $Agent) { $bridgeArgs += "--auto" }
+if ($As -or $WakeArgv) { Write-Verbose "-As and -WakeArgv are legacy options; setup uses local host scope only." }
+& $pythonPath @bridgeArgs
+if ($LASTEXITCODE -ne 0) { throw "agent-bridge setup command failed." }
+Write-Output "OK agent-bridge lifecycle completed"

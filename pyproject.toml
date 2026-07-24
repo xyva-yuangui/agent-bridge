@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-bridge"
+version = "2.0.0"
+description = "Local task coordination for Codex, Claude Code, Reasonix, and ZCode"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+license = "Apache-2.0"
+authors = [{name = "Agent Bridge contributors"}]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+keywords = ["agents", "cli", "mcp", "local-first", "task-board"]
+
+[project.scripts]
+bridge = "agent_bridge.cli:main"
+bridge-mcp = "agent_bridge.mcp:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+agent_bridge = ["migrations/*.sql", "integrations/*/*.json", "integrations/*/*.py", "bootstrap/*.py", "bootstrap/*.ps1", "native/windows-x86_64/*.exe", "native/macos-universal2/**/*"]

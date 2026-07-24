@@ -1,0 +1,6 @@
+[agent]
+model = "keep"
+
+# >>> agent-bridge:reasonix >>>
+integration_version = "0.1.0"
+# <<< agent-bridge:reasonix <<<
