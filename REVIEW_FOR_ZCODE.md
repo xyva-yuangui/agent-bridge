@@ -43,6 +43,16 @@ observed. No macOS machine, Swift toolchain, or final universal2 app was
 available locally; do not approve a macOS native-notification release claim
 without the CI/real-machine evidence named in the macOS report.
 
+**Current production E2E blocker:** an independent review found that the
+dispatcher is not yet wired to deliver HostAdapter session cards; the global
+launcher channel can classify a manual recipient as delivered; MCP actor values
+can be overridden; setup's production notification activation argv omits
+`--as`; the Claude hook/host-consumer workflow is incomplete; and Windows CAS
+displaced content can be lost. Treat the attached acceptance documents as
+provisional lower-level/package observations. Do not approve this candidate
+until those findings are fixed and the four-host production E2E evidence is
+rerun.
+
 The local host also lacked `cargo`; the staged locked Windows helper hash was
 verified and exercised, while the Rust rebuild remains a CI/release gate.
 

@@ -8,6 +8,18 @@ This report distinguishes an operating-system result from a UI observation.
 No claim below means that a Notification Center visual/history entry or a
 human click was observed; the host session was automated.
 
+> **Provisional evidence only — production E2E remediation pending.** The
+> observations below prove package/bootstrap behavior and the lower-level
+> Windows helper lifecycle. An independent review found that the production
+> dispatcher/host-consumer chain is not yet an acceptance basis: it does not
+> deliver a session card through the HostAdapter, a global launcher channel can
+> misclassify a manual recipient, MCP actor identity can be overridden, setup's
+> production activation argv lacks `--as`, and the Claude hook/host consumer
+> path is incomplete. The Windows CAS displaced-content case also needs repair.
+> Do not use this document to claim complete production four-client delivery or
+> final Windows release acceptance until those defects are remediated and this
+> evidence is rerun.
+
 ## One installer invocation and four desktop clients
 
 Command:
@@ -116,4 +128,5 @@ Results:
 
 The comprehensive Python suite, bootstrap-wheel validation, `compileall`, and
 `git diff --check` are also required final gates and are listed in
-`REVIEW_FOR_ZCODE.md` for an independent rerun.
+`REVIEW_FOR_ZCODE.md` for an independent rerun. They do not supersede the
+production E2E remediation noted above.
