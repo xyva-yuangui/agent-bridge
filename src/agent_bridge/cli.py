@@ -103,8 +103,12 @@ def execute_command(
             "timed_out": report.timed_out,
         }}
     if command == "open-action":
-        notification_id = str(_argument(arguments, "notification_id", ""))
-        action = str(_argument(arguments, "action", ""))
+        uri = _argument(arguments, "activation_uri")
+        if uri is not None:
+            notification_id, action = _activation_uri(str(uri))
+        else:
+            notification_id = str(_argument(arguments, "notification_id", ""))
+            action = str(_argument(arguments, "action", ""))
         if not notification_id or len(notification_id) > 256 or not all(
             character.isascii() and (character.isalnum() or character in "._-")
             for character in notification_id
@@ -302,6 +306,21 @@ def _activity_since(value: Any) -> Optional[str]:
     return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _activation_uri(value: str) -> tuple[str, str]:
+    """Parse only the helper's opaque, query-free activation URI."""
+    prefix = "agent-bridge://action/"
+    if not value.startswith(prefix) or "?" in value or "#" in value or value.count("/") != 3:
+        raise ValueError("invalid activation URI")
+    action, separator, notification_id = value[len(prefix):].partition("/")
+    if not separator or action not in ("view", "claim", "snooze"):
+        raise ValueError("invalid activation URI")
+    if not notification_id or len(notification_id) > 256 or not all(
+        character.isascii() and (character.isalnum() or character in "._-") for character in notification_id
+    ):
+        raise ValueError("invalid activation URI")
+    return notification_id, action
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bridge")
     parser.add_argument("--version", action="version", version=BRIDGE_VERSION)
@@ -336,8 +355,10 @@ def build_parser() -> argparse.ArgumentParser:
     for name in UNAVAILABLE_COMMANDS:
         command(name, help="reserved for a later v2 component")
     open_action = command("open-action")
-    open_action.add_argument("--notification-id", required=True)
-    open_action.add_argument("--action", choices=("view", "claim", "snooze"), required=True)
+    action_source = open_action.add_mutually_exclusive_group(required=True)
+    action_source.add_argument("--activation-uri")
+    open_action.add_argument("--notification-id")
+    open_action.add_argument("--action", choices=("view", "claim", "snooze"))
     return parser
 
 
