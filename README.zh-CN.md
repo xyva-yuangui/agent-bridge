@@ -83,4 +83,4 @@ python -m compileall -q src scripts tests
 python -m build
 ```
 
-发布流程生成 Windows/macOS 平台 wheel、sdist、portable archive、SHA-256 校验、SPDX 与 CycloneDX SBOM。签名、公证与干净环境安装的 real-machine 验收命令见[发布清单](docs/release/checklist.md)。
+首要发布下载为一个跨平台 `agent-bridge-<version>-portable.zip`。其中包含离线 bootstrap wheel、两种原生助手（macOS app 仅为内部组件）、两个安装脚本、主机集成清单、文档、校验和清单；wheel 与 sdist 仅作为补充验证产物。签名、公证与 portable ZIP 干净环境安装的 real-machine 验收命令见[发布清单](docs/release/checklist.md)。

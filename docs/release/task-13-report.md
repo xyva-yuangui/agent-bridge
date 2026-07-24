@@ -120,3 +120,20 @@ test rebuilds twice when the local backend is available.  The all-four-host
 acceptance test now uses one normal offline-bootstrap install with an isolated
 `PYTHONUSERBASE` and no `PYTHONPATH`, verifies module origin, launches every
 receipt outside the checkout, then repairs and uninstalls.
+
+## ZIP-first portable release (2026-07-24)
+
+The aggregate release job now makes exactly one cross-platform primary asset:
+`agent-bridge-2.0.0-portable.zip`.  It is constructed only after downloading
+the locked Windows helper and signed/notarized macOS universal2 app.  Its
+deterministic contents are the offline bootstrap wheel, Windows executable,
+macOS `.app` as an internal component, both install scripts, LICENSE, bilingual
+READMEs, integration manifests, installation docs, an inventory, and checksums.
+Platform wheels, sdist, final checksum file, and SBOMs remain supplementary
+verification artifacts; the workflow creates no macOS-only DMG/PKG installer.
+
+`scripts/build_portable_zip.py` writes sorted fixed-time ZIP entries with
+normalized permissions and validates the internal inventory/checksum manifest.
+Its regression test builds byte-identical archives, checks the exact required
+paths, and extracts the ZIP under a CJK/space path to run `install.ps1` from
+the bundled wheel and native helper without a checkout.

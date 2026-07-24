@@ -20,11 +20,21 @@ real-machine platform acceptance. Do not publish only because CI is green.
 
 ## Artifacts
 
-Build the wheel, sdist, and portable archive from the clean release tag. Create
-SHA-256 checksums and an SPDX SBOM. Install the wheel into a new virtual
-environment, run `bridge --version`, `bridge --help`, `bridge doctor`, and
-`bridge setup --dry-run`, then inspect the wheel and sdist manifests for all
-four integration templates and migration SQL.
+The primary release asset is exactly one cross-platform
+`agent-bridge-<version>-portable.zip`, built after the Windows helper and the
+signed/notarized macOS universal2 app are available. It must contain the
+offline bootstrap wheel, Windows helper, macOS app as an internal component,
+both install scripts, LICENSE, both READMEs, all integration manifests,
+installation docs, `SHA256SUMS.txt`, and `inventory.json`. Extract it under a
+path containing spaces and non-ASCII characters, then run the appropriate
+install script without a checkout or `PYTHONPATH`. The wheel and sdist are
+supplementary verification artifacts, not platform-specific primary installers.
+
+Create final SHA-256 checksums and SPDX/CycloneDX SBOMs after the portable ZIP
+is built. Install the bootstrap wheel into a new virtual environment, run
+`bridge --version`, `bridge --help`, `bridge doctor`, and `bridge setup
+--dry-run`, then inspect its manifests for all four integration templates and
+migration SQL.
 
 When signing is requested, require the signing identity and (for macOS)
 notarization profile. Never echo secret values. Verify signatures and checksum

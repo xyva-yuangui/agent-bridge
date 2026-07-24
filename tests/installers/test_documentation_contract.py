@@ -128,6 +128,17 @@ class DocumentationContractTests(unittest.TestCase):
             self.assertIn(token, release)
         self.assertTrue((ROOT / "scripts" / "retag_wheel.py").is_file())
 
+    def test_release_is_zip_first_and_uses_the_portable_zip_builder(self) -> None:
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8").lower()
+        checklist = (ROOT / "docs" / "release" / "checklist.md").read_text(encoding="utf-8").lower()
+        for token in ("build_portable_zip.py", "-portable.zip", "agentbridgenotifier.app", "agent-bridge-windows-notify.exe"):
+            self.assertIn(token, release)
+        self.assertNotIn(".dmg", release)
+        self.assertNotIn(".pkg", release)
+        self.assertIn("primary release asset", checklist)
+        self.assertIn("inventory.json", checklist)
+        self.assertTrue((ROOT / "scripts" / "build_portable_zip.py").is_file())
+
     def test_macos_tag_signing_provisions_and_cleans_ephemeral_credentials_before_packaging(self) -> None:
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         for token in (

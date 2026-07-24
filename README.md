@@ -112,7 +112,10 @@ python -m compileall -q src scripts tests
 python -m build
 ```
 
-Build output includes a wheel and sdist. The release workflow additionally
-creates a portable archive, SHA-256 checksums, and an SPDX SBOM. See the
+The primary release download is one cross-platform
+`agent-bridge-<version>-portable.zip`. It contains the offline bootstrap
+wheel, both native helpers (the macOS app is an internal component), both
+install scripts, host integration manifests, docs, checksums, and an inventory.
+Wheels and the sdist remain supplementary verification artifacts. See the
 [release checklist](docs/release/checklist.md) for real-machine native-helper,
-signing, notarization, and artifact-install verification.
+signing, notarization, and portable-ZIP installation verification.
