@@ -107,6 +107,13 @@ def _install_runtime(home: Path) -> None:
     """Copy the compatibility runtime used by retained bridge.py launchers."""
     data = _data_root(home); root = _source_root()
     data.mkdir(parents=True, exist_ok=True)
+    launcher = home / ".local" / "bin" / ("bridge.cmd" if os.name == "nt" else "bridge")
+    if skill.exists() or launcher.exists():
+        receipt = _runtime_receipt(home)
+        try: prior = json.loads(receipt.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error: raise RuntimeError("refusing to replace unowned runtime") from error
+        if prior.get("owner") != OWNER or prior.get("skill") != str(skill) or prior.get("launcher") != str(launcher) or skill.is_symlink() or launcher.is_symlink():
+            raise RuntimeError("refusing to replace unowned runtime")
     stage = data / (".skill-stage-" + next(tempfile._get_candidate_names()))
     skill = data / "skill"; backup = data / (".skill-backup-" + next(tempfile._get_candidate_names()))
     try:
@@ -121,7 +128,6 @@ def _install_runtime(home: Path) -> None:
         if not skill.exists() and backup.exists(): os.replace(backup, skill)
         raise
     launcher_dir = home / ".local" / "bin"; launcher_dir.mkdir(parents=True, exist_ok=True)
-    launcher = launcher_dir / ("bridge.cmd" if os.name == "nt" else "bridge")
     if os.name == "nt":
         launcher.write_text('@echo off\r\n"{0}" "{1}" %*\r\n'.format(sys.executable, skill / "scripts" / "bridge.py"), encoding="utf-8")
     else:
@@ -192,8 +198,6 @@ def _remove_windows_native(home: Path) -> None:
     if os.environ.get("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER") == str(helper):
         if env_state.get("process") is None: os.environ.pop("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", None)
         else: os.environ["AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER"] = str(env_state["process"])
-    if helper.parent.is_dir() and not any(helper.parent.iterdir()):
-        helper.parent.rmdir()
     import winreg
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
@@ -203,6 +207,8 @@ def _remove_windows_native(home: Path) -> None:
                 else: winreg.SetValueEx(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", 0, winreg.REG_SZ, str(env_state["user"]))
     except FileNotFoundError: pass
     env_receipt.unlink(missing_ok=True)
+    if helper.parent.is_dir() and not any(helper.parent.iterdir()):
+        helper.parent.rmdir()
 
 
 def _remove_runtime(home: Path) -> None:
