@@ -8,6 +8,7 @@ python_requested=""
 wake_cmd=""
 uninstall=0
 purge_data=0
+dev_source_fallback=0
 install_root="${HOME}"
 
 while [ "$#" -gt 0 ]; do
@@ -19,6 +20,7 @@ while [ "$#" -gt 0 ]; do
     --wake-cmd) wake_cmd="$2"; shift ;;
     --uninstall) uninstall=1 ;;
     --purge-data) purge_data=1 ;;
+    --dev-source-fallback) dev_source_fallback=1 ;;
     --install-root) install_root="$2"; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -44,10 +46,13 @@ resolve_python() {
 }
 
 python_path="$(resolve_python)"
-source_package="${source_root}/src"
-export PYTHONPATH="${source_package}${PYTHONPATH:+:${PYTHONPATH}}"
 if ! "$python_path" -m pip install --disable-pip-version-check --no-build-isolation --no-deps --user "$source_root"; then
-  echo "Package installation failed; using this checkout via PYTHONPATH." >&2
+  if [ "$dev_source_fallback" -ne 1 ] && [ "${AGENT_BRIDGE_DEV_SOURCE_FALLBACK:-}" != "1" ]; then
+    echo "Package installation failed. Fix pip or pass --dev-source-fallback for degraded checkout-only use." >&2
+    exit 1
+  fi
+  echo "DEGRADED development fallback: importing this checkout through PYTHONPATH." >&2
+  export PYTHONPATH="${source_root}/src${PYTHONPATH:+:${PYTHONPATH}}"
 fi
 
 bridge_args=(-m agent_bridge.cli)

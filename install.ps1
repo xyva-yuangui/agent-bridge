@@ -8,6 +8,7 @@ param(
     [string[]]$WakeArgv,
     [switch]$Uninstall,
     [switch]$PurgeData,
+    [switch]$DevSourceFallback,
     [string]$InstallRoot = $env:USERPROFILE
 )
 
@@ -34,13 +35,15 @@ function Resolve-Python {
 }
 
 $pythonPath = Resolve-Python -Requested $Python
-# A checkout is a supported development source.  Installing it makes normal
-# invocations available; PYTHONPATH remains a safe, non-admin fallback when
-# user-site packages are disabled.  Each argument is passed as one array item.
-$sourcePackage = Join-Path $sourceRoot "src"
-$env:PYTHONPATH = if ($env:PYTHONPATH) { "$sourcePackage;$env:PYTHONPATH" } else { $sourcePackage }
 & $pythonPath -m pip install --disable-pip-version-check --no-build-isolation --no-deps --user $sourceRoot
-if ($LASTEXITCODE -ne 0) { Write-Warning "Package installation failed; using this checkout via PYTHONPATH." }
+if ($LASTEXITCODE -ne 0) {
+    if (-not ($DevSourceFallback -or $env:AGENT_BRIDGE_DEV_SOURCE_FALLBACK -eq "1")) {
+        throw "Package installation failed. Re-run after fixing pip, or explicitly pass -DevSourceFallback for a degraded checkout-only run."
+    }
+    Write-Warning "DEGRADED development fallback: importing this checkout through PYTHONPATH."
+    $sourcePackage = Join-Path $sourceRoot "src"
+    $env:PYTHONPATH = if ($env:PYTHONPATH) { "$sourcePackage;$env:PYTHONPATH" } else { $sourcePackage }
+}
 
 $bridgeArgs = @("-m", "agent_bridge.cli")
 if ($Uninstall) {

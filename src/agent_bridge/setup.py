@@ -7,6 +7,7 @@ import sys
 import os
 import json
 import hashlib
+from importlib import resources
 import tempfile
 import shutil as _which_shutil
 from dataclasses import dataclass
@@ -177,7 +178,9 @@ def _native_paths(home: Path) -> Tuple[Path, Path]:
 
 def _install_windows_native(home: Path) -> None:
     if os.name != "nt": return
-    source = _source_root() / "native" / "windows-notify" / "dist" / "windows-x86_64" / "agent-bridge-windows-notify.exe"
+    packaged = resources.files("agent_bridge").joinpath(
+        "native", "windows-x86_64", "agent-bridge-windows-notify.exe"
+    )
     helper, receipt = _native_paths(home)
     env_receipt = helper.parent / "environment-receipt.json"
     configured = os.environ.get("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", "")
@@ -188,9 +191,11 @@ def _install_windows_native(home: Path) -> None:
         except (OSError, ValueError) as error: raise RuntimeError("invalid native helper ownership receipt") from error
         if old.get("owner") != "agent-bridge.windows-notify" or old.get("helper_path") != str(helper) or old.get("sha256", "").lower() != hashlib.sha256(helper.read_bytes()).hexdigest():
             raise RuntimeError("Windows notifier ownership hash mismatch")
-    if source.is_file():
+    if packaged.is_file():
         helper.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, helper)
+        # ``as_file`` supports both unpacked installs and zipped resources.
+        with resources.as_file(packaged) as source:
+            shutil.copy2(source, helper)
     elif not helper.is_file():
         raise RuntimeError("Windows notifier release helper is missing")
     _write_owned_json(receipt, {"schema": 1, "owner": "agent-bridge.windows-notify", "helper_path": str(helper), "sha256": hashlib.sha256(helper.read_bytes()).hexdigest()})

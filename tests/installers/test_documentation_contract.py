@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 import sys
+import hashlib
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
@@ -94,6 +95,29 @@ class DocumentationContractTests(unittest.TestCase):
             self.assertIn("degraded", text)
             for host in HOSTS:
                 self.assertIn(host, text)
+
+    def test_packaging_and_ci_do_not_depend_on_checkout_pythonpath(self) -> None:
+        windows = (ROOT / "install.ps1").read_text(encoding="utf-8")
+        shell = (ROOT / "install.sh").read_text(encoding="utf-8")
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        self.assertIn("DevSourceFallback", windows)
+        self.assertIn("DEGRADED development fallback", windows)
+        self.assertIn("--dev-source-fallback", shell)
+        self.assertEqual(shell.count('export PYTHONPATH="${source_root}/src'), 1)
+        self.assertLess(shell.index("--dev-source-fallback"), shell.index('export PYTHONPATH="${source_root}/src'))
+        for workflow in (ci, release):
+            self.assertIn("actions/setup-python@v5", workflow)
+            self.assertIn("--force-reinstall --no-deps", workflow)
+        self.assertIn("verify-release.ps1", ci)
+        self.assertIn("git cat-file -t", release)
+        self.assertIn("native/windows-x86_64/*.exe", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    def test_packaged_windows_helper_matches_the_verified_release_input(self) -> None:
+        packaged = ROOT / "src" / "agent_bridge" / "native" / "windows-x86_64" / "agent-bridge-windows-notify.exe"
+        verified = ROOT / "native" / "windows-notify" / "dist" / "windows-x86_64" / "agent-bridge-windows-notify.exe"
+        self.assertTrue(packaged.is_file())
+        self.assertEqual(hashlib.sha256(packaged.read_bytes()).hexdigest(), hashlib.sha256(verified.read_bytes()).hexdigest())
 
 
 if __name__ == "__main__":

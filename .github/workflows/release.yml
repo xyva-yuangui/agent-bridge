@@ -25,7 +25,7 @@ jobs:
     runs-on: macos-latest
     env:
       REQUESTED_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
-      SIGNING_REQUESTED: ${{ inputs.sign || 'false' }}
+      SIGNING_REQUESTED: "true"
       AGENT_BRIDGE_CODESIGN_IDENTITY: ${{ secrets.AGENT_BRIDGE_CODESIGN_IDENTITY }}
       AGENT_BRIDGE_NOTARY_PROFILE: ${{ secrets.AGENT_BRIDGE_NOTARY_PROFILE }}
     steps:
@@ -40,6 +40,7 @@ jobs:
         shell: bash
         run: |
           test -n "$REQUESTED_TAG"
+          test "$(git cat-file -t "$REQUESTED_TAG")" = tag
           git describe --exact-match --tags HEAD | grep -Fx "$REQUESTED_TAG"
           test -z "$(git status --porcelain)"
           test "${REQUESTED_TAG#v}" = "$(python -c 'from pathlib import Path; import re; print(re.search(r"version = \"([^\"]+)\"", Path("pyproject.toml").read_text()).group(1))')"
@@ -74,7 +75,7 @@ jobs:
         shell: bash
         run: |
           python -m venv /tmp/agent-bridge-release-venv
-          /tmp/agent-bridge-release-venv/bin/pip install --force-reinstall dist/*.whl
+          /tmp/agent-bridge-release-venv/bin/pip install --force-reinstall --no-deps dist/*.whl
           cd /tmp
           /tmp/agent-bridge-release-venv/bin/bridge --version
           /tmp/agent-bridge-release-venv/bin/bridge --help
@@ -82,16 +83,14 @@ jobs:
           /tmp/agent-bridge-release-venv/bin/bridge setup --dry-run --auto
           unzip -l "$GITHUB_WORKSPACE"/dist/*.whl | grep -E 'integrations/(codex|claude|reasonix|zcode)/manifest.json'
           (cd "$GITHUB_WORKSPACE"/release && shasum -a 256 -c SHA256SUMS.txt)
-      - name: Sign and notarize only when explicitly requested
+      - name: Sign and notarize release helper before final artifacts
         shell: bash
         run: |
-          if [ "$SIGNING_REQUESTED" = true ]; then
-            test -n "$AGENT_BRIDGE_CODESIGN_IDENTITY"
-            test -n "$AGENT_BRIDGE_NOTARY_PROFILE"
-            native/macos-notify/scripts/sign-and-notarize.sh
-            codesign --verify --deep --strict native/macos-notify/dist/AgentBridgeNotifier.app
-            spctl --assess --type execute --verbose=4 native/macos-notify/dist/AgentBridgeNotifier.app
-          fi
+          test -n "$AGENT_BRIDGE_CODESIGN_IDENTITY"
+          test -n "$AGENT_BRIDGE_NOTARY_PROFILE"
+          native/macos-notify/scripts/sign-and-notarize.sh
+          codesign --verify --deep --strict native/macos-notify/dist/AgentBridgeNotifier.app
+          spctl --assess --type execute --verbose=4 native/macos-notify/dist/AgentBridgeNotifier.app
       - uses: actions/attest-build-provenance@v1
         with:
           subject-path: release/*
@@ -99,3 +98,8 @@ jobs:
         with:
           name: agent-bridge-${{ env.REQUESTED_TAG }}
           path: release/*
+      - name: Publish verified GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.REQUESTED_TAG }}
+          files: release/*

@@ -32,4 +32,4 @@ bridge-mcp = "agent_bridge.mcp:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-agent_bridge = ["migrations/*.sql", "integrations/*/*.json", "integrations/*/*.py"]
+agent_bridge = ["migrations/*.sql", "integrations/*/*.json", "integrations/*/*.py", "native/windows-x86_64/*.exe", "native/macos-universal2/**/*"]

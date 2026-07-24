@@ -54,14 +54,14 @@ class BootstrapInstallerTests(unittest.TestCase):
             environment.pop("AGENT_BRIDGE_HOME", None)
             completed = subprocess.run(
                 [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "install.ps1"),
-                 "-Agent", "codex", "-Python", sys.executable, "-InstallRoot", str(home)],
+                 "-Agent", "codex", "-DevSourceFallback", "-Python", sys.executable, "-InstallRoot", str(home)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=90,
             )
             self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
             self.assertIn("agent-bridge:codex", (home / ".codex" / "config.toml").read_text(encoding="utf-8"))
             removed = subprocess.run(
                 [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "install.ps1"),
-                 "-Agent", "codex", "-Uninstall", "-Python", sys.executable, "-InstallRoot", str(home)],
+                 "-Agent", "codex", "-Uninstall", "-DevSourceFallback", "-Python", sys.executable, "-InstallRoot", str(home)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=90,
             )
             self.assertEqual(0, removed.returncode, removed.stdout + removed.stderr)
@@ -86,7 +86,7 @@ class BootstrapInstallerTests(unittest.TestCase):
             environment.pop("PYTHONPATH", None)
             command = [
                 powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                str(ROOT / "install.ps1"), "-Auto", "-Python", sys.executable,
+                str(ROOT / "install.ps1"), "-Auto", "-DevSourceFallback", "-Python", sys.executable,
                 "-InstallRoot", str(home),
             ]
             installed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=90)
@@ -123,7 +123,7 @@ class BootstrapInstallerTests(unittest.TestCase):
             )
 
             removed = subprocess.run(
-                [*command[:7], "-Uninstall", "-Auto", "-Python", sys.executable, "-InstallRoot", str(home)],
+                [*command[:7], "-Uninstall", "-Auto", "-DevSourceFallback", "-Python", sys.executable, "-InstallRoot", str(home)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=90,
             )
             self.assertEqual(0, removed.returncode, removed.stdout + removed.stderr)

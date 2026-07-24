@@ -41,24 +41,47 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install built package before Python tests
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+          python -m pip install --force-reinstall --no-deps dist/*.whl
       - name: Locked Rust release build and size gate
         shell: pwsh
         run: |
           cargo build --manifest-path native/windows-notify/Cargo.toml --locked --release
+          ./native/windows-notify/scripts/verify-release.ps1
           $helper = Get-Item native/windows-notify/target/release/agent-bridge-windows-notify.exe
           if ($helper.Length -gt 5MB) { throw "Windows notifier exceeds 5 MiB" }
-      - name: Windows protocol and installer tests
-        run: python -m unittest tests.platform.test_windows_notify_protocol tests.test_installers -v
+      - name: Windows protocol and installer tests from installed package
+        shell: pwsh
+        run: |
+          Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+          python -m unittest tests.platform.test_windows_notify_protocol tests.test_installers -v
 
   macos-notifier:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install built package before Python tests
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+          python -m pip install --force-reinstall --no-deps dist/*.whl
       - name: Universal2 Swift helper build and size gate
         run: native/macos-notify/scripts/build-universal2.sh
       - name: Verify universal architectures
         run: |
           file native/macos-notify/dist/AgentBridgeNotifier.app/Contents/MacOS/AgentBridgeNotifier
           test "$(stat -f%z native/macos-notify/dist/AgentBridgeNotifier.app/Contents/MacOS/AgentBridgeNotifier)" -le 5242880
-      - name: macOS source and protocol tests
-        run: python3 -m unittest tests.platform.test_macos_notify_protocol tests.platform.test_macos_notify_source -v
+      - name: macOS source and protocol tests from installed package
+        run: |
+          unset PYTHONPATH
+          python -m unittest tests.platform.test_macos_notify_protocol tests.platform.test_macos_notify_source -v
