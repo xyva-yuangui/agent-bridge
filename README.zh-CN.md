@@ -77,6 +77,9 @@ bridge done <task-id> --result "已实现并测试"
 - `viewed`：目标已打开送达界面。
 - `launch_started`：已启动唤醒进程，但不表示对方已经读到。
 - `agent_acknowledged`：目标调用了 `status` 或 `inbox`。
+
+兼容术语：`wake_launched` 表示 `launch_started`，`acknowledged` 表示
+`agent_acknowledged`，`unavailable` 表示降级能力而非投递成功。
 - `claimed`：受理人已认领任务。
 - `retry_wait`：失败尝试已安排重试。
 - `failed`：送达尝试本身失败。

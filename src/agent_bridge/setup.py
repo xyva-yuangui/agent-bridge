@@ -204,6 +204,18 @@ def _remove_runtime(home: Path) -> None:
             if path.is_dir(): shutil.rmtree(path)
             elif path.exists(): path.unlink()
         receipt.unlink()
+    agents = _data_root(home) / "agents"
+    if agents.is_dir() and not agents.is_symlink():
+        for profile_receipt in agents.glob("*/agent-bridge-profile.json"):
+            try:
+                profile_owned = json.loads(profile_receipt.read_text(encoding="utf-8"))
+                profile = Path(profile_owned["profile"])
+                if profile_owned.get("owner") != OWNER or profile.parent != profile_receipt.parent or not profile.is_file() or profile_owned.get("sha256") != hashlib.sha256(profile.read_bytes()).hexdigest():
+                    continue
+                profile.unlink(); profile_receipt.unlink()
+                if not any(profile.parent.iterdir()): profile.parent.rmdir()
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
 
 
 def build_setup_plan(*, home: Optional[Path] = None, auto: bool = False, agent: Optional[str] = None) -> SetupPlan:

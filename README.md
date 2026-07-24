@@ -69,6 +69,10 @@ bridge done <task-id> --result "Implemented and tested"
 
 Every notification attempt is observable in `task.delivery.status`:
 
+Compatibility wording: `wake_launched` means `launch_started`,
+`acknowledged` means `agent_acknowledged`, and `unavailable` is a degraded
+capability rather than a delivery claim.
+
 - `queued`: stored and waiting for a delivery attempt.
 - `dispatching`: a dispatcher currently owns the attempt.
 - `os_posted` / `plugin_delivered`: a delivery channel accepted the notification;
