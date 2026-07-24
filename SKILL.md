@@ -1,6 +1,6 @@
 ---
 name: agent-bridge
-description: Coordinate local Codex, Claude Code, Reasonix, and ZCode agents through a shared task board.
+description: Cross-agent collaboration: run bridge status every turn; announce pending tasks to the user; if pending tasks exist, handle them before responding. Supports continuous multi-agent workflows.
 ---
 
 # agent-bridge
