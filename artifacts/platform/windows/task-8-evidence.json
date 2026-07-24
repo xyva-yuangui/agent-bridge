@@ -3,15 +3,29 @@
   "date": "2026-07-24",
   "native_helper_smoke": {"attempted": true, "register_status_post_unregister": "passed", "post_notification_id": "toast-a65969ac79f597a6", "status": "passed"},
   "doctor": {
-    "command": "PYTHONPATH=src py -3 -m agent_bridge.cli --json doctor --strict",
-    "native_notifications": false,
-    "detail": "native Windows toast helper is not installed",
-    "strict_exit": "non-zero (honest degraded capability; source tree also has pre-existing schema-version constant/migration mismatch)"
+    "command": "py -3 -m unittest tests.test_installers.WindowsInstallerRuntimeTests -v",
+    "native_notifications": true,
+    "detail": "clean isolated install ran installed scripts/bridge.py and copied runtime without PYTHONPATH; installer doctor --strict returned OK",
+    "strict_exit": "zero"
   },
   "release_size": {
     "measured": true,
-    "bytes": 537088,
-    "limit_bytes": 5242880
+    "bytes": 536576,
+    "sha256": "C0480D0F10DDF549E8F70B11094DBC29690E63202DE24F33B326E1C20661B22A",
+    "limit_bytes": 5242880,
+    "distribution_gate": "fresh locked GNU release matched tracked dist artifact and build metadata"
+  },
+  "installer_lifecycle": {
+    "clean_checkout_artifact": "native/windows-notify/dist/windows-x86_64/agent-bridge-windows-notify.exe",
+    "runtime_tests": "2 passed",
+    "verified": [
+      "strict receipt path/schema/owner/SHA256",
+      "absolute installed activation argv with explicit data root",
+      "reinstall",
+      "tampered helper and receipt fail closed",
+      "unrelated environment value preserved",
+      "uninstall removes protocol, shortcut, owned environment, helper, receipt, and copied Python runtime"
+    ]
   },
   "manual_notification_center_and_action_evidence": {
     "recorded": true,

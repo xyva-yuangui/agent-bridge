@@ -15,7 +15,7 @@ from . import dispatcher
 from .launchers import LaunchDeliveryChannel, launch_stored_agent
 from .migrate_v1 import export_json, import_v1
 from .notifications import WindowsNotificationChannel, windows_notification_capability
-from .paths import get_data_root
+from .paths import get_data_root, require_local_data_root
 from .presentation import configure_streams, error_view, render, task_page, task_view, tasks_view
 from .service import BridgeService
 from .store import Store
@@ -38,8 +38,8 @@ def parse_identity(argv: Optional[Sequence[str]] = None) -> str:
     return str(namespace.identity).strip() or "unknown"
 
 
-def open_service() -> BridgeService:
-    root = get_data_root(os.environ)
+def open_service(data_root: Optional[str] = None) -> BridgeService:
+    root = get_data_root(os.environ) if data_root is None else require_local_data_root(Path(data_root))
     return BridgeService(Store.open(root / "agent-bridge.sqlite3"))
 
 
@@ -328,6 +328,10 @@ def _activation_uri(value: str) -> tuple[str, str]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bridge")
     parser.add_argument("--version", action="version", version=BRIDGE_VERSION)
+    parser.add_argument(
+        "--data-root",
+        help="absolute Agent Bridge database directory (overrides AGENT_BRIDGE_HOME)",
+    )
     parser.add_argument("--as", dest="identity", default=os.environ.get("AGENT_BRIDGE_NAME", "unknown"))
     parser.add_argument("--json", action="store_true", dest="as_json")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -370,7 +374,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     configure_streams()
     parser = build_parser()
     arguments = parser.parse_args(argv)
-    service = open_service()
+    service = open_service(arguments.data_root)
     try:
         result = execute_command(service, str(arguments.identity).strip() or "unknown", arguments.command, vars(arguments))
         if arguments.command == "status" and arguments.oneliner and not arguments.as_json:

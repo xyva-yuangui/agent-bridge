@@ -38,6 +38,35 @@ def run_module(module: str, *arguments: str, home: Optional[Path] = None):
 
 
 class CliV2Tests(unittest.TestCase):
+    def test_explicit_data_root_does_not_depend_on_ambient_home(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            explicit = base / "explicit"
+            ambient = base / "ambient"
+            environment = os.environ.copy()
+            environment["AGENT_BRIDGE_HOME"] = str(ambient)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_bridge.cli",
+                    "--data-root",
+                    str(explicit),
+                    "--json",
+                    "whoami",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="strict",
+                env=environment,
+                timeout=30,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((explicit / "agent-bridge.sqlite3").is_file())
+            self.assertFalse((ambient / "agent-bridge.sqlite3").exists())
+
     def test_help_exposes_required_commands(self):
         result = run_module("agent_bridge.cli", "--help")
 

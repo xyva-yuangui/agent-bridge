@@ -107,6 +107,8 @@ function Install-Shared {
     New-Item -ItemType Directory -Force -Path (Join-Path $stage "scripts") | Out-Null
     # The complete directory includes bridge.py, bridge_mcp.py, and notify_windows.ps1.
     Copy-Item -Path (Join-Path $script:SourceRoot "scripts\*") -Destination (Join-Path $stage "scripts") -Recurse -Force
+    New-Item -ItemType Directory -Force -Path (Join-Path $stage "runtime") | Out-Null
+    Copy-Item -LiteralPath (Join-Path $script:SourceRoot "src\agent_bridge") -Destination (Join-Path $stage "runtime\agent_bridge") -Recurse -Force
     foreach ($name in @("SKILL.md", "README.md", "README.zh-CN.md")) {
         $source = Join-Path $script:SourceRoot $name
         if (Test-Path -LiteralPath $source) {
@@ -156,33 +158,180 @@ function Install-Shared {
     }
 }
 
+function Read-WindowsNotifierReceipt {
+    param(
+        [string]$ReceiptPath,
+        [string]$ExpectedHelper
+    )
+    try {
+        $receipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $ReceiptPath | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw "Invalid Windows notifier ownership receipt."
+    }
+    $actualNames = @($receipt.PSObject.Properties.Name | Sort-Object)
+    $expectedNames = @("helper_path", "owner", "schema", "sha256") | Sort-Object
+    if (($actualNames -join "`n") -ne ($expectedNames -join "`n")) {
+        throw "Invalid Windows notifier ownership receipt schema."
+    }
+    if ([int]$receipt.schema -ne 1 -or [string]$receipt.owner -ne "agent-bridge.windows-notify") {
+        throw "Invalid Windows notifier ownership receipt owner."
+    }
+    $expected = [IO.Path]::GetFullPath($ExpectedHelper)
+    try {
+        $recorded = [IO.Path]::GetFullPath([string]$receipt.helper_path)
+    } catch {
+        throw "Invalid Windows notifier ownership receipt path."
+    }
+    if ($recorded -ine $expected) {
+        throw "Invalid Windows notifier ownership receipt path."
+    }
+    if (
+        [string]$receipt.sha256 -notmatch '^[0-9A-Fa-f]{64}$' -or
+        -not (Test-Path -LiteralPath $expected -PathType Leaf) -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $expected).Hash -ine [string]$receipt.sha256
+    ) {
+        throw "Windows notifier ownership hash mismatch."
+    }
+    return $receipt
+}
+
+function Invoke-WindowsNotifierRegistration {
+    param(
+        [string]$Helper,
+        [string]$Request,
+        [string]$Operation
+    )
+    $raw = $Request | & $Helper
+    $exitCode = $LASTEXITCODE
+    try {
+        $result = $raw | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw "Windows notifier $Operation returned malformed JSON."
+    }
+    if (
+        $exitCode -ne 0 -or
+        -not $result.ok -or
+        $result.notification_id -ne "registration" -or
+        $result.status -ne "os_posted"
+    ) {
+        throw "Windows notifier $Operation returned an invalid result."
+    }
+    return $result
+}
+
 function Install-WindowsNotifier {
-    param([string]$PythonPath)
-    $source = Join-Path $script:SourceRoot "native\windows-notify\target\release\agent-bridge-windows-notify.exe"
-    if (-not (Test-Path -LiteralPath $source)) { throw "Windows notifier release helper is missing; build native/windows-notify before installation." }
-    New-Item -ItemType Directory -Force -Path $script:NotifierHome | Out-Null
-    $destination = Join-Path $script:NotifierHome "agent-bridge-windows-notify.exe"
-    $receipt = Join-Path $script:NotifierHome "receipt.json"
+    param(
+        [string]$PythonPath,
+        [switch]$Preflight
+    )
+    $source = Join-Path $script:SourceRoot "native\windows-notify\dist\windows-x86_64\agent-bridge-windows-notify.exe"
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        $source = Join-Path $script:SourceRoot "native\windows-notify\target\x86_64-pc-windows-gnu\release\agent-bridge-windows-notify.exe"
+    }
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "Windows notifier release helper is missing; use a source distribution containing native/windows-notify/dist."
+    }
+    $destination = [IO.Path]::GetFullPath((Join-Path $script:NotifierHome "agent-bridge-windows-notify.exe"))
+    $receiptPath = Join-Path $script:NotifierHome "receipt.json"
     $priorProcess = $env:AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER
     $priorUser = [Environment]::GetEnvironmentVariable("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", "User")
-    if ((Test-Path -LiteralPath $destination) -and -not (Test-Path -LiteralPath $receipt)) { throw "Refusing to overwrite an unowned Windows notifier helper." }
-    if (($priorProcess -and $priorProcess -ne $destination) -or ($priorUser -and $priorUser -ne $destination)) { throw "Refusing to overwrite an unrelated Windows notifier environment value." }
-    Copy-Item -LiteralPath $source -Destination $destination -Force
-    $json = (@($PythonPath, "-m", "agent_bridge.cli") | ConvertTo-Json -Compress)
-    $env:AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER = $destination
-    [Environment]::SetEnvironmentVariable("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", $destination, "User")
-    $request = '{"operation":"register","activation_argv":' + $json + '}'
+    $hasHelper = Test-Path -LiteralPath $destination -PathType Leaf
+    $hasReceipt = Test-Path -LiteralPath $receiptPath -PathType Leaf
+    if ($hasHelper -ne $hasReceipt) {
+        throw "Refusing to overwrite an unowned or incomplete Windows notifier installation."
+    }
+    $repair = $hasHelper -and $hasReceipt
+    $originalReceipt = $null
+    if ($repair) {
+        Read-WindowsNotifierReceipt -ReceiptPath $receiptPath -ExpectedHelper $destination | Out-Null
+        $originalReceipt = [IO.File]::ReadAllBytes($receiptPath)
+    }
+    if (
+        ($priorProcess -and [IO.Path]::GetFullPath($priorProcess) -ine $destination) -or
+        ($priorUser -and [IO.Path]::GetFullPath($priorUser) -ine $destination)
+    ) {
+        throw "Refusing to overwrite an unrelated Windows notifier environment value."
+    }
+    if ($Preflight) { return }
+
+    New-Item -ItemType Directory -Force -Path $script:NotifierHome | Out-Null
+    $staged = Join-Path $script:NotifierHome ("notifier-stage-" + $PID + ".exe")
+    $backup = Join-Path $script:NotifierHome ("notifier-backup-" + $PID + ".exe")
+    $activationArgv = @(
+        [IO.Path]::GetFullPath($PythonPath),
+        [IO.Path]::GetFullPath((Join-Path $script:SkillHome "scripts\bridge.py")),
+        "--data-root",
+        [IO.Path]::GetFullPath($script:BridgeHome)
+    )
+    $request = '{"operation":"register","activation_argv":' + ($activationArgv | ConvertTo-Json -Compress) + '}'
     try {
-        $result = $request | & $destination | ConvertFrom-Json
-        if ($LASTEXITCODE -ne 0 -or -not $result.ok -or $result.status -ne "os_posted") { throw "Windows notifier registration returned an invalid result." }
-        @{ helper_path = $destination; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash } | ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath $receipt
+        Copy-Item -LiteralPath $source -Destination $staged -Force
+        if ($repair) {
+            Move-Item -LiteralPath $destination -Destination $backup
+        }
+        Move-Item -LiteralPath $staged -Destination $destination
+        $env:AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER = $destination
+        [Environment]::SetEnvironmentVariable("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", $destination, "User")
+        Invoke-WindowsNotifierRegistration -Helper $destination -Request $request -Operation "registration" | Out-Null
+        $newReceipt = [ordered]@{
+            schema = 1
+            owner = "agent-bridge.windows-notify"
+            helper_path = $destination
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash
+        }
+        $newReceipt | ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath $receiptPath
+        if (Test-Path -LiteralPath $backup) {
+            Remove-Item -LiteralPath $backup -Force
+        }
     } catch {
-        try { '{"operation":"unregister"}' | & $destination | Out-Null } catch {}
+        $installError = $_
+        if (Test-Path -LiteralPath $destination -PathType Leaf) {
+            try {
+                Invoke-WindowsNotifierRegistration -Helper $destination -Request '{"operation":"unregister"}' -Operation "unregister" | Out-Null
+            } catch {}
+            Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        }
+        if ($repair -and (Test-Path -LiteralPath $backup -PathType Leaf)) {
+            Move-Item -LiteralPath $backup -Destination $destination
+            [IO.File]::WriteAllBytes($receiptPath, $originalReceipt)
+            try {
+                Invoke-WindowsNotifierRegistration -Helper $destination -Request $request -Operation "registration rollback" | Out-Null
+            } catch {}
+        } else {
+            Remove-Item -LiteralPath $receiptPath -Force -ErrorAction SilentlyContinue
+        }
         $env:AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER = $priorProcess
         [Environment]::SetEnvironmentVariable("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", $priorUser, "User")
-        Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $receipt -Force -ErrorAction SilentlyContinue
-        throw
+        Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+        if ((Test-Path -LiteralPath $script:NotifierHome) -and -not (Get-ChildItem -LiteralPath $script:NotifierHome -Force)) {
+            Remove-Item -LiteralPath $script:NotifierHome -Force
+        }
+        throw $installError
+    }
+}
+
+function Uninstall-WindowsNotifier {
+    $receiptPath = Join-Path $script:NotifierHome "receipt.json"
+    $expected = [IO.Path]::GetFullPath((Join-Path $script:NotifierHome "agent-bridge-windows-notify.exe"))
+    $hasHelper = Test-Path -LiteralPath $expected -PathType Leaf
+    $hasReceipt = Test-Path -LiteralPath $receiptPath -PathType Leaf
+    if (-not $hasHelper -and -not $hasReceipt) { return }
+    if ($hasHelper -ne $hasReceipt) {
+        throw "Refusing to remove an unowned or incomplete Windows notifier installation."
+    }
+    Read-WindowsNotifierReceipt -ReceiptPath $receiptPath -ExpectedHelper $expected | Out-Null
+    Invoke-WindowsNotifierRegistration -Helper $expected -Request '{"operation":"unregister"}' -Operation "unregister" | Out-Null
+    if ($env:AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER -ieq $expected) {
+        Remove-Item Env:AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER
+    }
+    if ([Environment]::GetEnvironmentVariable("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", "User") -ieq $expected) {
+        [Environment]::SetEnvironmentVariable("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", $null, "User")
+    }
+    Remove-Item -LiteralPath $expected -Force
+    Remove-Item -LiteralPath $receiptPath -Force
+    if (-not (Get-ChildItem -LiteralPath $script:NotifierHome -Force)) {
+        Remove-Item -LiteralPath $script:NotifierHome -Force
     }
 }
 
@@ -505,6 +654,7 @@ function Configure-ZCode {
 
 function Uninstall-Agent {
     param([string[]]$Names)
+    Uninstall-WindowsNotifier
     foreach ($name in $Names) {
         switch ($name) {
             "codex" {
@@ -619,6 +769,7 @@ if ($Uninstall) {
 }
 
 $pythonPath = Resolve-Python -Requested $Python
+Install-WindowsNotifier -PythonPath $pythonPath -Preflight
 Install-Shared -PythonPath $pythonPath
 Install-WindowsNotifier -PythonPath $pythonPath
 foreach ($name in $agents) {

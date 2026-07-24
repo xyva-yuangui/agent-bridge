@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "artifact": "agent-bridge-windows-notify.exe",
+  "target": "x86_64-pc-windows-gnu",
+  "rustc": "1.97.1",
+  "bytes": 536576,
+  "sha256": "C0480D0F10DDF549E8F70B11094DBC29690E63202DE24F33B326E1C20661B22A",
+  "cargo_lock_sha256": "8F5B51AE8AEDB53B33B25133D7F7B146E3EE75C797E59DCEF17876800BA63F33"
+}

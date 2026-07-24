@@ -125,5 +125,8 @@ python -m compileall -q scripts tests
 
 Windows runtime coverage includes isolated install/reinstall/uninstall,
 dependency-free system notification, GBK output, MCP calls, state transitions,
-and 40-process concurrent writes. On macOS, run the same commands plus an
+and 40-process concurrent writes. The Windows source installer uses the tracked,
+hash-gated native helper in `native/windows-notify/dist`, copies the Python
+package into its owned runtime, and removes only receipt-verified native files
+during uninstall. On macOS, run the same commands plus an
 isolated `./install.sh --auto --install-root <temp-dir>` smoke test.

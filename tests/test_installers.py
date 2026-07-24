@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -132,7 +134,94 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
                 self.assertTrue(
                     (root / ".agent-bridge" / "agents" / agent / "agent.json").is_file()
                 )
-            self.assertIn("agent-bridge is ready", install.stdout)
+            self.assertIn("OK", install.stdout)
+            runtime = skill / "runtime" / "agent_bridge"
+            self.assertTrue((runtime / "cli.py").is_file())
+            installed_cli = subprocess.run(
+                [
+                    sys.executable,
+                    str(skill / "scripts" / "bridge.py"),
+                    "--data-root",
+                    str(root / ".agent-bridge"),
+                    "--json",
+                    "whoami",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env={
+                    key: value
+                    for key, value in os.environ.items()
+                    if key not in ("PYTHONPATH", "AGENT_BRIDGE_HOME")
+                },
+                timeout=30,
+            )
+            self.assertEqual(
+                installed_cli.returncode,
+                0,
+                installed_cli.stdout + installed_cli.stderr,
+            )
+            notifier = root / ".agent-bridge" / "native"
+            helper = notifier / "agent-bridge-windows-notify.exe"
+            receipt = json.loads((notifier / "receipt.json").read_text(encoding="utf-8-sig"))
+            self.assertEqual(
+                set(receipt),
+                {"schema", "owner", "helper_path", "sha256"},
+            )
+            self.assertEqual(receipt["schema"], 1)
+            self.assertEqual(receipt["owner"], "agent-bridge.windows-notify")
+            self.assertTrue(os.path.samefile(receipt["helper_path"], helper))
+            self.assertEqual(
+                receipt["sha256"].lower(),
+                hashlib.sha256(helper.read_bytes()).hexdigest(),
+            )
+            status = subprocess.run(
+                [str(helper)],
+                input='{"operation":"status"}',
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+            )
+            self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+            self.assertTrue(json.loads(status.stdout)["ok"])
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Classes\agent-bridge",
+            ) as protocol_key:
+                activation_argv = json.loads(
+                    winreg.QueryValueEx(
+                        protocol_key,
+                        "AgentBridgeActivationArgvJson",
+                    )[0]
+                )
+            self.assertTrue(os.path.samefile(activation_argv[0], sys.executable))
+            self.assertTrue(
+                os.path.samefile(
+                    activation_argv[1],
+                    skill / "scripts" / "bridge.py",
+                )
+            )
+            self.assertEqual(activation_argv[2], "--data-root")
+            self.assertTrue(
+                os.path.samefile(
+                    activation_argv[3],
+                    root / ".agent-bridge",
+                )
+            )
+            shortcut = (
+                Path(os.environ["APPDATA"])
+                / "Microsoft"
+                / "Windows"
+                / "Start Menu"
+                / "Programs"
+                / "Agent Bridge.lnk"
+            )
+            self.assertTrue(shortcut.is_file())
 
             reinstall = subprocess.run(
                 [
@@ -207,6 +296,42 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
             )
             self.assertFalse((root / ".local" / "bin" / "bridge.cmd").exists())
             self.assertFalse((root / ".agent-bridge" / "skill").exists())
+            self.assertFalse((root / ".agent-bridge" / "native").exists())
+            self.assertFalse(shortcut.exists())
+            user_helper = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-Command",
+                    "[Environment]::GetEnvironmentVariable("
+                    "'AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER','User')",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+            )
+            self.assertEqual(user_helper.stdout.strip(), "")
+            dist_helper = (
+                ROOT
+                / "native"
+                / "windows-notify"
+                / "dist"
+                / "windows-x86_64"
+                / "agent-bridge-windows-notify.exe"
+            )
+            unregistered = subprocess.run(
+                [str(dist_helper)],
+                input='{"operation":"status"}',
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+            )
+            self.assertFalse(json.loads(unregistered.stdout)["ok"])
             self.assertFalse(
                 (
                     root
@@ -229,6 +354,123 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
                     config.read_text(encoding="utf-8"),
                     str(config),
                 )
+
+    def test_notifier_ownership_checks_fail_closed_without_mutation(self):
+        powershell = shutil.which("powershell.exe")
+        self.assertIsNotNone(powershell)
+        clean_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in ("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", "PYTHONPATH")
+        }
+        with tempfile.TemporaryDirectory() as first_tmp:
+            first = Path(first_tmp)
+            conflict = first / "unrelated-notifier.exe"
+            conflict.write_bytes(b"unrelated")
+            conflict_env = dict(clean_env)
+            conflict_env["AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER"] = str(conflict)
+            refused = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(WINDOWS_INSTALLER),
+                    "-Agent",
+                    "codex",
+                    "-Python",
+                    sys.executable,
+                    "-InstallRoot",
+                    str(first),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=conflict_env,
+                timeout=30,
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertEqual(conflict.read_bytes(), b"unrelated")
+            self.assertFalse((first / ".agent-bridge").exists())
+
+        with tempfile.TemporaryDirectory() as second_tmp:
+            root = Path(second_tmp)
+            command = [
+                powershell,
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(WINDOWS_INSTALLER),
+                "-Agent",
+                "codex",
+                "-InstallRoot",
+                str(root),
+            ]
+            install = subprocess.run(
+                command + ["-Python", sys.executable],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=clean_env,
+                timeout=60,
+            )
+            self.assertEqual(install.returncode, 0, install.stdout + install.stderr)
+            notifier = root / ".agent-bridge" / "native"
+            helper = notifier / "agent-bridge-windows-notify.exe"
+            receipt_path = notifier / "receipt.json"
+            original_helper = helper.read_bytes()
+            original_receipt = receipt_path.read_bytes()
+            try:
+                helper.write_bytes(original_helper + b"tampered")
+                tampered_helper = subprocess.run(
+                    command + ["-Python", sys.executable],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=clean_env,
+                    timeout=30,
+                )
+                self.assertNotEqual(tampered_helper.returncode, 0)
+                self.assertEqual(helper.read_bytes(), original_helper + b"tampered")
+
+                helper.write_bytes(original_helper)
+                receipt = json.loads(original_receipt.decode("utf-8-sig"))
+                receipt["owner"] = "unrelated"
+                receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+                tampered_receipt = subprocess.run(
+                    command + ["-Uninstall"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=clean_env,
+                    timeout=30,
+                )
+                self.assertNotEqual(tampered_receipt.returncode, 0)
+                self.assertTrue(helper.is_file())
+                self.assertTrue((root / ".agent-bridge" / "skill").is_dir())
+            finally:
+                if helper.exists():
+                    helper.write_bytes(original_helper)
+                if receipt_path.parent.exists():
+                    receipt_path.write_bytes(original_receipt)
+                cleanup = subprocess.run(
+                    command + ["-Uninstall"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=clean_env,
+                    timeout=60,
+                )
+                self.assertEqual(cleanup.returncode, 0, cleanup.stdout + cleanup.stderr)
 
 
 @unittest.skipUnless(os.name == "nt", "Windows notification runtime test")
