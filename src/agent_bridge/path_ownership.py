@@ -155,6 +155,19 @@ def launcher_directory(home: Path) -> Path:
     return Path(home).expanduser().absolute() / ".local" / "bin"
 
 
+def _canonical_launcher_entry(home: Path) -> str:
+    """Return the only launcher entry this installation may own."""
+    user_home = Path(home).expanduser().absolute()
+    local = user_home / ".local"
+    launcher = launcher_directory(user_home)
+    if launcher.parent != local or local.parent != user_home:
+        raise ValueError("launcher directory escapes its home")
+    for path in (user_home, local, launcher):
+        if path.exists() and path.is_symlink():
+            raise ValueError("refusing a symlinked launcher directory")
+    return str(launcher)
+
+
 def _normal_entry(value: str, backend: PathBackend) -> str:
     if backend.platform == "windows":
         return ntpath.normcase(ntpath.normpath(value.rstrip("\\/")))
@@ -182,10 +195,14 @@ def _remove_one(value: str, entry: str, backend: PathBackend) -> str:
 
 
 def _receipt_path(home: Path) -> Path:
-    root = Path(home).expanduser().absolute() / ".agent-bridge"
+    user_home = Path(home).expanduser().absolute()
+    root = user_home / ".agent-bridge"
     if root.exists() and (root.is_symlink() or not root.is_dir()):
         raise ValueError("refusing an unsafe Agent Bridge PATH receipt root")
-    return root / "launcher-path-receipt.json"
+    receipt = root / "launcher-path-receipt.json"
+    if receipt.parent != user_home / ".agent-bridge":
+        raise ValueError("PATH receipt escapes its home")
+    return receipt
 
 
 def launcher_path_receipt(home: Path) -> Path:
@@ -256,7 +273,9 @@ def _profile_payload(entry: str, newline: bytes = b"\n") -> bytes:
 def ensure_launcher_path(home: Path, launcher_dir: Optional[Path] = None, *, backend: Optional[PathBackend] = None) -> LauncherPathEffect:
     """Ensure the launcher is discoverable without claiming an existing entry."""
     backend = default_path_backend() if backend is None else backend
-    entry = str((launcher_directory(home) if launcher_dir is None else Path(launcher_dir)).absolute())
+    entry = _canonical_launcher_entry(home)
+    if launcher_dir is not None and str(Path(launcher_dir).absolute()) != entry:
+        raise ValueError("launcher entry must be the canonical launcher directory")
     prior = _read_receipt(home, entry)
     owned_added = bool(prior and prior["added"])
     changed = False
@@ -297,10 +316,10 @@ def ensure_launcher_path(home: Path, launcher_dir: Optional[Path] = None, *, bac
 def remove_launcher_path(home: Path, *, backend: Optional[PathBackend] = None) -> bool:
     """Remove only the exact entry this installation recorded as its own."""
     backend = default_path_backend() if backend is None else backend
-    receipt = _read_receipt(home)
+    entry = _canonical_launcher_entry(home)
+    receipt = _read_receipt(home, entry)
     if receipt is None:
         return False
-    entry = receipt["entry"]
     if not receipt["added"]:
         _delete_receipt(home)
         return False
@@ -329,14 +348,55 @@ def remove_launcher_path(home: Path, *, backend: Optional[PathBackend] = None) -
     return True
 
 
+def _has_exact_managed_profile_block(home: Path, entry: str, backend: PathBackend) -> bool:
+    profile = _safe_profile(home, backend)
+    if not profile.exists():
+        return False
+    source = profile.read_bytes()
+    newline = b"\r\n" if b"\r\n" in source else b"\n"
+    expected = install_managed_block(
+        remove_managed_block(source, PATH_BLOCK_NAME), PATH_BLOCK_NAME, _profile_payload(entry, newline),
+    )
+    return expected == source
+
+
 def path_status(home: Path, *, backend: Optional[PathBackend] = None) -> dict:
     backend = default_path_backend() if backend is None else backend
-    entry = launcher_directory(home)
-    launcher = entry / ("bridge.cmd" if backend.platform == "windows" else "bridge")
-    available = launcher.is_file() and not launcher.is_symlink()
+    entry = _canonical_launcher_entry(home)
+    launcher = Path(entry) / ("bridge.cmd" if backend.platform == "windows" else "bridge")
+    launcher_exists = launcher.is_file() and not launcher.is_symlink()
+    details = {"entry": entry, "launcher_exists": launcher_exists, "owned": False}
     try:
-        receipt = _read_receipt(home, str(entry.absolute()))
+        receipt = _read_receipt(home, entry)
     except ValueError as error:
-        return {"available": available, "entry": str(entry), "owned": False, "degradation": str(error)}
-    degradation = None if available else "launcher is not discoverable"
-    return {"available": available, "entry": str(entry), "owned": bool(receipt and receipt["added"]), "degradation": degradation}
+        return {"available": False, **details, "degradation": str(error)}
+    details["owned"] = bool(receipt and receipt["added"])
+    if backend.platform == "windows":
+        try:
+            persistent = _contains(backend.read_user_path().value, entry, backend)
+            current = _contains(backend.read_current_path(), entry, backend)
+        except (OSError, ValueError, RuntimeError) as error:
+            return {"available": False, **details, "current_path": False, "persistent_path": False, "degradation": str(error)}
+        details.update({"current_path": current, "persistent_path": persistent})
+        if not launcher_exists:
+            degradation = "launcher is not discoverable: launcher file is missing"
+        elif not persistent:
+            degradation = "launcher is not discoverable: persistent PATH is missing launcher entry"
+        elif not current:
+            degradation = "launcher is not discoverable: current PATH is missing launcher entry"
+        else:
+            degradation = None
+    else:
+        try:
+            current = _contains(backend.read_current_path(), entry, backend)
+            managed_profile = _has_exact_managed_profile_block(home, entry, backend)
+        except (OSError, ValueError, RuntimeError) as error:
+            return {"available": False, **details, "current_path": False, "managed_profile": False, "degradation": str(error)}
+        details.update({"current_path": current, "managed_profile": managed_profile})
+        if not launcher_exists:
+            degradation = "launcher is not discoverable: launcher file is missing"
+        elif not current and not managed_profile:
+            degradation = "launcher is not discoverable: current PATH and managed profile block are missing launcher entry"
+        else:
+            degradation = None
+    return {"available": degradation is None, **details, "degradation": degradation}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -94,6 +95,22 @@ class LauncherPathOwnershipTests(unittest.TestCase):
         self.assertEqual(r"C:\\Tools;C:\\Other", backend.read_user_path().value)
         self.assertEqual(backend.read_user_path().value, backend.read_current_path())
 
+    def test_uninstall_refuses_a_forged_receipt_without_removing_the_user_path_sentinel(self) -> None:
+        sentinel = r"C:\\KeepMe"
+        backend = FakePathBackend(platform="windows", user_path=sentinel, current_path=sentinel)
+        receipt = self.home / ".agent-bridge" / "launcher-path-receipt.json"
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({
+            "owner": "agent-bridge", "schema": 1, "entry": sentinel, "added": True,
+        }), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "launcher entry"):
+            remove_launcher_path(self.home, backend=backend)
+
+        self.assertEqual(sentinel, backend.read_user_path().value)
+        self.assertEqual(sentinel, backend.read_current_path())
+        self.assertTrue(receipt.exists())
+
     def test_posix_uses_a_bounded_profile_block_without_clobbering_other_bytes(self) -> None:
         profile = self.home / ".profile"
         original = b"# user setting\r\nexport LANG=C\r\n"
@@ -157,6 +174,39 @@ class LauncherPathOwnershipTests(unittest.TestCase):
 
         self.assertFalse(status["available"])
         self.assertIn("not discoverable", status["degradation"])
+
+    def test_windows_status_requires_launcher_and_both_current_and_persistent_path_entries(self) -> None:
+        launcher = self.launcher / "bridge.cmd"
+        launcher.write_text("@echo off\n", encoding="utf-8")
+        entry = str(self.launcher)
+        backend = FakePathBackend(platform="windows", user_path=entry, current_path=entry)
+
+        healthy = path_status(self.home, backend=backend)
+        backend._user_path = PersistentPath(r"C:\\Tools", "expand")
+        degraded = path_status(self.home, backend=backend)
+
+        self.assertTrue(healthy["available"])
+        self.assertTrue(healthy["persistent_path"])
+        self.assertTrue(healthy["current_path"])
+        self.assertFalse(degraded["available"])
+        self.assertIn("persistent PATH", degraded["degradation"])
+
+    def test_posix_status_accepts_an_exact_managed_profile_block_but_degrades_when_removed(self) -> None:
+        launcher = self.launcher / "bridge"
+        launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+        backend = FakePathBackend(platform="posix", current_path="/usr/bin")
+        ensure_launcher_path(self.home, self.launcher, backend=backend)
+        backend._current_path = "/usr/bin"
+
+        healthy = path_status(self.home, backend=backend)
+        (self.home / ".profile").write_bytes(b"# user removed the managed block\n")
+        degraded = path_status(self.home, backend=backend)
+
+        self.assertTrue(healthy["available"])
+        self.assertTrue(healthy["managed_profile"])
+        self.assertFalse(healthy["current_path"])
+        self.assertFalse(degraded["available"])
+        self.assertIn("managed profile block", degraded["degradation"])
 
 
 if __name__ == "__main__":
