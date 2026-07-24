@@ -301,7 +301,7 @@ jobs:
           if-no-files-found: error
 
   portable-macos-smoke:
-    needs: aggregate
+    needs: [aggregate, validate]
     runs-on: macos-latest
     env:
       SIGNING_REQUIRED: ${{ needs.validate.outputs.signing }}

@@ -152,6 +152,10 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertLess(release.index("unzip -q"), release.index("verify_signed_app \"$extracted_app\""))
         self.assertLess(release.index("verify_signed_app \"$owned_app\""), release.index("uninstall --home"))
         self.assertLess(release.index("uninstall --home"), release.index("publish:"))
+        smoke = release[release.index("  portable-macos-smoke:"):release.index("  publish:")]
+        self.assertIn("needs: [aggregate, validate]", smoke)
+        self.assertIn("SIGNING_REQUIRED: ${{ needs.validate.outputs.signing }}", smoke)
+        self.assertIn('if [[ "$SIGNING_REQUIRED" == true ]]', smoke)
 
     def test_macos_tag_signing_provisions_and_cleans_ephemeral_credentials_before_packaging(self) -> None:
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
