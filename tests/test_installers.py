@@ -265,12 +265,9 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
                 reasonix = tomllib.loads(
                     (root / ".reasonix" / "config.toml").read_text(encoding="utf-8")
                 )
-                allow_write = reasonix["sandbox"]["allow_write"]
-                self.assertEqual(len(allow_write), 1, reasonix)
-                self.assertTrue(
-                    allow_write[0].lower().endswith("\\.agent-bridge"),
-                    reasonix,
-                )
+                managed = next(item for item in reasonix["plugins"] if item["name"] == "agent-bridge")
+                self.assertEqual(managed["command"], sys.executable)
+                self.assertIn("agent_bridge.adapters.integration", managed["args"])
                 tomllib.loads(
                     (root / ".codex" / "config.toml").read_text(encoding="utf-8")
                 )

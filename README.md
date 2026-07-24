@@ -30,10 +30,11 @@ macOS or Linux:
 ./install.sh --auto --uninstall
 ```
 
-Both installers are idempotent, copy the complete canonical scripts directory,
-register agent capabilities and wake commands, configure detected application
-integrations, and finish with `bridge doctor --strict`. Restart agent
-applications after installation so they reload MCP and hook configuration.
+Both installers are thin, separately-quoted bootstraps: they install the
+package and invoke `bridge setup`. The Python lifecycle owns the compatibility
+runtime, launcher, detected host integrations, profiles, and receipt-verified
+native notification helper. `bridge uninstall` preserves task data unless
+`--purge-data` is explicitly requested and names the exact data root first.
 
 The macOS installer and platform-neutral tests are included, but a release
 should still run the acceptance commands below on a real macOS host.
