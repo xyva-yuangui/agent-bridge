@@ -3,8 +3,6 @@ mod registration;
 mod toast;
 
 use std::io::{self, Read};
-use std::path::PathBuf;
-use std::process::Command;
 use protocol::{parse_request, Request, Response};
 
 fn main() {
@@ -22,7 +20,7 @@ fn run() -> Result<Response, String> {
     let mut input = Vec::new();
     io::stdin().take((protocol::MAX_INPUT_BYTES + 1) as u64).read_to_end(&mut input).map_err(|error| error.to_string())?;
     match parse_request(&input)? {
-        Request::Register => registration::register().map(Response::registered),
+        Request::Register { activation_argv } => registration::register(&activation_argv).map(Response::registered),
         Request::Unregister => registration::unregister().map(Response::registered),
         Request::Status => registration::status().map(Response::registered),
         request @ Request::Post { .. } => toast::post(&request).map(|id| Response::posted(id, "WinRT toast accepted by the operating system")),
@@ -38,20 +36,13 @@ fn handle_activation_uri(uri: &str) -> Result<Response, String> {
     let notification_id = query.split('&').find_map(|part| part.strip_prefix("notification_id=")).ok_or_else(|| "activation URI has no notification ID".to_owned())?;
     if notification_id.is_empty() || notification_id.len() > 256 || !notification_id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')) { return Err("invalid activation notification ID".to_owned()); }
     // The target executable is a fixed sibling installed with the helper. User-controlled URI data is supplied only as argv.
-    Command::new(bridge_command()?).args(["open-action", "--notification-id", notification_id, "--action", action]).status().map_err(|error| error.to_string())?;
+    registration::launch_activation(uri)?;
     Ok(Response::registered("forwarded constrained Agent Bridge activation"))
 }
 
 fn handle_action(action: protocol::Action, notification_id: String, task_id: String) -> Result<Response, String> {
     let name = match action { protocol::Action::View => "view", protocol::Action::Claim => "claim", protocol::Action::Snooze => "snooze" };
     let _ = task_id; // Native action resolution uses the durable notification mapping, never a caller-supplied task ID.
-    Command::new(bridge_command()?).args(["open-action", "--notification-id", &notification_id, "--action", name]).status().map_err(|error| error.to_string())?;
+    registration::launch_activation(&format!("agent-bridge://action/{}?notification_id={}", name, notification_id))?;
     Ok(Response::posted(notification_id, format!("forwarded opaque {} action", name)))
-}
-
-fn bridge_command() -> Result<PathBuf, String> {
-    let helper = std::env::current_exe().map_err(|error| error.to_string())?;
-    let bridge = helper.parent().ok_or_else(|| "helper has no installation directory".to_owned())?.join("bridge.exe");
-    if !bridge.is_file() { return Err("installed bridge.exe action handler is unavailable".to_owned()); }
-    Ok(bridge)
 }

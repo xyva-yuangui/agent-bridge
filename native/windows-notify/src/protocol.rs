@@ -16,7 +16,7 @@ pub enum Request {
         actions: Vec<Action>,
         expires_in_seconds: u32,
     },
-    Register,
+    Register { activation_argv: Vec<String> },
     Unregister,
     Status,
     Action {
@@ -67,7 +67,8 @@ fn enforce_exact_fields(value: &serde_json::Value) -> Result<(), String> {
     let operation = object.get("operation").and_then(serde_json::Value::as_str).ok_or_else(|| "request operation is missing".to_owned())?;
     let allowed: &[&str] = match operation {
         "post" => &["operation", "title", "body", "task_id", "actions", "expires_in_seconds"],
-        "register" | "unregister" | "status" => &["operation"],
+        "register" => &["operation", "activation_argv"],
+        "unregister" | "status" => &["operation"],
         "action" => &["operation", "action", "notification_id", "task_id"],
         _ => return Err("unknown request operation".to_owned()),
     };
@@ -90,7 +91,10 @@ fn validate(request: &Request) -> Result<(), String> {
             opaque(notification_id, "notification_id")?;
             opaque(task_id, "task_id")?;
         }
-        Request::Register | Request::Unregister | Request::Status => {}
+        Request::Register { activation_argv } => {
+            if activation_argv.is_empty() || activation_argv.len() > 16 || !activation_argv.iter().all(|item| !item.is_empty() && item.len() <= 1024) { return Err("invalid activation_argv".to_owned()); }
+        }
+        Request::Unregister | Request::Status => {}
     }
     Ok(())
 }

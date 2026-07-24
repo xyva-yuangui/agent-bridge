@@ -24,7 +24,8 @@ pub const AUMID: &str = "OpenAI.AgentBridge.WindowsNotify";
 pub const PROTOCOL: &str = "agent-bridge";
 
 #[cfg(windows)]
-pub fn register() -> Result<String, String> {
+pub fn register(activation_argv: &[String]) -> Result<String, String> {
+    if activation_argv.first().map(|value| std::path::Path::new(value).is_absolute()) != Some(true) { return Err("activation argv must begin with an absolute executable path".to_owned()); }
     let executable = env::current_exe().map_err(|error| error.to_string())?;
     let executable = executable.to_string_lossy();
     if executable.contains('"') { return Err("helper executable path contains an unsupported quote".to_owned()); }
@@ -37,12 +38,26 @@ pub fn register() -> Result<String, String> {
     let (command, _) = protocol.create_subkey("shell\\open\\command").map_err(|error| error.to_string())?;
     // Only the helper's own resolved path and the fixed Windows protocol placeholder are registered.
     command.set_value("", &format!("\"{}\" action-uri \"%1\"", executable)).map_err(|error| error.to_string())?;
+    protocol.set_value("AgentBridgeActivationArgvJson", &serde_json::to_string(activation_argv).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
     create_start_menu_shortcut(&executable)?;
     Ok(format!("registered per-user {} protocol for {}", PROTOCOL, AUMID))
 }
 
 #[cfg(windows)]
+pub fn launch_activation(uri: &str) -> Result<(), String> {
+    let classes = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Software\\Classes").map_err(|error| error.to_string())?;
+    let protocol = classes.open_subkey(PROTOCOL).map_err(|_| "Agent Bridge activation is not registered".to_owned())?;
+    let raw: String = protocol.get_value("AgentBridgeActivationArgvJson").map_err(|_| "Agent Bridge activation argv is missing".to_owned())?;
+    let argv: Vec<String> = serde_json::from_str(&raw).map_err(|_| "Agent Bridge activation argv is invalid".to_owned())?;
+    if argv.first().map(|value| std::path::Path::new(value).is_absolute()) != Some(true) { return Err("Agent Bridge activation argv is unsafe".to_owned()); }
+    std::process::Command::new(&argv[0]).args(&argv[1..]).arg("open-action").arg("--activation-uri").arg(uri).status().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(windows)]
 pub fn unregister() -> Result<String, String> {
+    use windows::UI::Notifications::ToastNotificationManager;
+    ToastNotificationManager::History().and_then(|history| history.ClearWithId(&HSTRING::from(AUMID))).map_err(|error| error.to_string())?;
     let classes = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags("Software\\Classes", KEY_WRITE).map_err(|error| error.to_string())?;
     match classes.delete_subkey_all(PROTOCOL) {
         Ok(()) => { remove_start_menu_shortcut()?; Ok(format!("unregistered per-user {} protocol", PROTOCOL)) },
@@ -106,5 +121,7 @@ fn remove_start_menu_shortcut() -> Result<(), String> {
 pub fn register() -> Result<String, String> { Err("Windows registration is unavailable on this platform".to_owned()) }
 #[cfg(not(windows))]
 pub fn unregister() -> Result<String, String> { Err("Windows registration is unavailable on this platform".to_owned()) }
+#[cfg(not(windows))]
+pub fn launch_activation(_: &str) -> Result<(), String> { Err("Windows registration is unavailable on this platform".to_owned()) }
 #[cfg(not(windows))]
 pub fn status() -> Result<String, String> { Err("Windows registration is unavailable on this platform".to_owned()) }

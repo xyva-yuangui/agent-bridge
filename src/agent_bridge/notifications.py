@@ -67,8 +67,8 @@ class WindowsNotifier:
     def post(self, notice: NotificationNotice) -> NotificationResult:
         return self._request("post", notice)
 
-    def register(self) -> NotificationResult:
-        return self._request("register")
+    def register(self, activation_argv: Sequence[str]) -> NotificationResult:
+        return self._request("register", activation_argv=list(activation_argv))
 
     def unregister(self) -> NotificationResult:
         return self._request("unregister")
@@ -147,7 +147,12 @@ def _request_payload(operation: str, notice: NotificationNotice | None, extra: M
     if operation not in ("post", "register", "unregister", "status", "action"):
         raise ValueError("invalid native notification operation")
     payload: dict[str, Any] = {"operation": operation}
-    if operation == "post":
+    if operation == "register":
+        argv = extra.get("activation_argv")
+        if not isinstance(argv, list) or not argv or len(argv) > 16 or any(not isinstance(part, str) or not part or len(part) > 1024 for part in argv) or not Path(argv[0]).is_absolute():
+            raise ValueError("invalid activation_argv")
+        payload["activation_argv"] = argv
+    elif operation == "post":
         if notice is None:
             raise ValueError("post requires a notification")
         payload.update({
