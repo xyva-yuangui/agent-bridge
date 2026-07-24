@@ -1,7 +1,7 @@
 {
   "platform": "Windows",
   "date": "2026-07-24",
-  "native_helper_smoke": {"attempted": true, "register_status_unregister": "passed", "post_action": "not attempted; no verifiable interactive Notification Center session"},
+  "native_helper_smoke": {"attempted": true, "register_status_post_unregister": "passed", "post_notification_id": "toast-a65969ac79f597a6", "status": "passed"},
   "doctor": {
     "command": "PYTHONPATH=src py -3 -m agent_bridge.cli --json doctor --strict",
     "native_notifications": false,
@@ -14,7 +14,7 @@
     "limit_bytes": 5242880
   },
   "manual_notification_center_and_action_evidence": {
-    "recorded": false,
-    "reason": "No compiled helper was available to register or post a real WinRT toast."
+    "recorded": true,
+    "reason": "WinRT returned os_posted; Notification Center visual/history and activation were not independently inspected."
   }
 }

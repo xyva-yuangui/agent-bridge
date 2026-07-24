@@ -55,6 +55,13 @@
   post/action was not attempted because this automation session has no
   verifiable interactive Notification Center evidence.
 
+### Final smoke correction
+
+The release helper was subsequently exercised with register, real WinRT post,
+status, and unregister. The post returned `os_posted` with native ID
+`toast-a65969ac79f597a6`. Notification Center visual/history and activation
+were not independently inspected, so no stronger evidence is claimed.
+
 `cargo` and `rustc` were unavailable on `PATH`; both
 `C:\\Users\\Administrator\\.cargo\\bin` and conventional `C:\\Program Files\\Rust`
 locations were absent. Consequently `cargo test`, `cargo build --release`, real
