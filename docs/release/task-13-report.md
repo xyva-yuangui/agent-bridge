@@ -100,3 +100,23 @@ path, asserts all task and uncompleted-outbox rows, checks that no dispatcher
 lease remains, and repeats five times.  This preserves the concurrency/outbox
 coverage without detached dispatcher processes retaining a temporary SQLite
 handle after the test finishes.
+
+## Ephemeral signing and deterministic archive refinements (2026-07-24)
+
+Tag releases (and manual `sign=true` runs) now require a base64 Developer ID
+P12, its password, the signing identity and team, and Apple ID/app-specific
+password/team credentials.  The macOS job masks each secret, creates an
+ephemeral keychain, imports the private key with the codesign partition list,
+verifies the identity, stores a `notarytool` profile in that keychain, then
+signs/notarizes/staples **before** staging the application.  An `always()`
+cleanup deletes the temporary credential/profile, keychain, and P12 before
+wheel packaging.  Explicit `workflow_dispatch sign=false` remains the sole
+unsigned path.
+
+`retag_wheel.py` now writes sorted, fixed-timestamp, normalized-permission ZIP
+entries with fixed compression and ordered RECORD data.  Its test retags the
+same input twice and requires identical SHA-256 output; the bootstrap wheel
+test rebuilds twice when the local backend is available.  The all-four-host
+acceptance test now uses one normal offline-bootstrap install with an isolated
+`PYTHONUSERBASE` and no `PYTHONPATH`, verifies module origin, launches every
+receipt outside the checkout, then repairs and uninstalls.

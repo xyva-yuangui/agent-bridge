@@ -10,6 +10,7 @@ import hashlib
 from importlib import resources
 import tempfile
 import shutil as _which_shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -116,6 +117,19 @@ def _runtime_receipt(home: Path) -> Path:
     return _data_root(home) / "runtime-receipt.json"
 
 
+def _replace_runtime_path(source: Path, destination: Path) -> None:
+    """Atomically install a staged runtime, tolerating a brief Windows AV scan."""
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
 def _install_runtime(home: Path) -> None:
     """Copy the compatibility runtime used by retained bridge.py launchers."""
     data = _data_root(home); root = _source_root()
@@ -147,8 +161,8 @@ def _install_runtime(home: Path) -> None:
             shutil.copytree(source_package, stage / "runtime" / "agent_bridge", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         for name in ("SKILL.md", "README.md", "README.zh-CN.md"):
             if (root / name).is_file(): shutil.copy2(root / name, stage / name)
-        if skill.exists(): os.replace(skill, backup)
-        os.replace(stage, skill)
+        if skill.exists(): _replace_runtime_path(skill, backup)
+        _replace_runtime_path(stage, skill)
         if backup.exists(): shutil.rmtree(backup)
     except BaseException:
         if not skill.exists() and backup.exists(): os.replace(backup, skill)

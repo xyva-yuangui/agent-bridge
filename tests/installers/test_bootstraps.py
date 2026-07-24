@@ -54,14 +54,14 @@ class BootstrapInstallerTests(unittest.TestCase):
             environment.pop("AGENT_BRIDGE_HOME", None)
             completed = subprocess.run(
                 [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "install.ps1"),
-                 "-Agent", "codex", "-DevSourceFallback", "-Python", sys.executable, "-InstallRoot", str(home)],
+                 "-Agent", "codex", "-Python", sys.executable, "-InstallRoot", str(home)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=90,
             )
             self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
             self.assertIn("agent-bridge:codex", (home / ".codex" / "config.toml").read_text(encoding="utf-8"))
             removed = subprocess.run(
                 [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "install.ps1"),
-                 "-Agent", "codex", "-Uninstall", "-DevSourceFallback", "-Python", sys.executable, "-InstallRoot", str(home)],
+                 "-Agent", "codex", "-Uninstall", "-Python", sys.executable, "-InstallRoot", str(home)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=90,
             )
             self.assertEqual(0, removed.returncode, removed.stdout + removed.stderr)
@@ -82,15 +82,26 @@ class BootstrapInstallerTests(unittest.TestCase):
                 originals[adapter.name] = adapter.config_path.read_bytes()
 
             environment = os.environ.copy()
+            user_base = Path(temporary) / "wheel-user-base"
+            environment["PYTHONUSERBASE"] = str(user_base)
+            environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
             environment.pop("AGENT_BRIDGE_HOME", None)
             environment.pop("PYTHONPATH", None)
             command = [
                 powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                str(ROOT / "install.ps1"), "-Auto", "-DevSourceFallback", "-Python", sys.executable,
+                str(ROOT / "install.ps1"), "-Auto", "-Python", sys.executable,
                 "-InstallRoot", str(home),
             ]
             installed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=90)
             self.assertEqual(0, installed.returncode, installed.stdout + installed.stderr)
+            self.assertNotIn("DEGRADED development fallback", installed.stdout + installed.stderr)
+            origin = subprocess.run(
+                [sys.executable, "-c", "import agent_bridge; print(agent_bridge.__file__)"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=30,
+            )
+            self.assertEqual(0, origin.returncode, origin.stdout + origin.stderr)
+            self.assertIn(str(user_base.resolve()).lower(), str(Path(origin.stdout.strip()).resolve()).lower())
+            self.assertNotIn(str((ROOT / "src").resolve()).lower(), str(Path(origin.stdout.strip()).resolve()).lower())
 
             report = status(home=home)
             hosts = {item["host"]: item for item in report["hosts"]}
@@ -105,9 +116,10 @@ class BootstrapInstallerTests(unittest.TestCase):
                     receipt = json.loads(adapter.installation_artifact_path.read_text(encoding="utf-8"))
                     # The exact argv written into the real host configuration
                     # must start without inheriting the checkout's PYTHONPATH.
+                    outside_checkout = home / "outside-checkout"; outside_checkout.mkdir(exist_ok=True)
                     started = subprocess.run(
                         receipt["entrypoint"], input='{"jsonrpc":"2.0","id":1,"method":"initialize"}\n',
-                        capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=30,
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, cwd=outside_checkout, timeout=30,
                     )
                     self.assertEqual(0, started.returncode, started.stdout + started.stderr)
                     self.assertIn('"serverInfo"', started.stdout)
@@ -123,7 +135,7 @@ class BootstrapInstallerTests(unittest.TestCase):
             )
 
             removed = subprocess.run(
-                [*command[:7], "-Uninstall", "-Auto", "-DevSourceFallback", "-Python", sys.executable, "-InstallRoot", str(home)],
+                [*command[:7], "-Uninstall", "-Auto", "-Python", sys.executable, "-InstallRoot", str(home)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=90,
             )
             self.assertEqual(0, removed.returncode, removed.stdout + removed.stderr)

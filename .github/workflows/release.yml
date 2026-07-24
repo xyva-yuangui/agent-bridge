@@ -39,8 +39,13 @@ jobs:
         env:
           REQUESTED_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
           MANUAL_SIGN: ${{ inputs.sign }}
+          AGENT_BRIDGE_SIGNING_P12_B64: ${{ secrets.AGENT_BRIDGE_SIGNING_P12_B64 }}
+          AGENT_BRIDGE_SIGNING_P12_PASSWORD: ${{ secrets.AGENT_BRIDGE_SIGNING_P12_PASSWORD }}
           AGENT_BRIDGE_CODESIGN_IDENTITY: ${{ secrets.AGENT_BRIDGE_CODESIGN_IDENTITY }}
-          AGENT_BRIDGE_NOTARY_PROFILE: ${{ secrets.AGENT_BRIDGE_NOTARY_PROFILE }}
+          AGENT_BRIDGE_CODESIGN_TEAM_ID: ${{ secrets.AGENT_BRIDGE_CODESIGN_TEAM_ID }}
+          AGENT_BRIDGE_APPLE_ID: ${{ secrets.AGENT_BRIDGE_APPLE_ID }}
+          AGENT_BRIDGE_APP_SPECIFIC_PASSWORD: ${{ secrets.AGENT_BRIDGE_APP_SPECIFIC_PASSWORD }}
+          AGENT_BRIDGE_APPLE_TEAM_ID: ${{ secrets.AGENT_BRIDGE_APPLE_TEAM_ID }}
         shell: bash
         run: |
           set -euo pipefail
@@ -50,8 +55,13 @@ jobs:
           test "${REQUESTED_TAG#v}" = "$(python -c 'from pathlib import Path; import re; print(re.search(r"version = \"([^\"]+)\"", Path("pyproject.toml").read_text()).group(1))')"
           python scripts/bootstrap_wheel.py --check
           if [[ "$GITHUB_REF_TYPE" == tag || "$MANUAL_SIGN" == true ]]; then
+            test -n "$AGENT_BRIDGE_SIGNING_P12_B64"
+            test -n "$AGENT_BRIDGE_SIGNING_P12_PASSWORD"
             test -n "$AGENT_BRIDGE_CODESIGN_IDENTITY"
-            test -n "$AGENT_BRIDGE_NOTARY_PROFILE"
+            test -n "$AGENT_BRIDGE_CODESIGN_TEAM_ID"
+            test -n "$AGENT_BRIDGE_APPLE_ID"
+            test -n "$AGENT_BRIDGE_APP_SPECIFIC_PASSWORD"
+            test -n "$AGENT_BRIDGE_APPLE_TEAM_ID"
             signing=true
           else
             signing=false
@@ -105,8 +115,13 @@ jobs:
     env:
       REQUESTED_TAG: ${{ needs.validate.outputs.tag }}
       SIGNING_REQUIRED: ${{ needs.validate.outputs.signing }}
+      AGENT_BRIDGE_SIGNING_P12_B64: ${{ secrets.AGENT_BRIDGE_SIGNING_P12_B64 }}
+      AGENT_BRIDGE_SIGNING_P12_PASSWORD: ${{ secrets.AGENT_BRIDGE_SIGNING_P12_PASSWORD }}
       AGENT_BRIDGE_CODESIGN_IDENTITY: ${{ secrets.AGENT_BRIDGE_CODESIGN_IDENTITY }}
-      AGENT_BRIDGE_NOTARY_PROFILE: ${{ secrets.AGENT_BRIDGE_NOTARY_PROFILE }}
+      AGENT_BRIDGE_CODESIGN_TEAM_ID: ${{ secrets.AGENT_BRIDGE_CODESIGN_TEAM_ID }}
+      AGENT_BRIDGE_APPLE_ID: ${{ secrets.AGENT_BRIDGE_APPLE_ID }}
+      AGENT_BRIDGE_APP_SPECIFIC_PASSWORD: ${{ secrets.AGENT_BRIDGE_APP_SPECIFIC_PASSWORD }}
+      AGENT_BRIDGE_APPLE_TEAM_ID: ${{ secrets.AGENT_BRIDGE_APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -114,6 +129,31 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: Provision ephemeral Developer ID keychain and notary profile
+        if: needs.validate.outputs.signing == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for secret in "$AGENT_BRIDGE_SIGNING_P12_B64" "$AGENT_BRIDGE_SIGNING_P12_PASSWORD" "$AGENT_BRIDGE_CODESIGN_IDENTITY" "$AGENT_BRIDGE_CODESIGN_TEAM_ID" "$AGENT_BRIDGE_APPLE_ID" "$AGENT_BRIDGE_APP_SPECIFIC_PASSWORD" "$AGENT_BRIDGE_APPLE_TEAM_ID"; do
+            echo "::add-mask::$secret"
+          done
+          keychain="$RUNNER_TEMP/agent-bridge-signing.keychain-db"
+          certificate="$RUNNER_TEMP/agent-bridge-developer-id.p12"
+          keychain_password="$(uuidgen)"
+          notary_profile="agent-bridge-notary-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          echo "::add-mask::$keychain_password"
+          printf '%s' "$AGENT_BRIDGE_SIGNING_P12_B64" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$AGENT_BRIDGE_SIGNING_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          security list-keychain -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain" | grep -F "$AGENT_BRIDGE_CODESIGN_IDENTITY" | grep -F "$AGENT_BRIDGE_CODESIGN_TEAM_ID"
+          xcrun notarytool store-credentials "$notary_profile" --apple-id "$AGENT_BRIDGE_APPLE_ID" --team-id "$AGENT_BRIDGE_APPLE_TEAM_ID" --password "$AGENT_BRIDGE_APP_SPECIFIC_PASSWORD" --keychain "$keychain"
+          printf 'AGENT_BRIDGE_CODESIGN_KEYCHAIN=%s\n' "$keychain" >> "$GITHUB_ENV"
+          printf 'AGENT_BRIDGE_NOTARY_KEYCHAIN=%s\n' "$keychain" >> "$GITHUB_ENV"
+          printf 'AGENT_BRIDGE_NOTARY_PROFILE=%s\n' "$notary_profile" >> "$GITHUB_ENV"
       - name: Build, sign, notarize, and verify universal helper before staging
         shell: bash
         run: |
@@ -134,6 +174,16 @@ jobs:
           rm -rf src/agent_bridge/native/macos-universal2
           mkdir -p src/agent_bridge/native/macos-universal2
           cp -R native/macos-notify/dist/AgentBridgeNotifier.app src/agent_bridge/native/macos-universal2/
+      - name: Remove ephemeral signing keychain and credentials
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [[ -n "${AGENT_BRIDGE_NOTARY_KEYCHAIN:-}" ]]; then
+            security delete-generic-password -s "${AGENT_BRIDGE_NOTARY_PROFILE:-}" "$AGENT_BRIDGE_NOTARY_KEYCHAIN"
+            security delete-keychain "$AGENT_BRIDGE_NOTARY_KEYCHAIN"
+          fi
+          rm -f "$RUNNER_TEMP/agent-bridge-developer-id.p12"
       - name: Build and exercise packaged macOS wheel
         shell: bash
         run: |

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import subprocess
 import sys
 import unittest
@@ -27,6 +28,20 @@ class BootstrapWheelTests(unittest.TestCase):
                 "agent_bridge/native/windows-x86_64/agent-bridge-windows-notify.exe",
             ):
                 self.assertIn(resource, archive.namelist())
+
+    @unittest.skipUnless(importlib.util.find_spec("setuptools"), "requires a local wheel build backend")
+    def test_rebuilding_bootstrap_wheel_is_byte_reproducible_when_backend_is_available(self) -> None:
+        first = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "bootstrap_wheel.py"), "--write"],
+            capture_output=True, text=True, encoding="utf-8", errors="strict", timeout=120,
+        )
+        self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+        second = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "bootstrap_wheel.py"), "--write"],
+            capture_output=True, text=True, encoding="utf-8", errors="strict", timeout=120,
+        )
+        self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+        self.assertEqual(json.loads(first.stdout)["sha256"], json.loads(second.stdout)["sha256"])
 
 
 if __name__ == "__main__":

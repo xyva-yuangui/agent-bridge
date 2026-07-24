@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "sha256": "01dc99cd17690d202eab6b0b9fa97c0af499a540bc7bdbdc1aa03c4eb7828440",
+  "sha256": "d2761637a7c9aea36542c4007b71325c4d03230419dda55d3784db938b175521",
   "source_inventory": {
     "agent_bridge/__init__.py": "09e3f62095eb8e180e92e8e5908761ff9ea76707c5548a871bb9d1f8c00c1793",
     "agent_bridge/adapters/__init__.py": "df451039315a94ee2601de7cdc6ef6d256d3d821f1304106ea714a7c4fb97e7d",
@@ -43,7 +43,7 @@
     "agent_bridge/paths.py": "b4a5853d46a5c784313342c776f628760080c11b62f4485eef6fe0f5ecd60fc2",
     "agent_bridge/presentation.py": "a80292cb57e230f0ef83093d4f1fbd9d7397cb3825647b9c641c140efb3dd3d3",
     "agent_bridge/service.py": "a36edefcba5ed1b40a4975da814231ec655a196df28705e80b71e0778e20e64f",
-    "agent_bridge/setup.py": "c3ba054a1b68a0e9488e4bae762d6703ea611382a55851925797335df73bfd3e",
+    "agent_bridge/setup.py": "6c7a2544b0e9024dd885baf083bf1f2a89dff35e4c73182faafe5eab9ff28d90",
     "agent_bridge/state_machine.py": "72d4e6b38c4708bbcd6e58c34570af0c466a5479083d8a07281b3f2310f61a1d",
     "agent_bridge/store.py": "834e5bcd6069490fb799b1fdf76e6c20fe70c7d4ee3f7f3287831a71e29a170e",
     "agent_bridge/terminals.py": "8693cddce501ffbec79ff05441b64ef08c0ee193d1ac047660c06bc274d6fc67",

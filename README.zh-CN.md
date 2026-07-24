@@ -73,7 +73,7 @@ bridge uninstall
 bridge uninstall --purge-data
 ```
 
-`bridge uninstall` 默认 preserves task data；只有显式传入 `--purge-data` 且先显示精确数据目录时才删除数据。恢复时运行 `bridge setup status`、`bridge doctor` 和 `bridge inbox`；本项目没有需要重启的守护进程。
+`bridge uninstall` 默认保留任务数据；只有显式传入 `--purge-data` 且先显示精确数据目录时才删除数据。恢复时运行 `bridge setup status`、`bridge doctor` 和 `bridge inbox`；本项目没有需要重启的守护进程。
 
 ## 测试与发布
 

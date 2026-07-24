@@ -128,6 +128,19 @@ class DocumentationContractTests(unittest.TestCase):
             self.assertIn(token, release)
         self.assertTrue((ROOT / "scripts" / "retag_wheel.py").is_file())
 
+    def test_macos_tag_signing_provisions_and_cleans_ephemeral_credentials_before_packaging(self) -> None:
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        for token in (
+            "AGENT_BRIDGE_SIGNING_P12_B64", "security import", "set-key-partition-list",
+            "security find-identity", "notarytool store-credentials", "AGENT_BRIDGE_NOTARY_KEYCHAIN",
+            "sign-and-notarize.sh", "Remove ephemeral signing keychain", "delete-generic-password", "security delete-keychain",
+        ):
+            self.assertIn(token, release)
+        self.assertLess(release.index("Provision ephemeral Developer ID keychain"), release.index("Build, sign, notarize"))
+        self.assertLess(release.index("Build, sign, notarize"), release.index("Build and exercise packaged macOS wheel"))
+        self.assertLess(release.index("Remove ephemeral signing keychain"), release.index("Build and exercise packaged macOS wheel"))
+        self.assertLess(release.index("Build and exercise packaged macOS wheel"), release.index("sha256sum -c"))
+
     def test_packaged_windows_helper_matches_the_verified_release_input(self) -> None:
         packaged = ROOT / "src" / "agent_bridge" / "native" / "windows-x86_64" / "agent-bridge-windows-notify.exe"
         verified = ROOT / "native" / "windows-notify" / "dist" / "windows-x86_64" / "agent-bridge-windows-notify.exe"

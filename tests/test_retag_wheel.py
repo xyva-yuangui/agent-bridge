@@ -23,11 +23,14 @@ class RetagWheelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "agent_bridge-2.0.0-py3-none-any.whl"
             destination = Path(temporary) / "agent_bridge-2.0.0-py3-none-win_amd64.whl"
+            repeat = Path(temporary) / "repeat.whl"
             with zipfile.ZipFile(source, "w") as wheel:
                 wheel.writestr("agent_bridge/__init__.py", "VERSION = '2.0.0'\n")
                 wheel.writestr("agent_bridge-2.0.0.dist-info/WHEEL", "Wheel-Version: 1.0\nTag: py3-none-any\n")
                 wheel.writestr("agent_bridge-2.0.0.dist-info/RECORD", "")
             retag_wheel.retag(source, destination, "py3-none-win_amd64")
+            retag_wheel.retag(source, repeat, "py3-none-win_amd64")
+            self.assertEqual(hashlib.sha256(destination.read_bytes()).hexdigest(), hashlib.sha256(repeat.read_bytes()).hexdigest())
             with zipfile.ZipFile(destination) as wheel:
                 self.assertIn("Tag: py3-none-win_amd64", wheel.read("agent_bridge-2.0.0.dist-info/WHEEL").decode())
                 rows = list(csv.reader(io.StringIO(wheel.read("agent_bridge-2.0.0.dist-info/RECORD").decode())))

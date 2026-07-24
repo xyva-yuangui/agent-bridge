@@ -11,12 +11,21 @@ import argparse
 import base64
 import csv
 import hashlib
+import os
 from pathlib import Path
+import time
 import zipfile
 
 
 def _record_hash(data: bytes) -> str:
     return "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode("ascii").rstrip("=")
+
+
+def _zip_timestamp() -> tuple[int, int, int, int, int, int]:
+    """Return a ZIP-valid, reproducible timestamp from SOURCE_DATE_EPOCH."""
+    epoch = int(os.environ.get("SOURCE_DATE_EPOCH", "315532800"))
+    # ZIP cannot represent years before 1980; use the portable lower bound.
+    return time.gmtime(max(315532800, epoch))[:6]
 
 
 def retag(source: Path, destination: Path, tag: str) -> None:
@@ -33,9 +42,14 @@ def retag(source: Path, destination: Path, tag: str) -> None:
     output = io.StringIO(newline="")
     csv.writer(output, lineterminator="\n").writerows(rows)
     files[record_name] = output.getvalue().encode("utf-8")
-    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    timestamp = _zip_timestamp()
+    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, strict_timestamps=True) as archive:
         for name in sorted(files):
-            archive.writestr(name, files[name])
+            info = zipfile.ZipInfo(name, date_time=timestamp)
+            info.create_system = 3
+            info.external_attr = 0o100644 << 16
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, files[name], compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
 
 
 def main() -> int:
