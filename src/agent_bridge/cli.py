@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional, Sequence
 from . import dispatcher
 from .launchers import LaunchDeliveryChannel, launch_stored_agent
 from .migrate_v1 import export_json, import_v1
+from .notifications import WindowsNotificationChannel, windows_notification_capability
 from .paths import get_data_root
 from .presentation import configure_streams, error_view, render, task_page, task_view, tasks_view
 from .service import BridgeService
@@ -21,7 +22,7 @@ from .version import BRIDGE_VERSION, SCHEMA_VERSION
 
 
 MCP_EXCLUDED_COMMANDS = frozenset(("dispatch", "tui", "setup", "uninstall", "open-action"))
-UNAVAILABLE_COMMANDS = frozenset(("tui", "setup", "uninstall", "open-action"))
+UNAVAILABLE_COMMANDS = frozenset(("tui", "setup", "uninstall"))
 
 
 class CommandUnavailable(RuntimeError):
@@ -86,6 +87,11 @@ def execute_command(
             "SELECT 1 FROM agents WHERE execution_policy = 'auto' AND launch_argv_json <> '[]' LIMIT 1"
         )
         channels = {"launcher": LaunchDeliveryChannel(str(service.store.path))} if configured else {}
+        notification_capability = windows_notification_capability()
+        if notification_capability.available:
+            channels["notification"] = WindowsNotificationChannel(
+                service.store.path, notification_capability.helper_path
+            )
         report = dispatcher.Dispatcher(service.store, channels).run_burst()
         return {"dispatch": {
             "acquired": report.acquired,
@@ -96,6 +102,27 @@ def execute_command(
             "coalesced": report.coalesced,
             "timed_out": report.timed_out,
         }}
+    if command == "open-action":
+        notification_id = str(_argument(arguments, "notification_id", ""))
+        action = str(_argument(arguments, "action", ""))
+        if not notification_id or len(notification_id) > 256 or not all(
+            character.isascii() and (character.isalnum() or character in "._-")
+            for character in notification_id
+        ):
+            raise ValueError("invalid notification ID")
+        if action not in ("view", "claim", "snooze"):
+            raise ValueError("invalid notification action")
+        row = service.store.connection.execute(
+            "SELECT task_id FROM notification_mappings WHERE notification_id = ?", (notification_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError("unknown native notification")
+        task_id = str(row["task_id"])
+        if action == "claim":
+            task = service.claim(task_id, identity)
+        else:
+            task = service.show(task_id)
+        return {"open_action": {"action": action, "task": task_view(task)}}
     if command == "whoami":
         return {"identity": identity}
     if command == "send":
@@ -180,10 +207,12 @@ def execute_command(
     if command == "doctor":
         report = service.store.integrity_report()
         actual_version = service.store.scalar("SELECT MAX(version) FROM schema_migrations")
+        notification_capability = windows_notification_capability()
         checks = {
             "data_root": service.store.path.parent.is_dir(),
             "schema_version": actual_version == SCHEMA_VERSION,
             "integrity": report.ok,
+            "native_notifications": notification_capability.available,
         }
         strict = bool(_argument(arguments, "strict"))
         return {
@@ -191,6 +220,11 @@ def execute_command(
             "message": report.message,
             "database": str(service.store.path),
             "checks": checks,
+            "notification_capability": {
+                "available": notification_capability.available,
+                "helper_path": notification_capability.helper_path,
+                "detail": notification_capability.detail,
+            },
             "strict": strict,
         }
     if command == "project":
@@ -301,6 +335,9 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch = command("dispatch"); dispatch.add_argument("--burst", action="store_true")
     for name in UNAVAILABLE_COMMANDS:
         command(name, help="reserved for a later v2 component")
+    open_action = command("open-action")
+    open_action.add_argument("--notification-id", required=True)
+    open_action.add_argument("--action", choices=("view", "claim", "snooze"), required=True)
     return parser
 
 
