@@ -70,7 +70,14 @@ def _host_application_present(adapter: HostAdapter) -> bool:
 def _owns_integration(adapter: HostAdapter) -> bool:
     """Do not let uninstall/repair serialize a merely nearby user config."""
     try:
-        return adapter._installation_artifact_is_valid() or adapter._consumer_is_installed()
+        # Uninstall must remain possible after a Python/runtime upgrade makes
+        # the live entrypoint unhealthy.  The receipt is durable ownership,
+        # whereas consumer health is deliberately version-sensitive.
+        if adapter.installation_artifact_path.is_file() and not adapter.installation_artifact_path.is_symlink():
+            receipt = json.loads(adapter.installation_artifact_path.read_text(encoding="utf-8"))
+            if isinstance(receipt, dict) and receipt.get("host_identity") == adapter.name and isinstance(receipt.get("entrypoint"), list):
+                return True
+        return adapter._consumer_is_installed()
     except (OSError, ValueError):
         return False
 
