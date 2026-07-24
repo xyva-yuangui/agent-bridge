@@ -61,7 +61,15 @@ class PosixInputAdapter:
         ready, _, _ = self._select([self.stream], [], [], 0.01)
         if not ready:
             return None
-        return parse_key(first + self.stream.read(2))
+        sequence = first
+        for ignored in range(16):
+            ready, _, _ = self._select([self.stream], [], [], 0.01)
+            if not ready:
+                break
+            sequence += self.stream.read(1)
+            if len(sequence) > 1 and "@" <= sequence[-1] <= "~":
+                break
+        return parse_key(sequence)
 
     def read_line(self, prompt: str = "") -> str:
         """Collect a short filter in raw mode; rendering owns any visible prompt."""

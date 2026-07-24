@@ -105,10 +105,18 @@ def _dashboard(service: Any, project_id: str, selected: int = 0, query: str = ""
     tasks = []
     page = service.board_page(project_id, limit=PAGE_SIZE, cursor=cursor)
     for task in page.tasks:
-            value = _as_mapping(task)
-            evidence = service.delivery_evidence(str(value.get("id", "")))
-            value["delivery"] = _evidence_text(evidence)
-            tasks.append(value)
+        value = _as_mapping(task)
+        evidence = service.delivery_evidence(str(value.get("id", "")))
+        value["delivery"] = _evidence_text(evidence)
+        detail_reader = getattr(service, "task_detail", None)
+        if callable(detail_reader):
+            try:
+                detail = detail_reader(str(value.get("id", "")))
+                value["dependencies"] = getattr(detail, "dependencies", ())
+                value["review_result"] = getattr(detail, "review_result", "")
+            except (KeyError, ValueError, RuntimeError):
+                pass
+        tasks.append(value)
     if sort_by == "subject":
         tasks.sort(key=lambda task: str(task.get("subject", "")).casefold())
     elif sort_by == "state":

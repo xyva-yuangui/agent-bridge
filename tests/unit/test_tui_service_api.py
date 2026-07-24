@@ -42,6 +42,22 @@ class TuiServiceApiTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_task_detail_exposes_durable_dependencies_and_latest_review_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store.open(Path(directory) / "bridge.sqlite3")
+            service = BridgeService(store)
+            try:
+                dependency = service.send_task("codex", "zcode", "Dependency", "body")
+                task = service.send_task("codex", "zcode", "Review", "body")
+                with store.transaction(immediate=True) as connection:
+                    connection.execute("INSERT INTO task_dependencies(task_id, depends_on_task_id) VALUES (?, ?)", (task.id, dependency.id))
+                    connection.execute("INSERT INTO task_events(task_id, revision, kind, actor, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", (task.id, 9, "task.approve", "codex", '{"body":"approved"}', "2025"))
+                detail = service.task_detail(task.id)
+                self.assertEqual(detail.dependencies, (dependency.id,))
+                self.assertIn("approved", detail.review_result)
+            finally:
+                store.close()
+
     def test_compact_tui_accepts_service_agent_views_without_storage_access(self) -> None:
         from agent_bridge.tui.controller import run_tui
 

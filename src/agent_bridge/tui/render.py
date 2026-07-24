@@ -74,7 +74,8 @@ def _wide(dashboard: Dashboard, width: int) -> list[str]:
 
 
 def _narrow(dashboard: Dashboard, width: int) -> list[str]:
-    lines = [_title(dashboard), "Tasks"]
+    agents = "; ".join("{0} {1} {2} {3}".format(agent.get("name", "?"), agent.get("health", "unknown"), agent.get("execution_policy", "manual"), ",".join(agent.get("capabilities", ()))) for agent in dashboard.agents)
+    lines = [_title(dashboard), "Agents: " + agents, "Tasks"]
     lines.extend(_task_line(task, index == dashboard.selected, width) for index, task in enumerate(dashboard.tasks))
     lines.append("Details")
     lines.extend(_details(dashboard.selected_task, width))
@@ -91,7 +92,7 @@ def _title(dashboard: Dashboard) -> str:
 
 def _task_line(task: DashboardTask, selected: bool, width: int) -> str:
     marker = ">" if selected else " "
-    prefix = "{0} #{1} {2} {3}: ".format(marker, task.id[:8], task.state, task.assignee)
+    prefix = "{0} #{1} {2} {3}→{4} {5}: ".format(marker, task.id[:8], task.state, task.sender, task.assignee, task.delivery)
     return prefix + truncate_cells(task.subject, max(1, width - display_width(prefix)))
 
 
@@ -130,7 +131,7 @@ def _at(values: list[str], index: int) -> str:
 
 
 def _help() -> str:
-    return "↑/↓ select  Enter view  c claim  r retry  o terminal  / filter  q quit"
+    return "↑/↓ select  n/p PgDn/PgUp page  s page sort  / page filter  c claim  r retry  o terminal  q quit"
 
 
 def _colorize(line: str, color: bool) -> str:

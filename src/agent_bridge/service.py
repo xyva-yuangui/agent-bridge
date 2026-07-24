@@ -75,6 +75,13 @@ class DeliveryEvidence:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class TaskDetail:
+    task: TaskView
+    dependencies: Tuple[str, ...] = ()
+    review_result: str = ""
+
+
 MAX_INBOX_PAGE_SIZE = 100
 
 
@@ -308,6 +315,25 @@ class BridgeService:
             (task_id,),
         ).fetchone()
         return DeliveryEvidence("queued" if queued is not None else "unknown")
+
+    def task_detail(self, task_id: str) -> TaskDetail:
+        """Return selected-task evidence through the public service boundary."""
+        task = self.show(task_id)
+        dependencies = tuple(str(row["depends_on_task_id"]) for row in self.store.connection.execute(
+            "SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ? ORDER BY depends_on_task_id", (task_id,)
+        ))
+        event = self.store.connection.execute(
+            "SELECT kind, payload_json FROM task_events WHERE task_id = ? AND kind IN ('task.approve', 'task.changes', 'task.request_review') "
+            "ORDER BY id DESC LIMIT 1", (task_id,)
+        ).fetchone()
+        review = ""
+        if event is not None:
+            try:
+                payload = json.loads(event["payload_json"])
+                review = str(event["kind"]) + ": " + str(payload.get("body", ""))
+            except (TypeError, ValueError):
+                review = str(event["kind"])
+        return TaskDetail(task, dependencies, review)
 
     def retry_delivery(self, task_id: str) -> DeliveryEvidence:
         """Add a fresh, durable delivery request without mutating task lifecycle state."""
