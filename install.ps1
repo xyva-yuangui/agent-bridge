@@ -18,6 +18,7 @@ $script:UserRoot = [IO.Path]::GetFullPath($InstallRoot)
 $script:BridgeHome = Join-Path $script:UserRoot ".agent-bridge"
 $script:SkillHome = Join-Path $script:BridgeHome "skill"
 $script:LauncherHome = Join-Path $script:UserRoot ".local\bin"
+$script:NotifierHome = Join-Path $script:BridgeHome "native"
 
 function Resolve-Python {
     param([string]$Requested)
@@ -153,6 +154,20 @@ function Install-Shared {
             [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
         }
     }
+}
+
+function Install-WindowsNotifier {
+    param([string]$PythonPath)
+    $source = Join-Path $script:SourceRoot "native\windows-notify\target\release\agent-bridge-windows-notify.exe"
+    if (-not (Test-Path -LiteralPath $source)) { throw "Windows notifier release helper is missing; build native/windows-notify before installation." }
+    New-Item -ItemType Directory -Force -Path $script:NotifierHome | Out-Null
+    $destination = Join-Path $script:NotifierHome "agent-bridge-windows-notify.exe"
+    Copy-Item -LiteralPath $source -Destination $destination -Force
+    $json = (@($PythonPath, "-m", "agent_bridge.cli") | ConvertTo-Json -Compress)
+    [Environment]::SetEnvironmentVariable("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", $destination, "User")
+    $request = '{"operation":"register","activation_argv":' + $json + '}'
+    $request | & $destination | Out-Null
+    if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $destination -Force; throw "Windows notifier registration failed." }
 }
 
 function Get-ExistingWakeArgv {
@@ -589,6 +604,7 @@ if ($Uninstall) {
 
 $pythonPath = Resolve-Python -Requested $Python
 Install-Shared -PythonPath $pythonPath
+Install-WindowsNotifier -PythonPath $pythonPath
 foreach ($name in $agents) {
     $explicit = @()
     if (($agents.Count -eq 1) -and $WakeArgv) {
