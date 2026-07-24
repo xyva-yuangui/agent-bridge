@@ -35,15 +35,22 @@ class ClaudeAdapter(ManagedJsonAdapter):
         _optimistic_json_update(self.config_path, update)
 
     def _uninstall_config(self) -> None:
+        entrypoint = self._owned_entrypoint()
+        if entrypoint is None:
+            raise ValueError("refusing to remove Claude configuration without an owned receipt")
+        historical = dict(self._managed_metadata())
+        historical["command"] = entrypoint[0]
+        historical["args"] = entrypoint[1:]
+        hook = {"matcher": "", "hooks": [{"type": "command", "command": entrypoint[0], "args": entrypoint[1:]}]}
         def update(root: dict) -> None:
             hooks = root.get("hooks")
             if isinstance(hooks, dict) and isinstance(hooks.get("SessionStart"), list):
-                remaining = [item for item in hooks["SessionStart"] if item != self._managed_hook()]
+                remaining = [item for item in hooks["SessionStart"] if item != hook]
                 if remaining:
                     hooks["SessionStart"] = remaining
                 else:
                     hooks.pop("SessionStart", None)
-            if root.get("agent_bridge") == self._managed_metadata():
+            if root.get("agent_bridge") == historical:
                 root.pop("agent_bridge", None)
         _optimistic_json_update(self.config_path, update)
 

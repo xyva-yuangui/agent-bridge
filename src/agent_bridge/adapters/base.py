@@ -364,6 +364,17 @@ class HostAdapter(abc.ABC):
             return False
         return artifact == {"host_identity": self.name, "entrypoint": self._entrypoint()}
 
+    def _owned_entrypoint(self) -> Optional[list]:
+        """Read the immutable install receipt for removal across upgrades."""
+        try:
+            artifact = json.loads(self.installation_artifact_path.read_text(encoding="utf-8"))
+            entrypoint = artifact.get("entrypoint") if isinstance(artifact, dict) else None
+            if artifact.get("host_identity") != self.name or not isinstance(entrypoint, list) or not entrypoint or not all(isinstance(item, str) for item in entrypoint):
+                return None
+            return entrypoint
+        except (OSError, ValueError, AttributeError):
+            return None
+
     def _write_installation_artifact(self) -> None:
         self._assert_contained(self.installation_artifact_path)
         self.installation_artifact_path.parent.mkdir(parents=True, exist_ok=True)
