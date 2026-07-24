@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
+from .atomic_fs import ExchangeUnsupported, exchange, fsync_parent
 
 
 OWNER = "agent-bridge"
@@ -180,8 +181,18 @@ def apply_atomic_edit(
             current = target.read_bytes() if target.exists() else b""
             if content_hash(current) != before_hash:
                 raise ConcurrentEdit("target changed during atomic edit: {0}".format(target))
-            os.replace(str(temporary), str(target))
-        _fsync_directory(target.parent)
+            if target.exists() and os.name != "nt":
+                try:
+                    exchange(target, temporary)
+                except ExchangeUnsupported as error:
+                    raise ConcurrentEdit("atomic exchange unsupported") from error
+                displaced = temporary.read_bytes()
+                if displaced != before:
+                    exchange(target, temporary)
+                    raise ConcurrentEdit("target changed during atomic exchange: {0}".format(target))
+            else:
+                os.replace(str(temporary), str(target))
+        fsync_parent(target)
         return AtomicEditResult(target, before_hash, content_hash(after))
     finally:
         try:
