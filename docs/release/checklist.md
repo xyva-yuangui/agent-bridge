@@ -29,6 +29,10 @@ installation docs, `SHA256SUMS.txt`, and `inventory.json`. Extract it under a
 path containing spaces and non-ASCII characters, then run the appropriate
 install script without a checkout or `PYTHONPATH`. The wheel and sdist are
 supplementary verification artifacts, not platform-specific primary installers.
+On macOS, confirm setup installs the receipted app bundle under
+`~/.agent-bridge/native/macos-universal2`, records its hash/signing assessment
+and fixed bridge activation argv, reports unsigned builds as signing-degraded
+only, and removes only the hash-owned bundle on uninstall.
 
 Create final SHA-256 checksums and SPDX/CycloneDX SBOMs after the portable ZIP
 is built. Install the bootstrap wheel into a new virtual environment, run

@@ -294,6 +294,61 @@ jobs:
           PY
           (cd release && sha256sum * > SHA256SUMS.txt)
           (cd release && sha256sum -c SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assembled-release
+          path: release/*
+          if-no-files-found: error
+
+  portable-macos-smoke:
+    needs: aggregate
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: assembled-release
+          path: release
+      - name: Extract and install the primary portable ZIP outside the checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip=$(find release -name '*-portable.zip' -print -quit)
+          test -n "$zip"
+          root="$RUNNER_TEMP/Agent Bridge 发布 空格"
+          home="$RUNNER_TEMP/agent-bridge-smoke-home"
+          userbase="$RUNNER_TEMP/agent-bridge-smoke-userbase"
+          mkdir -p "$root" "$home/.codex" "$home/.claude" "$home/.reasonix" "$home/.zcode/cli"
+          unzip -q "$zip" -d "$root"
+          printf '%s\n' '{"host":"codex","mechanisms":["mcp"]}' > "$home/.codex/agent-bridge-host.json"
+          printf '%s\n' '{}' > "$home/.claude/settings.json"
+          : > "$home/.reasonix/config.toml"
+          printf '%s\n' '{}' > "$home/.zcode/cli/config.json"
+          package=$(find "$root" -maxdepth 1 -type d -name 'agent-bridge-*' -print -quit)
+          export PYTHONUSERBASE="$userbase"
+          export AGENT_BRIDGE_MACOS_NOTIFY_APP="$package/native/macos-universal2/AgentBridgeNotifier.app"
+          unset PYTHONPATH
+          "$package/install.sh" --auto --python python3 --install-root "$home"
+          test -d "$home/.agent-bridge/native/macos-universal2/AgentBridgeNotifier.app"
+          test -f "$home/.agent-bridge/native/macos-universal2/receipt.json"
+          python3 -m agent_bridge.cli setup status --home "$home"
+          python3 -m agent_bridge.cli setup --repair --home "$home"
+          python3 -m agent_bridge.cli uninstall --home "$home"
+
+  publish:
+    needs: [validate, portable-macos-smoke]
+    runs-on: ubuntu-latest
+    env:
+      REQUESTED_TAG: ${{ needs.validate.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: assembled-release
+          path: release
+      - name: Re-verify smoke-tested release inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd release && sha256sum -c SHA256SUMS.txt)
       - uses: actions/attest-build-provenance@v1
         with:
           subject-path: release/*

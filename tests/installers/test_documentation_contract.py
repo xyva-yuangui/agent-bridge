@@ -139,6 +139,12 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("inventory.json", checklist)
         self.assertTrue((ROOT / "scripts" / "build_portable_zip.py").is_file())
 
+    def test_release_smoke_tests_the_assembled_portable_zip_on_macos_before_publish(self) -> None:
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        for token in ("portable-macos-smoke:", "assembled-release", "AgentBridgeNotifier.app", "setup --repair", "uninstall --home"):
+            self.assertIn(token, release)
+        self.assertLess(release.index("portable-macos-smoke:"), release.index("publish:"))
+
     def test_macos_tag_signing_provisions_and_cleans_ephemeral_credentials_before_packaging(self) -> None:
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         for token in (

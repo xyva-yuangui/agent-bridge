@@ -137,3 +137,15 @@ normalized permissions and validates the internal inventory/checksum manifest.
 Its regression test builds byte-identical archives, checks the exact required
 paths, and extracts the ZIP under a CJK/space path to run `install.ps1` from
 the bundled wheel and native helper without a checkout.
+
+## Receipted macOS helper lifecycle (2026-07-24)
+
+When a portable ZIP provides `AgentBridgeNotifier.app`, macOS setup validates
+its bundle identifier, plist, executable, and hashes; stages it under the
+owned native directory; registers a fixed absolute bridge activation argv; and
+records source, app/executable hashes, and signing assessment. Repair is
+idempotent. Uninstall unregisters and removes only a receipt/hash-owned app,
+refusing external changes. Wheel-only macOS installation remains explicitly
+terminal-fallback/degraded when the portable app is absent. The release flow
+uploads the assembled ZIP, smoke-tests it on macOS from a CJK/space path after
+aggregation, and only then attests and publishes it.

@@ -7,6 +7,7 @@ import sys
 import os
 import json
 import hashlib
+import plistlib
 from importlib import resources
 import tempfile
 import shutil as _which_shutil
@@ -18,7 +19,7 @@ from typing import Dict, Optional, Tuple
 from .adapters import ADAPTER_TYPES, adapter_for
 from .adapters.base import HostAdapter, canonical_host_name
 from .managed_config import MANAGED_CONFIG_VERSION, OWNER, ManagedMutation, backup_file, content_hash
-from .notifications import WindowsNotifier, windows_notification_capability, macos_notification_capability
+from .notifications import MacOSNotifier, WindowsNotifier, windows_notification_capability, macos_notification_capability, macos_signing_assessment
 from .path_ownership import (
     PathBackend,
     default_path_backend,
@@ -193,6 +194,82 @@ def _native_paths(home: Path) -> Tuple[Path, Path]:
     return base / "agent-bridge-windows-notify.exe", base / "receipt.json"
 
 
+def _macos_native_paths(home: Path) -> Tuple[Path, Path, Path]:
+    base = _data_root(home) / "native" / "macos-universal2"
+    app = base / "AgentBridgeNotifier.app"
+    return app, app / "Contents" / "MacOS" / "AgentBridgeNotifier", base / "receipt.json"
+
+
+def _tree_hash(root: Path) -> str:
+    digest = hashlib.sha256()
+    for item in sorted(path for path in root.rglob("*") if path.is_file()):
+        digest.update(item.relative_to(root).as_posix().encode("utf-8") + b"\0")
+        digest.update(item.read_bytes())
+    return digest.hexdigest()
+
+
+def _validate_macos_app(app: Path) -> Tuple[Path, str, str]:
+    info = app / "Contents" / "Info.plist"
+    if not app.is_dir() or app.is_symlink() or not info.is_file():
+        raise RuntimeError("macOS notification app bundle is incomplete")
+    try: metadata = plistlib.loads(info.read_bytes())
+    except (ValueError, OSError) as error: raise RuntimeError("macOS notification Info.plist is invalid") from error
+    if metadata.get("CFBundleIdentifier") != "org.agentbridge.notifier" or metadata.get("CFBundleExecutable") != "AgentBridgeNotifier":
+        raise RuntimeError("macOS notification app bundle identity is invalid")
+    executable = app / "Contents" / "MacOS" / "AgentBridgeNotifier"
+    if not executable.is_file() or executable.is_symlink(): raise RuntimeError("macOS notification executable is missing")
+    return executable, hashlib.sha256(executable.read_bytes()).hexdigest(), _tree_hash(app)
+
+
+def _macos_source_app() -> Optional[Path]:
+    configured = os.environ.get("AGENT_BRIDGE_MACOS_NOTIFY_APP", "").strip()
+    if configured: return Path(configured)
+    packaged = resources.files("agent_bridge").joinpath("native", "macos-universal2", "AgentBridgeNotifier.app")
+    with resources.as_file(packaged) as source:
+        return Path(source) if Path(source).is_dir() else None
+
+
+def _install_macos_native(home: Path) -> None:
+    if sys.platform != "darwin": return
+    source = _macos_source_app()
+    if source is None or not source.is_dir():
+        return  # A wheel-only installation remains terminal-fallback capable.
+    source_executable, source_hash, source_tree_hash = _validate_macos_app(source)
+    app, executable, receipt = _macos_native_paths(home)
+    if app.exists() or receipt.exists():
+        try: owned = json.loads(receipt.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error: raise RuntimeError("invalid macOS native helper ownership receipt") from error
+        if owned.get("owner") != "agent-bridge.macos-notify" or owned.get("app_path") != str(app) or not app.is_dir() or owned.get("app_sha256") != _tree_hash(app):
+            raise RuntimeError("refusing to overwrite an unowned macOS notification app")
+    app.parent.mkdir(parents=True, exist_ok=True)
+    stage = app.parent / (".macos-stage-" + next(tempfile._get_candidate_names()))
+    shutil.copytree(source, stage)
+    if app.exists(): shutil.rmtree(app)
+    _replace_runtime_path(stage, app)
+    installed_executable, executable_hash, app_hash = _validate_macos_app(app)
+    signing = macos_signing_assessment(installed_executable)
+    activation = [sys.executable, str(_data_root(home) / "skill" / "scripts" / "bridge.py"), "--data-root", str(_data_root(home))]
+    _write_owned_json(receipt, {"schema": 1, "owner": "agent-bridge.macos-notify", "source_app": str(source), "app_path": str(app), "executable_path": str(executable), "executable_sha256": executable_hash, "app_sha256": app_hash, "signing_status": signing.status, "gatekeeper": signing.gatekeeper, "activation_argv": activation})
+    result = MacOSNotifier(installed_executable, activation_argv=activation).register(activation)
+    if not result.ok:
+        _remove_macos_native(home)
+        raise RuntimeError("macOS notification registration failed: " + result.detail)
+
+
+def _remove_macos_native(home: Path) -> None:
+    if sys.platform != "darwin": return
+    app, executable, receipt = _macos_native_paths(home)
+    if not app.exists() and not receipt.exists(): return
+    try: owned = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error: raise RuntimeError("refusing to remove unowned macOS notification app") from error
+    if owned.get("owner") != "agent-bridge.macos-notify" or owned.get("app_path") != str(app) or not app.is_dir() or owned.get("app_sha256") != _tree_hash(app):
+        raise RuntimeError("refusing to remove unowned macOS notification app")
+    result = MacOSNotifier(executable, activation_argv=owned.get("activation_argv", ())).unregister()
+    if not result.ok: raise RuntimeError("macOS notification unregistration failed: " + result.detail)
+    shutil.rmtree(app); receipt.unlink()
+    if app.parent.is_dir() and not any(app.parent.iterdir()): app.parent.rmdir()
+
+
 def _install_windows_native(home: Path) -> None:
     if os.name != "nt": return
     packaged = resources.files("agent_bridge").joinpath(
@@ -346,6 +423,7 @@ def build_setup_plan(*, home: Optional[Path] = None, auto: bool = False, agent: 
         (user_home / ".local" / "bin" / ("bridge.cmd" if os.name == "nt" else "bridge"), "remove owned launcher"),
         (data / "runtime-receipt.json", "remove runtime receipt"),
         (data / "native" / "agent-bridge-windows-notify.exe", "unregister and remove owned native helper"),
+        (data / "native" / "macos-universal2" / "AgentBridgeNotifier.app", "unregister and remove owned macOS notification app"),
         (launcher_path_receipt(user_home), "remove owned launcher PATH entry"),
     ):
         original = target.read_bytes() if target.is_file() else b""
@@ -394,6 +472,9 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False, path_backend: Op
         if not native_was_present:
             inverses.append(("native", lambda: _remove_windows_native(plan.home)))
         _install_windows_native(plan.home)
+        mac_app, ignored_mac_executable, mac_receipt = _macos_native_paths(plan.home)
+        if not (mac_app.exists() or mac_receipt.exists()): inverses.append(("macOS native", lambda: _remove_macos_native(plan.home)))
+        _install_macos_native(plan.home)
         for mutation in plan.mutations:
             adapter = next(
                 item for item in plan.adapters if item.config_path == mutation.target
@@ -436,7 +517,14 @@ def repair(*, home: Optional[Path] = None, agent: Optional[str] = None, dry_run:
     return apply_setup_plan(repair_plan, dry_run=dry_run, path_backend=path_backend)
 
 
-def _notification_status() -> Dict[str, object]:
+def _notification_status(home: Path) -> Dict[str, object]:
+    if sys.platform == "darwin":
+        app, executable, receipt = _macos_native_paths(home)
+        try:
+            owned = json.loads(receipt.read_text(encoding="utf-8"))
+            if owned.get("owner") == "agent-bridge.macos-notify" and app.is_dir() and owned.get("app_sha256") == _tree_hash(app):
+                return {"available": True, "helper_path": str(executable), "detail": "owned macOS notification app installed; signing=" + str(owned.get("signing_status", "unknown"))}
+        except (OSError, ValueError): pass
     capability = macos_notification_capability() if sys.platform == "darwin" else windows_notification_capability()
     return {"available": capability.available, "helper_path": capability.helper_path, "detail": capability.detail}
 
@@ -464,7 +552,7 @@ def status(*, home: Optional[Path] = None, agent: Optional[str] = None, path_bac
         "owner": OWNER,
         "managed_config_version": MANAGED_CONFIG_VERSION,
         "hosts": hosts,
-        "notifications": _notification_status(),
+        "notifications": _notification_status(user_home),
         "launcher_path": path_status(user_home, backend=path_backend),
     }
 
@@ -484,6 +572,7 @@ def uninstall(*, home: Optional[Path] = None, agent: Optional[str] = None, purge
         item._remove_installation_artifact()
         removed.append(item.name)
     _remove_windows_native(user_home)
+    _remove_macos_native(user_home)
     remove_launcher_path(user_home, backend=path_backend)
     _remove_runtime(user_home)
     purged = None

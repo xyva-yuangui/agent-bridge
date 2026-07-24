@@ -75,6 +75,12 @@ if [ "$install_failed" -ne 0 ]; then
 fi
 
 bridge_args=(-m agent_bridge.cli)
+portable_macos_app="$source_root/native/macos-universal2/AgentBridgeNotifier.app"
+if [ -d "$portable_macos_app" ]; then
+  export AGENT_BRIDGE_MACOS_NOTIFY_APP="$portable_macos_app"
+elif [ "$(uname -s)" = "Darwin" ]; then
+  echo "DEGRADED macOS native notifications: portable AgentBridgeNotifier.app is absent; terminal fallback remains available." >&2
+fi
 if [ "$uninstall" -eq 1 ]; then
   bridge_args+=(uninstall --home "$install_root")
   if [ -n "$agent" ]; then bridge_args+=(--agent "$agent"); fi
