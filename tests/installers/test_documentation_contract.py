@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 import sys
 import hashlib
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
@@ -43,6 +44,18 @@ class DocumentationContractTests(unittest.TestCase):
                 self.assertIn(host, text.lower(), name)
             self.assertIn("macOS", text, name)
             self.assertIn("real-machine", text.lower(), name)
+
+    def test_tracked_text_files_are_strict_utf8_without_replacement_characters(self) -> None:
+        suffixes = frozenset((".md", ".json", ".toml", ".py", ".ps1", ".sh", ".swift", ".rs", ".yml", ".yaml", ".txt"))
+        completed = subprocess.run(
+            ("git", "ls-files"), cwd=str(ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="strict", check=True,
+        )
+        for relative in completed.stdout.splitlines():
+            path = ROOT / relative
+            if path.suffix.lower() in suffixes:
+                with self.subTest(path=relative):
+                    self.assertNotIn("\ufffd", path.read_text(encoding="utf-8", errors="strict"))
 
     def test_documented_cli_commands_are_parser_commands(self) -> None:
         help_text = build_parser().format_help()

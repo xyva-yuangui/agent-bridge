@@ -29,6 +29,9 @@ installation docs, `SHA256SUMS.txt`, and `inventory.json`. Extract it under a
 path containing spaces and non-ASCII characters, then run the appropriate
 install script without a checkout or `PYTHONPATH`. The wheel and sdist are
 supplementary verification artifacts, not platform-specific primary installers.
+Do not assemble a Windows-only archive and label it as this release asset: the
+aggregate macOS GitHub Actions job is responsible for the complete dual-platform
+ZIP once it has the universal2 `.app`.
 On macOS, confirm setup installs the receipted app bundle under
 `~/.agent-bridge/native/macos-universal2`, records its hash/signing assessment
 and fixed bridge activation argv, reports unsigned builds as signing-degraded

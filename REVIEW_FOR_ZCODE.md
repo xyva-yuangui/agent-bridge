@@ -1,85 +1,84 @@
-# ZCode Acceptance: agent-bridge 1.3.0
+# ZCode review: Agent Bridge v2
 
-Date: 2026-07-23
+Date: 2026-07-24
+Candidate: `e7ea9c8537cc1b463a09642bbf95d5f3abd6c00f`
 
 ## Review scope
 
-- Source branch: `fix/cross-platform-reliability`
-- Base: `0f9662e`
-- Candidate code: `6fd7b0e`
-- Review range: `0f9662e..HEAD` (includes this acceptance report)
-- Review checkout:
-  `C:\tmp\roundtable\.worktrees\cross-platform-fixes`
-- Canonical repository after integration: `C:\tmp\roundtable`
+- Design: `docs/superpowers/specs/2026-07-23-agent-bridge-v2-lightweight-desktop-design.md`
+- Plan: `docs/superpowers/plans/2026-07-23-agent-bridge-v2-lightweight-desktop.md`
+- Commit range: `06ff3c222f78d20903a95a998de595c023386de5..e7ea9c8537cc1b463a09642bbf95d5f3abd6c00f`
+- Delivery model: package-only, SQLite + transactional outbox, short bounded
+  dispatch bursts, on-demand terminal TUI, no resident daemon/listener/cloud
+  service/default telemetry.
+- Primary release model: exactly one cross-platform portable ZIP. The macOS
+  `.app` is only an internal notification helper within that ZIP; there is no
+  DMG/PKG deliverable and no Windows-only archive may be called final.
 
-## Requirements addressed
+## Review requests
 
-- Durable board, activity, archive, cleanup, and Windows portable locking.
-- Central task lifecycle with ownership checks for question/answer and review.
-- Observable delivery: `queued`, `wake_launched`, `acknowledged`,
-  `unavailable`, and `failed`.
-- No false acknowledgment when a wake process merely starts.
-- Dependency-free Windows system notifications with separate safe argv.
-- `wake_argv` arrays preserve executable paths containing spaces.
-- Registered-target validation, recent-agent routing, and coordinator renewal.
-- GBK-safe CLI output with ASCII status prefixes.
-- Complete 20-tool MCP surface at version 1.3.0.
-- Idempotent Windows and POSIX installers for Codex, Claude, Reasonix, and
-  ZCode, including install/reinstall/uninstall behavior.
-- Native Windows paths in Codex and Reasonix MCP configuration.
-- ZCode local plugin and `UserPromptSubmit` hook.
-- Documentation aligned with the implemented lifecycle and delivery semantics.
+Review design conformance, lifecycle authorization/evidence separation,
+SQLite concurrency and crash recovery, bounded helper protocols, secret-safe
+release signing, managed-config ownership/rollback, package-only portability,
+desktop UX/fallback honesty, documentation, and every release artifact.
 
-## Windows evidence
+In particular, verify that one normal `install.ps1 -Auto` can configure every
+detected Codex, Claude Code, Reasonix, and ZCode host in one invocation, while
+missing hosts degrade rather than being misrepresented as installed. Confirm
+that a launch/result never becomes a delivery acknowledgement without an
+independent consumer proof.
 
-Run from the review checkout listed above:
+## Evidence and known limits
+
+- Windows acceptance: `artifacts/platform/windows/acceptance.md`
+- macOS acceptance (explicitly pending real machine/CI):
+  `artifacts/platform/macos/acceptance.md`
+- Capability/degradation matrix: `artifacts/release/capability-matrix.json`
+- Acceptance input checksums: `artifacts/release/checksums.txt`
+
+Windows native Toast registration, OS-post result, stored opaque mapping,
+action URI forwarding, and unregister were exercised with the verified helper.
+Notification Center visual persistence and a physical UI click were not
+observed. No macOS machine, Swift toolchain, or final universal2 app was
+available locally; do not approve a macOS native-notification release claim
+without the CI/real-machine evidence named in the macOS report.
+
+The local host also lacked `cargo`; the staged locked Windows helper hash was
+verified and exercised, while the Rust rebuild remains a CI/release gate.
+
+## Reproduction commands
 
 ```powershell
-python -m unittest discover -s tests -v
-python -m compileall -q scripts tests
-.\install.ps1 -Auto -Python C:\path\to\python.exe
-bridge doctor --strict
+$env:PYTHONPATH = ''
+py -3 -m unittest discover -s tests -v
+py -3 scripts\bootstrap_wheel.py --check
+py -3 -m compileall -q src scripts tests
+git diff --check
+
+# Targeted release acceptance:
+py -3 -m unittest tests.installers.test_bootstraps tests.test_portable_zip -v
+py -3 -m unittest tests.test_cli tests.test_mcp tests.integration.test_migrate_v1 `
+  tests.integration.test_sqlite_concurrency tests.integration.test_fault_injection `
+  tests.integration.test_end_to_end_v2 tests.integration.test_performance_budgets `
+  tests.unit.test_terminals tests.unit.test_tui_model tests.unit.test_tui_render `
+  tests.unit.test_tui_controller tests.platform.test_tui_inputs -v
 ```
 
-Observed on this host:
+On macOS, additionally follow every command and manual acceptance check in
+`artifacts/platform/macos/acceptance.md` and the portable ZIP smoke in
+`.github/workflows/release.yml` before approving native delivery.
 
-- 29 tests passed, 0 failures.
-- `compileall` exited 0.
-- Isolated install, reinstall, and uninstall passed.
-- Dependency-free notification helper exited 0.
-- 40 concurrent send processes preserved every task and valid JSON.
-- GBK subprocess output completed without `UnicodeEncodeError`.
-- MCP initialize, complete tool list, and `bridge_whoami` call passed.
-- Installed `bridge.py`, `bridge_mcp.py`, and `notify_windows.ps1` hashes
-  exactly match the candidate source.
-- Codex TOML, Reasonix TOML, Claude JSON, ZCode config JSON, and ZCode hook JSON
-  parse successfully.
-- Live `bridge doctor --strict` exits 0. The historical `test` profile has a
-  stale heartbeat and is reported as an operational warning only.
+## v1 review-finding disposition
 
-## macOS acceptance
+The older v1 acceptance report described file-backed JSON state, portable
+locks, wake-based delivery, a PowerShell notification path, and 1.3.0 MCP.
+Those findings are superseded rather than carried forward: v2 replaces them
+with versioned SQLite migrations/WAL, transactional outbox and durable
+delivery attempts, bounded native helper protocols, explicit acknowledgement
+evidence, package-only 2.0.0 MCP consumers, and owned/reversible four-host
+setup. The v1 review remains historical context only; no v1 behavior should
+be used as acceptance evidence for this candidate.
 
-The POSIX installer contract and platform-neutral Python behaviors pass on
-Windows. Before a macOS release claim, run on a real macOS host:
-
-```bash
-python3 -m unittest discover -s tests -v
-python3 -m compileall -q scripts tests
-tmp_home="$(mktemp -d)"
-./install.sh --auto --python "$(command -v python3)" --install-root "$tmp_home"
-AGENT_BRIDGE_HOME="$tmp_home/.agent-bridge" \
-AGENT_BRIDGE_CONFIG_HOME="$tmp_home" \
-  "$tmp_home/.local/bin/bridge" --as codex doctor --strict
-```
-
-Also verify a native macOS notification, one MCP client restart, and one
-send/status/claim/done exchange between two installed applications.
-
-## ZCode checklist
-
-- [ ] Inspect `0f9662e..HEAD`.
-- [ ] Run the full test and compile commands.
-- [ ] Confirm ZCode loads `agent-bridge@local` version 1.3.0.
-- [ ] Confirm a task becomes `acknowledged` only after ZCode checks in.
-- [ ] Confirm no existing ZCode enabled-plugin entries are removed.
-- [ ] Record `approve` or `changes` through agent-bridge review.
+Please return either `approve` or actionable `changes`, identifying severity,
+file/line, reproduction, and required evidence. Do not treat macOS source or
+CI-only coverage as a real-machine UI acceptance result.

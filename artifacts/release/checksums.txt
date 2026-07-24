@@ -1,0 +1,8 @@
+# Agent Bridge v2 acceptance input checksums (2026-07-24)
+# These are inputs verified on Windows, not a checksum for a final ZIP.
+# The complete portable ZIP must be assembled and hashed by the aggregate
+# GitHub Actions release job after it obtains the macOS universal2 app.
+
+83C8C88436458C13DDA2755F5EB0BA73F5E85583ED591B756EBD561F9CDB0EB7  bootstrap/agent_bridge-2.0.0-py3-none-any.whl
+C0480D0F10DDF549E8F70B11094DBC29690E63202DE24F33B326E1C20661B22A  src/agent_bridge/native/windows-x86_64/agent-bridge-windows-notify.exe
+C0480D0F10DDF549E8F70B11094DBC29690E63202DE24F33B326E1C20661B22A  native/windows-notify/dist/windows-x86_64/agent-bridge-windows-notify.exe
