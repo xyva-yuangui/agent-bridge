@@ -2,6 +2,14 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
+<p align="center">
+  <img src="https://img.shields.io/badge/version-2.0.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/python-3.9+-green" alt="python">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="platform">
+  <img src="https://img.shields.io/badge/license-Apache--2.0-brightgreen" alt="license">
+  <img src="https://img.shields.io/badge/tests-252-success" alt="tests">
+</p>
+
 Agent Bridge is a local-first task board for Codex, Claude Code, Reasonix, and
 ZCode. It uses Python's standard library, keeps data under `~/.agent-bridge`,
 and has no resident daemon, network listener, cloud synchronization, or default

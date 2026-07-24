@@ -2,6 +2,25 @@
 
 All notable changes to agent-bridge will be documented in this file.
 
+## [2.0.0] — 2026-07-24
+
+### Major rewrite
+- **252 tests** (47 test files) — full lifecycle, concurrency, TUI, store, delivery, installers
+- **SQLite durable storage** — replaces JSON file with ACID transactions
+- **TUI** — interactive terminal UI for board management
+- **Portable ZIP** — single distributable artifact with bootstrap wheel
+- **GitHub CI/CD** — automated testing and release workflows (.github/workflows/)
+- **Signed releases** — macOS universal2 + Windows AuthentiCode
+- **Integration manifests** — structured configs for Codex, Claude, Reasonix, ZCode
+- **Migration guide** — v1 to v2 upgrade path (docs/installation/migration-v1.md)
+- **Security policy** — SECURITY.md
+- **Architecture docs** — docs/architecture/v2.md
+
+### Stats
+- 185 files changed, 18,599 insertions, 92 commits
+- 252 tests (251 pass, 1 skip on Windows)
+- License changed from MIT to Apache-2.0
+
 ## [1.3.0] — 2026-07-23
 
 ### Added
