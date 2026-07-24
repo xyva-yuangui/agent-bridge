@@ -73,9 +73,21 @@ class InstallerContractTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "Windows runtime installation test")
 class WindowsInstallerRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def isolated_subprocess_env():
+        environment = os.environ.copy()
+        for name in tuple(environment):
+            if name.upper().startswith("AGENT_BRIDGE_") or name.upper() in (
+                "PYTHONHOME",
+                "PYTHONPATH",
+            ):
+                environment.pop(name, None)
+        return environment
+
     def test_auto_install_and_uninstall_in_isolated_home(self):
         powershell = shutil.which("powershell.exe")
         self.assertIsNotNone(powershell)
+        isolated_env = self.isolated_subprocess_env()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "AGENTS.md").write_text("", encoding="utf-8")
@@ -104,6 +116,7 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=isolated_env,
                 timeout=60,
             )
             self.assertEqual(install.returncode, 0, install.stdout + install.stderr)
@@ -150,11 +163,7 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                env={
-                    key: value
-                    for key, value in os.environ.items()
-                    if key not in ("PYTHONPATH", "AGENT_BRIDGE_HOME")
-                },
+                env=isolated_env,
                 timeout=30,
             )
             self.assertEqual(
@@ -183,6 +192,7 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=isolated_env,
                 timeout=15,
             )
             self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
@@ -242,6 +252,7 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=isolated_env,
                 timeout=60,
             )
             self.assertEqual(
@@ -287,6 +298,7 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=isolated_env,
                 timeout=60,
             )
             self.assertEqual(
@@ -311,6 +323,7 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=isolated_env,
                 timeout=15,
             )
             self.assertEqual(user_helper.stdout.strip(), "")
@@ -329,6 +342,7 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=isolated_env,
                 timeout=15,
             )
             self.assertFalse(json.loads(unregistered.stdout)["ok"])
@@ -358,11 +372,7 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
     def test_notifier_ownership_checks_fail_closed_without_mutation(self):
         powershell = shutil.which("powershell.exe")
         self.assertIsNotNone(powershell)
-        clean_env = {
-            key: value
-            for key, value in os.environ.items()
-            if key not in ("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", "PYTHONPATH")
-        }
+        clean_env = self.isolated_subprocess_env()
         with tempfile.TemporaryDirectory() as first_tmp:
             first = Path(first_tmp)
             conflict = first / "unrelated-notifier.exe"
