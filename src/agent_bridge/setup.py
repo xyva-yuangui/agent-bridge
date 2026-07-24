@@ -170,6 +170,8 @@ def _remove_windows_native(home: Path) -> None:
     result = WindowsNotifier(helper).unregister()
     if not result.ok: raise RuntimeError("native notification unregistration failed: " + result.detail)
     helper.unlink(); receipt.unlink(); os.environ.pop("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", None)
+    if helper.parent.is_dir() and not any(helper.parent.iterdir()):
+        helper.parent.rmdir()
     import winreg
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
@@ -246,10 +248,15 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
             configured = os.environ.get("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", "")
             if configured and Path(configured).is_file() and Path(configured).absolute() != expected.absolute():
                 raise RuntimeError("refusing to overwrite an unrelated Windows notifier environment value")
-        inverses.append(("runtime", lambda: _remove_runtime(plan.home)))
+        runtime_was_present = _runtime_receipt(plan.home).exists()
+        if not runtime_was_present:
+            inverses.append(("runtime", lambda: _remove_runtime(plan.home)))
         _install_runtime(plan.home)
         _install_profiles(plan.home, plan.scope)
-        inverses.append(("native", lambda: _remove_windows_native(plan.home)))
+        native_helper, native_receipt = _native_paths(plan.home)
+        native_was_present = native_helper.exists() or native_receipt.exists()
+        if not native_was_present:
+            inverses.append(("native", lambda: _remove_windows_native(plan.home)))
         _install_windows_native(plan.home)
         for mutation in plan.mutations:
             adapter = next(
