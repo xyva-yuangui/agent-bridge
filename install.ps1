@@ -39,7 +39,7 @@ $pythonPath = Resolve-Python -Requested $Python
 # user-site packages are disabled.  Each argument is passed as one array item.
 $sourcePackage = Join-Path $sourceRoot "src"
 $env:PYTHONPATH = if ($env:PYTHONPATH) { "$sourcePackage;$env:PYTHONPATH" } else { $sourcePackage }
-& $pythonPath -m pip install --disable-pip-version-check --no-deps --user $sourceRoot
+& $pythonPath -m pip install --disable-pip-version-check --no-build-isolation --no-deps --user $sourceRoot
 if ($LASTEXITCODE -ne 0) { Write-Warning "Package installation failed; using this checkout via PYTHONPATH." }
 
 $bridgeArgs = @("-m", "agent_bridge.cli")

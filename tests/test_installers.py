@@ -267,7 +267,7 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
                 )
                 managed = next(item for item in reasonix["plugins"] if item["name"] == "agent-bridge")
                 self.assertEqual(managed["command"], sys.executable)
-                self.assertIn("agent_bridge.adapters.integration", managed["args"])
+                self.assertTrue(any("agent_bridge.adapters.integration" in argument for argument in managed["args"]))
                 tomllib.loads(
                     (root / ".codex" / "config.toml").read_text(encoding="utf-8")
                 )

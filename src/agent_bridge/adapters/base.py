@@ -148,7 +148,11 @@ class HostAdapter(abc.ABC):
     relative_marker_path: Tuple[str, ...]
 
     def __init__(self, home: Path) -> None:
-        self.home = Path(home)
+        # Windows may hand the bootstrap a long profile path while a caller
+        # receives its 8.3 spelling.  Persist one resolved spelling so the
+        # receipt, managed configuration, and health check describe the same
+        # real host registration.
+        self.home = Path(home).resolve(strict=False)
 
     @property
     def config_path(self) -> Path:
@@ -485,10 +489,7 @@ class ManagedTomlAdapter(HostAdapter):
         return "# >>> agent-bridge:{0} >>>\n{1}\n# <<< agent-bridge:{0} <<<\n".format(self.name, "\n".join(lines))
 
     def _entrypoint(self) -> list:
-        return [
-            sys.executable, "-m", "agent_bridge.adapters.integration", "serve", "--host", self.name,
-            "--home", str(self.home), "--data-root", str(self.home / ".agent-bridge"),
-        ]
+        return _integration_entrypoint(self.name, self.home)
 
 
 class ManagedJsonAdapter(HostAdapter):
@@ -532,13 +533,30 @@ class ManagedJsonAdapter(HostAdapter):
         }
 
     def _entrypoint(self) -> list:
-        return [
-            sys.executable, "-m", "agent_bridge.adapters.integration", "serve", "--host", self.name,
-            "--home", str(self.home), "--data-root", str(self.home / ".agent-bridge"),
-        ]
+        return _integration_entrypoint(self.name, self.home)
 
     def _remove_legacy_managed(self, root: dict) -> None:
         """Remove pre-v2 data owned by a host integration."""
+
+
+def _integration_entrypoint(host: str, home: Path) -> list:
+    """Return a source-independent argv for a configured host consumer.
+
+    The bootstrap copies a minimal runtime before it edits host configuration.
+    Referencing that owned runtime means an integration still starts when pip
+    cannot build a source checkout (for example, on an offline workstation).
+    The ``-c`` program is fixed text; paths remain distinct argv values.
+    """
+    runtime = home / ".agent-bridge" / "skill" / "runtime"
+    program = (
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "from agent_bridge.adapters.integration import main; "
+        "raise SystemExit(main(sys.argv[2:]))"
+    )
+    return [
+        sys.executable, "-c", program, str(runtime), "serve", "--host", host,
+        "--home", str(home), "--data-root", str(home / ".agent-bridge"),
+    ]
 
 
 def _read_json_object(path: Path) -> dict:

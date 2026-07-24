@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --upgrade pip build
+      - run: python -m pip install .
+      - run: python -m unittest discover -s tests -v
+      - run: python -m compileall -q src scripts tests
+      - name: Build distributions
+        run: python -m build
+      - name: Verify installed entry points outside source imports
+        shell: bash
+        run: |
+          tmp="$(mktemp -d)"
+          cd "$tmp"
+          bridge --version
+          bridge --help
+          bridge doctor || test $? -eq 0
+          bridge setup --dry-run --auto
+
+  windows-notifier:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locked Rust release build and size gate
+        shell: pwsh
+        run: |
+          cargo build --manifest-path native/windows-notify/Cargo.toml --locked --release
+          $helper = Get-Item native/windows-notify/target/release/agent-bridge-windows-notify.exe
+          if ($helper.Length -gt 5MB) { throw "Windows notifier exceeds 5 MiB" }
+      - name: Windows protocol and installer tests
+        run: python -m unittest tests.platform.test_windows_notify_protocol tests.test_installers -v
+
+  macos-notifier:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Universal2 Swift helper build and size gate
+        run: native/macos-notify/scripts/build-universal2.sh
+      - name: Verify universal architectures
+        run: |
+          file native/macos-notify/dist/AgentBridgeNotifier.app/Contents/MacOS/AgentBridgeNotifier
+          test "$(stat -f%z native/macos-notify/dist/AgentBridgeNotifier.app/Contents/MacOS/AgentBridgeNotifier)" -le 5242880
+      - name: macOS source and protocol tests
+        run: python3 -m unittest tests.platform.test_macos_notify_protocol tests.platform.test_macos_notify_source -v

@@ -386,7 +386,10 @@ def build_parser() -> argparse.ArgumentParser:
     export = command("export"); export.add_argument("destination")
     dispatch = command("dispatch"); dispatch.add_argument("--burst", action="store_true")
     setup = command("setup", help="install, repair, or inspect owned host integrations")
-    setup.add_argument("action", nargs="?", choices=("status",), default="apply")
+    # ``argparse`` validates defaults against ``choices``.  Keep the normal
+    # no-positional setup invocation representable instead of using a sentinel
+    # which the parser rejects before lifecycle handling gets a chance to run.
+    setup.add_argument("action", nargs="?", choices=("status",), default=None)
     setup.add_argument("--dry-run", action="store_true")
     setup.add_argument("--auto", action="store_true", help="install detected hosts")
     setup.add_argument("--agent", choices=("codex", "claude", "reasonix", "zcode"))

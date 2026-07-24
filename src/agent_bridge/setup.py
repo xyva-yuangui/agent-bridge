@@ -30,7 +30,9 @@ from .path_ownership import (
 
 
 def _home(value: Optional[Path]) -> Path:
-    return (Path.home() if value is None else Path(value)).expanduser().absolute()
+    # Canonicalize the user root once.  In particular, a Windows 8.3 spelling
+    # and its long spelling must identify the same owned runtime receipt.
+    return (Path.home() if value is None else Path(value)).expanduser().resolve(strict=False)
 
 
 def _data_root(home: Path) -> Path:
@@ -129,7 +131,16 @@ def _install_runtime(home: Path) -> None:
     backup = data / (".skill-backup-" + next(tempfile._get_candidate_names()))
     try:
         shutil.copytree(root / "scripts", stage / "scripts")
-        shutil.copytree(root / "src" / "agent_bridge", stage / "runtime" / "agent_bridge")
+        # A repair can be launched through the copied runtime itself.  In
+        # that case ``root`` is the owned ``skill`` directory rather than a
+        # source checkout, so retain the same package instead of requiring
+        # PYTHONPATH or a successful pip install.
+        source_package = root / "src" / "agent_bridge"
+        if not source_package.is_dir():
+            source_package = root / "runtime" / "agent_bridge"
+        if not source_package.is_dir():
+            raise RuntimeError("Agent Bridge runtime source package is missing")
+        shutil.copytree(source_package, stage / "runtime" / "agent_bridge")
         for name in ("SKILL.md", "README.md", "README.zh-CN.md"):
             if (root / name).is_file(): shutil.copy2(root / name, stage / name)
         if skill.exists(): os.replace(skill, backup)
@@ -167,7 +178,6 @@ def _native_paths(home: Path) -> Tuple[Path, Path]:
 def _install_windows_native(home: Path) -> None:
     if os.name != "nt": return
     source = _source_root() / "native" / "windows-notify" / "dist" / "windows-x86_64" / "agent-bridge-windows-notify.exe"
-    if not source.is_file(): raise RuntimeError("Windows notifier release helper is missing")
     helper, receipt = _native_paths(home)
     env_receipt = helper.parent / "environment-receipt.json"
     configured = os.environ.get("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", "")
@@ -178,7 +188,11 @@ def _install_windows_native(home: Path) -> None:
         except (OSError, ValueError) as error: raise RuntimeError("invalid native helper ownership receipt") from error
         if old.get("owner") != "agent-bridge.windows-notify" or old.get("helper_path") != str(helper) or old.get("sha256", "").lower() != hashlib.sha256(helper.read_bytes()).hexdigest():
             raise RuntimeError("Windows notifier ownership hash mismatch")
-    helper.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(source, helper)
+    if source.is_file():
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, helper)
+    elif not helper.is_file():
+        raise RuntimeError("Windows notifier release helper is missing")
     _write_owned_json(receipt, {"schema": 1, "owner": "agent-bridge.windows-notify", "helper_path": str(helper), "sha256": hashlib.sha256(helper.read_bytes()).hexdigest()})
     activation = [sys.executable, str(_data_root(home) / "skill" / "scripts" / "bridge.py"), "--data-root", str(_data_root(home))]
     result = WindowsNotifier(helper).register(activation)
@@ -188,6 +202,17 @@ def _install_windows_native(home: Path) -> None:
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
         try: prior_user, _ = winreg.QueryValueEx(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER")
         except FileNotFoundError: prior_user = None
+        # A repair sees the value that the first setup itself registered.  Its
+        # receipt must retain the original environment state so uninstall does
+        # not restore Agent Bridge's own stale helper path.
+        if env_receipt.is_file():
+            try:
+                existing_environment = json.loads(env_receipt.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                existing_environment = {}
+            if existing_environment.get("owner") == OWNER and existing_environment.get("helper") == str(helper):
+                configured = existing_environment.get("process")
+                prior_user = existing_environment.get("user")
         winreg.SetValueEx(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", 0, winreg.REG_SZ, str(helper))
     _write_owned_json(env_receipt, {"owner": OWNER, "helper": str(helper), "process": configured or None, "user": prior_user})
 

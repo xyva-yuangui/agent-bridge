@@ -1,0 +1,13 @@
+include LICENSE
+include SECURITY.md
+include CONTRIBUTING.md
+include README.md
+include README.zh-CN.md
+include SKILL.md
+recursive-include docs *.md
+recursive-include integrations *.json *.py
+recursive-include native Cargo.toml Cargo.lock Package.swift Info.plist *.swift *.rs *.sh *.ps1 *.md *.txt *.entitlements *.json
+recursive-include scripts *.py *.ps1
+recursive-include tests *.py *.ps1 *.sh *.json *.toml
+prune native/windows-notify/target
+prune native/macos-notify/.build

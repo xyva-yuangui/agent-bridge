@@ -1,0 +1,101 @@
+name: Release artifacts
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vX.Y.Z tag to verify
+        required: true
+        type: string
+      sign:
+        description: Sign/notarize when required credentials are configured
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  attestations: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      REQUESTED_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+      SIGNING_REQUESTED: ${{ inputs.sign || 'false' }}
+      AGENT_BRIDGE_CODESIGN_IDENTITY: ${{ secrets.AGENT_BRIDGE_CODESIGN_IDENTITY }}
+      AGENT_BRIDGE_NOTARY_PROFILE: ${{ secrets.AGENT_BRIDGE_NOTARY_PROFILE }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Require a clean annotated release tag
+        shell: bash
+        run: |
+          test -n "$REQUESTED_TAG"
+          git describe --exact-match --tags HEAD | grep -Fx "$REQUESTED_TAG"
+          test -z "$(git status --porcelain)"
+          test "${REQUESTED_TAG#v}" = "$(python -c 'from pathlib import Path; import re; print(re.search(r"version = \"([^\"]+)\"", Path("pyproject.toml").read_text()).group(1))')"
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build
+      - name: Test before artifacts
+        run: |
+          python -m pip install .
+          python -m unittest discover -s tests -v
+          python -m compileall -q src scripts tests
+          native/macos-notify/scripts/build-universal2.sh
+      - name: Build wheel and sdist
+        run: python -m build
+      - name: Create portable source archive
+        shell: bash
+        run: |
+          mkdir -p release
+          git archive --format=zip --prefix="agent-bridge-${REQUESTED_TAG#v}/" HEAD > "release/agent-bridge-${REQUESTED_TAG#v}-portable.zip"
+          cp dist/* release/
+      - name: Generate SPDX SBOM and checksums
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          version = os.environ["REQUESTED_TAG"].removeprefix("v")
+          sbom = {"spdxVersion": "SPDX-2.3", "dataLicense": "CC0-1.0", "SPDXID": "SPDXRef-DOCUMENT", "name": "agent-bridge-" + version, "documentNamespace": "https://agent-bridge.invalid/spdx/" + version, "packages": [{"SPDXID": "SPDXRef-AgentBridge", "name": "agent-bridge", "versionInfo": version, "downloadLocation": "NOASSERTION", "licenseConcluded": "Apache-2.0", "licenseDeclared": "Apache-2.0", "filesAnalyzed": False}]}
+          Path("release/agent-bridge.spdx.json").write_text(json.dumps(sbom, indent=2) + "\n", encoding="utf-8")
+          PY
+          (cd release && shasum -a 256 * > SHA256SUMS.txt)
+      - name: Install and inspect release artifacts
+        shell: bash
+        run: |
+          python -m venv /tmp/agent-bridge-release-venv
+          /tmp/agent-bridge-release-venv/bin/pip install --force-reinstall dist/*.whl
+          cd /tmp
+          /tmp/agent-bridge-release-venv/bin/bridge --version
+          /tmp/agent-bridge-release-venv/bin/bridge --help
+          /tmp/agent-bridge-release-venv/bin/bridge doctor
+          /tmp/agent-bridge-release-venv/bin/bridge setup --dry-run --auto
+          unzip -l "$GITHUB_WORKSPACE"/dist/*.whl | grep -E 'integrations/(codex|claude|reasonix|zcode)/manifest.json'
+          (cd "$GITHUB_WORKSPACE"/release && shasum -a 256 -c SHA256SUMS.txt)
+      - name: Sign and notarize only when explicitly requested
+        shell: bash
+        run: |
+          if [ "$SIGNING_REQUESTED" = true ]; then
+            test -n "$AGENT_BRIDGE_CODESIGN_IDENTITY"
+            test -n "$AGENT_BRIDGE_NOTARY_PROFILE"
+            native/macos-notify/scripts/sign-and-notarize.sh
+            codesign --verify --deep --strict native/macos-notify/dist/AgentBridgeNotifier.app
+            spctl --assess --type execute --verbose=4 native/macos-notify/dist/AgentBridgeNotifier.app
+          fi
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: release/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-bridge-${{ env.REQUESTED_TAG }}
+          path: release/*

@@ -1,0 +1,6 @@
+{
+  "name": "agent-bridge",
+  "version": "1.0.0",
+  "description": "Agent Bridge stdio session-card consumer",
+  "entry": "plugin.py"
+}

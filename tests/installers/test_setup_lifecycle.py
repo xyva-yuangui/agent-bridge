@@ -59,7 +59,7 @@ class SetupLifecycleTests(unittest.TestCase):
         data.parent.mkdir()
         data.write_text("owned", encoding="utf-8")
         report = uninstall(home=self.home, purge_data=True, path_backend=self.path_backend)
-        self.assertEqual(str(self.home / ".agent-bridge"), report.purged_data_root)
+        self.assertEqual(str(self.home.resolve(strict=False) / ".agent-bridge"), report.purged_data_root)
         self.assertFalse(data.parent.exists())
 
     def test_uninstall_does_not_rewrite_an_unowned_host_config(self) -> None:
@@ -74,6 +74,31 @@ class SetupLifecycleTests(unittest.TestCase):
         report = repair(home=self.home, agent="codex", path_backend=self.path_backend)
         self.assertEqual((), report.applied_hosts)
         self.assertFalse((self.home / ".codex" / "config.toml").exists())
+
+    def test_auto_skips_absent_hosts_and_explicit_agent_has_exact_scope(self) -> None:
+        absent_home = self.home.parent / "absent-hosts"
+        absent_home.mkdir()
+
+        # The developer machine may genuinely have Codex on PATH; fixture
+        # absence must still exercise the no-host branch deterministically.
+        with patch("agent_bridge.setup._host_application_present", return_value=False):
+            auto = apply_setup_plan(build_setup_plan(home=absent_home, auto=True), path_backend=self.path_backend)
+        self.assertEqual((), auto.planned_hosts)
+        self.assertEqual((), auto.applied_hosts)
+        absent_status = {item["host"]: item for item in status(home=absent_home, path_backend=self.path_backend)["hosts"]}
+        for host in ("codex", "claude", "reasonix", "zcode"):
+            self.assertFalse(absent_status[host]["installed"])
+            self.assertEqual("terminal_fallback", absent_status[host]["capabilities"]["surface"])
+            self.assertIn("unavailable", absent_status[host]["degradation"])
+
+        explicit = apply_setup_plan(
+            build_setup_plan(home=absent_home, agent="reasonix"), path_backend=self.path_backend,
+        )
+        self.assertEqual(("reasonix",), explicit.planned_hosts)
+        self.assertEqual(("reasonix",), explicit.applied_hosts)
+        self.assertTrue((absent_home / ".agent-bridge" / "agents" / "reasonix" / "agent.json").is_file())
+        for host in ("codex", "claude", "zcode"):
+            self.assertFalse((absent_home / ".agent-bridge" / "agents" / host / "agent.json").exists())
 
     def test_runtime_failure_rolls_back_owned_runtime(self) -> None:
         with patch("agent_bridge.setup._install_windows_native", side_effect=RuntimeError("native boom")):

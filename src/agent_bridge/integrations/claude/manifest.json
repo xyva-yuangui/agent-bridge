@@ -1,0 +1,13 @@
+{
+  "host": "claude",
+  "integration_version": "1.0.0",
+  "protocol_version": 2,
+  "surface": "session_card",
+  "can_ack": true,
+  "can_open_terminal": false,
+  "can_receive_context": true,
+  "mechanism": "hook",
+  "session_card": {"inbox": ".agent-bridge/session-cards/claude", "atomic": true},
+  "entrypoint": ["{python}", "-m", "agent_bridge.adapters.integration", "serve", "--host", "claude", "--home", "{home}", "--data-root", "{home}/.agent-bridge"],
+  "acknowledge": {"operation": "acknowledge", "required": ["host_identity", "task_id", "integration_version", "protocol_version", "delivery_token"]}
+}

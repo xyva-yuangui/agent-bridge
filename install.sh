@@ -46,7 +46,7 @@ resolve_python() {
 python_path="$(resolve_python)"
 source_package="${source_root}/src"
 export PYTHONPATH="${source_package}${PYTHONPATH:+:${PYTHONPATH}}"
-if ! "$python_path" -m pip install --disable-pip-version-check --no-deps --user "$source_root"; then
+if ! "$python_path" -m pip install --disable-pip-version-check --no-build-isolation --no-deps --user "$source_root"; then
   echo "Package installation failed; using this checkout via PYTHONPATH." >&2
 fi
 

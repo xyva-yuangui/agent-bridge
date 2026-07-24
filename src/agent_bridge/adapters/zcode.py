@@ -52,12 +52,20 @@ class ZCodeAdapter(ManagedJsonAdapter):
             plugins_before = root_before.get("plugins", {}) if isinstance(root_before.get("plugins", {}), dict) else {}
             enabled_before = plugins_before.get("enabledPlugins", {}) if isinstance(plugins_before.get("enabledPlugins", {}), dict) else {}
             local_before = plugins_before.get("localPlugins", {}) if isinstance(plugins_before.get("localPlugins", {}), dict) else {}
-            ownership = {"enabled_present": "agent-bridge@local" in enabled_before, "enabled": enabled_before.get("agent-bridge@local"), "local_present": "agent-bridge@local" in local_before, "local": local_before.get("agent-bridge@local"), "bundle_existed": False}
+            ownership = {
+                "enabled_present": "agent-bridge@local" in enabled_before,
+                "enabled": enabled_before.get("agent-bridge@local"),
+                "enabled_container_present": "enabledPlugins" in plugins_before,
+                "local_present": "agent-bridge@local" in local_before,
+                "local": local_before.get("agent-bridge@local"),
+                "local_container_present": "localPlugins" in plugins_before,
+                "bundle_existed": False,
+            }
             self.ownership_path.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write(self.ownership_path, json.dumps(ownership, sort_keys=True) + "\n")
         self._assert_contained(self.plugin_bundle_path)
         self.plugin_bundle_path.mkdir(parents=True, exist_ok=True)
-        source = Path(__file__).resolve().parents[3] / "integrations" / "zcode" / "plugin.json"
+        source = Path(__file__).resolve().parents[1] / "integrations" / "zcode" / "plugin.json"
         shutil.copyfile(source, self.plugin_bundle_path / "plugin.json")
         plugin = json.loads((self.plugin_bundle_path / "plugin.json").read_text(encoding="utf-8"))
         plugin["command"] = sys.executable
@@ -122,6 +130,8 @@ class ZCodeAdapter(ManagedJsonAdapter):
                             enabled["agent-bridge@local"] = ownership.get("enabled")
                         else:
                             enabled.pop("agent-bridge@local", None)
+                    if not ownership.get("enabled_container_present") and not enabled:
+                        plugins.pop("enabledPlugins", None)
                 local = plugins.get("localPlugins")
                 if isinstance(local, dict):
                     if local.get("agent-bridge@local") == str(self.plugin_bundle_path):
@@ -129,6 +139,8 @@ class ZCodeAdapter(ManagedJsonAdapter):
                             local["agent-bridge@local"] = ownership.get("local")
                         else:
                             local.pop("agent-bridge@local", None)
+                    if not ownership.get("local_container_present") and not local:
+                        plugins.pop("localPlugins", None)
             if root.get("agent_bridge") == historical:
                 root.pop("agent_bridge", None)
         _optimistic_json_update(self.config_path, update)

@@ -2,15 +2,28 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-agent-bridge gives Codex, Claude Code, Reasonix, and ZCode one local task
-board. It uses only Python's standard library and keeps data under
-`~/.agent-bridge`.
+Agent Bridge is a local-first task board for Codex, Claude Code, Reasonix, and
+ZCode. It uses Python's standard library, keeps data under `~/.agent-bridge`,
+and has no resident daemon, network listener, cloud synchronization, or default
+telemetry.
 
-## Requirements
+[License](LICENSE) (Apache-2.0) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) ·
+[Architecture](docs/architecture/v2.md) · [Windows](docs/installation/windows.md) ·
+[macOS](docs/installation/macos.md) · [Migration](docs/installation/migration-v1.md) ·
+[Release checklist](docs/release/checklist.md)
 
+## Requirements and support boundary
+
+- Python 3.9+ (release CI covers Python 3.9–3.13)
 - Windows 10/11 with PowerShell 5.1+, or macOS/Linux with Bash
-- Python 3.9+
-- One or more supported agent applications
+- A local filesystem; network shares and cloud-sync folders are unsupported
+
+The four integrations ship as versioned session-card templates. `bridge setup
+status` reports the actual capability for Codex, Claude Code, Reasonix, or
+ZCode; when a host is unavailable, use the terminal fallback. Windows source
+and CI checks exist. macOS source/CI checks do not prove notification
+permission, actions, signing, Gatekeeper, notarization, or Intel/Apple Silicon
+behavior: those remain real-machine release requirements.
 
 ## Install
 
@@ -19,7 +32,7 @@ Windows PowerShell:
 ```powershell
 .\install.ps1 -Auto
 .\install.ps1 -Agent codex -As codex -Python C:\path\to\python.exe
-.\install.ps1 -Auto -Uninstall
+bridge setup status
 ```
 
 macOS or Linux:
@@ -27,27 +40,14 @@ macOS or Linux:
 ```bash
 ./install.sh --auto
 ./install.sh --agent codex --as codex --python /usr/bin/python3
-./install.sh --auto --uninstall
+bridge setup status
 ```
 
-Both installers are thin, separately-quoted bootstraps: they install the
-package and invoke `bridge setup`. The Python lifecycle owns the compatibility
-runtime, launcher, detected host integrations, profiles, and receipt-verified
-native notification helper. `bridge uninstall` preserves task data unless
-`--purge-data` is explicitly requested and names the exact data root first.
+The installers configure detected hosts conservatively. They create a
+receipted launcher and only their own PATH entry/configuration. Restart hosts
+after setup, then run `bridge doctor --strict`.
 
-Setup also makes the launcher discoverable conservatively: Windows appends only
-the exact absent launcher directory to `HKCU\Environment\Path` (preserving an
-expandable registry value), while macOS/Linux add a bounded managed block to
-`~/.profile`. The receipt records only that entry—not a whole PATH snapshot—so
-repair is idempotent and uninstall removes only an entry Agent Bridge added.
-`bridge setup status` reports a launcher-path degradation when the launcher is
-not discoverable.
-
-The macOS installer and platform-neutral tests are included, but a release
-should still run the acceptance commands below on a real macOS host.
-
-## Typical workflow
+## Workflow
 
 ```text
 send -> pending -> claim -> working -> done -> completed
@@ -58,84 +58,61 @@ review_requested -> approve -> completed
 review_requested -> changes -> changes_requested -> claim -> working
 ```
 
-Only the assignee can claim, ask, request review, or finish a task. Only the
-original sender can answer questions and issue review verdicts.
-
 ```bash
-bridge send --to reasonix --subject "Review the patch" --body "Run the tests"
+bridge send --to reasonix --subject "Review the patch" --body "Run tests"
 bridge inbox
-bridge show <task-id>
 bridge claim <task-id>
-bridge question <task-id> --body "Which compatibility target?"
+bridge question <task-id> --body "Which target?"
 bridge answer <task-id> --body "Python 3.9+"
 bridge review <task-id>
 bridge review <task-id> --verdict approve --body "Accepted"
 bridge done <task-id> --result "Implemented and tested"
 ```
 
-## Delivery semantics
+Only the assignee can claim, ask, request review, or finish a task; only the
+sender can answer or give a review verdict.
 
-Every notification attempt is observable in `task.delivery.status`:
+## Delivery honesty
 
-- `queued`: stored and waiting for a delivery attempt.
-- `dispatching`: a dispatcher currently owns the attempt.
-- `os_posted` / `plugin_delivered`: a delivery channel accepted the notification;
-  the task is not acknowledged yet.
-- `viewed`: the target opened the delivery surface.
-- `launch_started`: a wake process started; it is not proof the agent read it.
-- `agent_acknowledged`: the target checked `status` or `inbox`.
-- `claimed`: the assignee claimed the task.
-- `retry_wait`: a failed attempt is scheduled for retry.
-- `failed`: the delivery attempt itself failed.
+Each delivery attempt has one observable status:
 
-`bridge send` never reports a launched process as an acknowledgment. Unknown
-targets are rejected when agent profiles exist. On Windows, notifications use
-the built-in tray API and do not require BurntToast.
+- `queued`, `dispatching`, `os_posted`, `plugin_delivered`, `viewed`
+- `launch_started`, `agent_acknowledged`, `claimed`, `retry_wait`, `failed`
 
-## Core commands
+`os_posted`, `plugin_delivered`, and `launch_started` are not acknowledgements.
+An acknowledgement requires the target to use `status` or `inbox`; claiming is
+stronger evidence. Notification failure does not erase a stored task.
 
-```text
-bridge status [--oneliner]       bridge inbox
-bridge send --to NAME --subject TEXT [--body TEXT]
-bridge claim ID                  bridge done ID --result TEXT
-bridge show ID                   bridge board
-bridge question ID --body TEXT   bridge answer ID --body TEXT
-bridge review ID [--verdict approve|changes] [--body TEXT]
-bridge agents                    bridge activity
-bridge project init|list|show    bridge context --show|--add TEXT
-bridge clean --days N|--all      bridge doctor [--strict]
-```
-
-The MCP server exposes the same non-interactive workflows.
-
-## Troubleshooting
-
-Run:
+## Operations
 
 ```bash
-bridge doctor --strict
+bridge --version
+bridge --help
 bridge status --oneliner
-bridge agents
+bridge doctor --strict
+bridge setup --repair
+bridge setup --dry-run
+bridge tui
+bridge migrate path/to/v1-board.json
+bridge export backup.json
+bridge uninstall
+bridge uninstall --purge-data
 ```
 
-If a task remains `launch_started`, the application was started but has not
-checked in yet. Restart the target application, verify its hook/MCP config, and
-run `bridge inbox`. Configuration paths are native to the host OS, so Windows
-configs never depend on `/c/...` paths.
+`bridge uninstall` preserves task data unless `--purge-data` is explicitly
+requested and the command first prints the exact data root. When recovery is
+needed, run `bridge setup status`, `bridge doctor`, and `bridge inbox`; there
+is no daemon to restart.
 
-## Test
-
-From the repository root:
+## Development and release verification
 
 ```bash
 python -m unittest discover -s tests -v
-python -m compileall -q scripts tests
+python -m compileall -q src scripts tests
+python -m build
 ```
 
-Windows runtime coverage includes isolated install/reinstall/uninstall,
-dependency-free system notification, GBK output, MCP calls, state transitions,
-and 40-process concurrent writes. The Windows source installer uses the tracked,
-hash-gated native helper in `native/windows-notify/dist`, copies the Python
-package into its owned runtime, and removes only receipt-verified native files
-during uninstall. On macOS, run the same commands plus an
-isolated `./install.sh --auto --install-root <temp-dir>` smoke test.
+Build output includes a wheel and sdist. The release workflow additionally
+creates a portable archive, SHA-256 checksums, and an SPDX SBOM. See the
+[release checklist](docs/release/checklist.md) for real-machine native-helper,
+signing, notarization, and artifact-install verification.
