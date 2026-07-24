@@ -8,6 +8,7 @@ import os
 import json
 import hashlib
 import tempfile
+import shutil as _which_shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -54,6 +55,14 @@ def _select_adapters(home: Path, agent: Optional[str]) -> Tuple[HostAdapter, ...
     if agent:
         return (adapter_for(canonical_host_name(agent), home),)
     return tuple(adapter_type(home) for adapter_type in ADAPTER_TYPES)
+
+
+def _host_application_present(adapter: HostAdapter) -> bool:
+    """Probe host-owned config/executable state, never our integration receipt."""
+    names = (adapter.name, adapter.name + "-cli")
+    return adapter._valid_installation_marker() or adapter.config_path.exists() or any(
+        _which_shutil.which(name) is not None for name in names
+    )
 
 
 def _owns_integration(adapter: HostAdapter) -> bool:
@@ -185,7 +194,7 @@ def build_setup_plan(*, home: Optional[Path] = None, auto: bool = False, agent: 
     """Create a no-write plan for currently detected hosts and an optional scope."""
     user_home = _home(home)
     adapters = _select_adapters(user_home, agent)
-    selected = adapters if auto else tuple(item for item in adapters if item._valid_installation_marker())
+    selected = adapters if agent else tuple(item for item in adapters if _host_application_present(item))
     mutations = []
     for item in selected:
         source = item.config_path.read_bytes() if item.config_path.exists() and item.config_path.is_file() else b""
@@ -232,9 +241,8 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
             backup = backup_file(adapter.config_path, data_root / "backups" / adapter.name)
             if backup is not None:
                 backups.append(str(backup))
-            if not adapter._valid_installation_marker():
-                adapter.marker_path.parent.mkdir(parents=True, exist_ok=True)
-                _write_owned_json(adapter.marker_path, {"host": adapter.name, "mechanisms": [adapter.mechanism]})
+            if not _host_application_present(adapter):
+                raise RuntimeError("requested host application is not detected: {0}".format(adapter.name))
             adapter.install()
             if not adapter.detect().found:
                 raise RuntimeError("post-install validation failed for host: {0}".format(adapter.name))
