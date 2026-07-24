@@ -152,6 +152,7 @@ def _install_windows_native(home: Path) -> None:
     source = _source_root() / "native" / "windows-notify" / "dist" / "windows-x86_64" / "agent-bridge-windows-notify.exe"
     if not source.is_file(): raise RuntimeError("Windows notifier release helper is missing")
     helper, receipt = _native_paths(home)
+    env_receipt = helper.parent / "environment-receipt.json"
     configured = os.environ.get("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", "")
     if configured and Path(configured).is_file() and Path(configured).absolute() != helper.absolute():
         raise RuntimeError("refusing to overwrite an unrelated Windows notifier environment value")
@@ -168,12 +169,16 @@ def _install_windows_native(home: Path) -> None:
     os.environ["AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER"] = str(helper)
     import winreg
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
+        try: prior_user, _ = winreg.QueryValueEx(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER")
+        except FileNotFoundError: prior_user = None
         winreg.SetValueEx(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", 0, winreg.REG_SZ, str(helper))
+    _write_owned_json(env_receipt, {"owner": OWNER, "helper": str(helper), "process": configured or None, "user": prior_user})
 
 
 def _remove_windows_native(home: Path) -> None:
     if os.name != "nt": return
     helper, receipt = _native_paths(home)
+    env_receipt = helper.parent / "environment-receipt.json"
     if not helper.exists() and not receipt.exists(): return
     try: owned = json.loads(receipt.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as error: raise RuntimeError("refusing to remove unowned native helper") from error
@@ -181,15 +186,23 @@ def _remove_windows_native(home: Path) -> None:
         raise RuntimeError("refusing to remove unowned native helper")
     result = WindowsNotifier(helper).unregister()
     if not result.ok: raise RuntimeError("native notification unregistration failed: " + result.detail)
-    helper.unlink(); receipt.unlink(); os.environ.pop("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", None)
+    helper.unlink(); receipt.unlink()
+    try: env_state = json.loads(env_receipt.read_text(encoding="utf-8"))
+    except (OSError, ValueError): env_state = {}
+    if os.environ.get("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER") == str(helper):
+        if env_state.get("process") is None: os.environ.pop("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", None)
+        else: os.environ["AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER"] = str(env_state["process"])
     if helper.parent.is_dir() and not any(helper.parent.iterdir()):
         helper.parent.rmdir()
     import winreg
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
             current, _ = winreg.QueryValueEx(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER")
-            if current == str(helper): winreg.DeleteValue(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER")
+            if current == str(helper):
+                if env_state.get("user") is None: winreg.DeleteValue(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER")
+                else: winreg.SetValueEx(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", 0, winreg.REG_SZ, str(env_state["user"]))
     except FileNotFoundError: pass
+    env_receipt.unlink(missing_ok=True)
 
 
 def _remove_runtime(home: Path) -> None:
