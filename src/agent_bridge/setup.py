@@ -192,13 +192,13 @@ def _remove_runtime(home: Path) -> None:
     if receipt.exists():
         owned = json.loads(receipt.read_text(encoding="utf-8"))
         if owned.get("owner") != OWNER: raise RuntimeError("refusing to remove unowned runtime")
-        for key in ("skill", "launcher"):
-            path = Path(owned[key])
+        expected = {"skill": _data_root(home) / "skill", "launcher": home / ".local" / "bin" / ("bridge.cmd" if os.name == "nt" else "bridge")}
+        for key, path in expected.items():
+            if owned.get(key) != str(path) or path.is_symlink():
+                raise RuntimeError("runtime receipt path escapes owned home")
             if path.is_dir(): shutil.rmtree(path)
             elif path.exists(): path.unlink()
         receipt.unlink()
-    profiles = _data_root(home) / "agents"
-    if profiles.is_dir(): shutil.rmtree(profiles)
 
 
 def build_setup_plan(*, home: Optional[Path] = None, auto: bool = False, agent: Optional[str] = None) -> SetupPlan:
