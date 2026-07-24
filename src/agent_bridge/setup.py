@@ -17,6 +17,16 @@ from .adapters import ADAPTER_TYPES, adapter_for
 from .adapters.base import HostAdapter, canonical_host_name
 from .managed_config import MANAGED_CONFIG_VERSION, OWNER, ManagedMutation, backup_file, content_hash
 from .notifications import WindowsNotifier, windows_notification_capability, macos_notification_capability
+from .path_ownership import (
+    PathBackend,
+    default_path_backend,
+    ensure_launcher_path,
+    has_launcher_path_receipt,
+    launcher_directory,
+    launcher_path_receipt,
+    path_status,
+    remove_launcher_path,
+)
 
 
 def _home(value: Optional[Path]) -> Path:
@@ -289,6 +299,7 @@ def build_setup_plan(*, home: Optional[Path] = None, auto: bool = False, agent: 
         (user_home / ".local" / "bin" / ("bridge.cmd" if os.name == "nt" else "bridge"), "remove owned launcher"),
         (data / "runtime-receipt.json", "remove runtime receipt"),
         (data / "native" / "agent-bridge-windows-notify.exe", "unregister and remove owned native helper"),
+        (launcher_path_receipt(user_home), "remove owned launcher PATH entry"),
     ):
         original = target.read_bytes() if target.is_file() else b""
         effects.append(ManagedMutation(target, OWNER, MANAGED_CONFIG_VERSION, content_hash(original), None, "owned receipt validates", inverse))
@@ -300,7 +311,7 @@ def build_setup_plan(*, home: Optional[Path] = None, auto: bool = False, agent: 
     return SetupPlan(user_home, tuple(mutations), selected, tuple(item.name for item in selected), tuple(effects), agent)
 
 
-def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
+def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False, path_backend: Optional[PathBackend] = None) -> SetupReport:
     """Apply in order; validation failures invoke exact owned inverses in reverse."""
     if not isinstance(plan, SetupPlan):
         raise TypeError("plan must be a SetupPlan")
@@ -311,6 +322,7 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
     backups = []
     rollback = []
     inverses = []
+    backend = default_path_backend() if path_backend is None else path_backend
     try:
         if os.name == "nt":
             expected, ignored_receipt = _native_paths(plan.home)
@@ -321,6 +333,14 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
         if not runtime_was_present:
             inverses.append(("runtime", lambda: _remove_runtime(plan.home)))
         _install_runtime(plan.home)
+        launcher_entry = str(launcher_directory(plan.home))
+        # Register the scoped inverse before touching profile/registry state.
+        # A fresh receipt means this invocation owns any entry it introduces;
+        # an existing receipt belongs to an earlier successful setup and is
+        # deliberately left untouched by a failed repair.
+        if not has_launcher_path_receipt(plan.home, launcher_entry):
+            inverses.append(("launcher PATH", lambda: remove_launcher_path(plan.home, backend=backend)))
+        ensure_launcher_path(plan.home, launcher_directory(plan.home), backend=backend)
         _install_profiles(plan.home, plan.scope)
         native_helper, native_receipt = _native_paths(plan.home)
         native_was_present = native_helper.exists() or native_receipt.exists()
@@ -360,13 +380,13 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
     return SetupReport(plan.scope, tuple(item.name for item in applied), backups=tuple(backups))
 
 
-def repair(*, home: Optional[Path] = None, agent: Optional[str] = None, dry_run: bool = False) -> SetupReport:
+def repair(*, home: Optional[Path] = None, agent: Optional[str] = None, dry_run: bool = False, path_backend: Optional[PathBackend] = None) -> SetupReport:
     """Re-apply the same owned configuration; repeated repair is idempotent."""
     plan = build_setup_plan(home=home, auto=True, agent=agent)
     owned = tuple(item for item in plan.adapters if _owns_integration(item))
     owned_targets = {item.config_path for item in owned}
     repair_plan = SetupPlan(plan.home, tuple(item for item in plan.mutations if item.target in owned_targets), owned, tuple(item.name for item in owned))
-    return apply_setup_plan(repair_plan, dry_run=dry_run)
+    return apply_setup_plan(repair_plan, dry_run=dry_run, path_backend=path_backend)
 
 
 def _notification_status() -> Dict[str, object]:
@@ -374,7 +394,7 @@ def _notification_status() -> Dict[str, object]:
     return {"available": capability.available, "helper_path": capability.helper_path, "detail": capability.detail}
 
 
-def status(*, home: Optional[Path] = None, agent: Optional[str] = None) -> Dict[str, object]:
+def status(*, home: Optional[Path] = None, agent: Optional[str] = None, path_backend: Optional[PathBackend] = None) -> Dict[str, object]:
     user_home = _home(home)
     hosts = []
     for adapter in _select_adapters(user_home, agent):
@@ -393,10 +413,16 @@ def status(*, home: Optional[Path] = None, agent: Optional[str] = None) -> Dict[
             "degradation": health.warning,
             "launch_policy": "terminal-fallback" if not health.capabilities.can_open_terminal else "integrated-terminal",
         })
-    return {"owner": OWNER, "managed_config_version": MANAGED_CONFIG_VERSION, "hosts": hosts, "notifications": _notification_status()}
+    return {
+        "owner": OWNER,
+        "managed_config_version": MANAGED_CONFIG_VERSION,
+        "hosts": hosts,
+        "notifications": _notification_status(),
+        "launcher_path": path_status(user_home, backend=path_backend),
+    }
 
 
-def uninstall(*, home: Optional[Path] = None, agent: Optional[str] = None, purge_data: bool = False, dry_run: bool = False) -> SetupReport:
+def uninstall(*, home: Optional[Path] = None, agent: Optional[str] = None, purge_data: bool = False, dry_run: bool = False, path_backend: Optional[PathBackend] = None) -> SetupReport:
     """Remove owned host integration artifacts; data deletion requires opt-in."""
     user_home = _home(home)
     adapters = _select_adapters(user_home, agent)
@@ -411,6 +437,7 @@ def uninstall(*, home: Optional[Path] = None, agent: Optional[str] = None, purge
         item._remove_installation_artifact()
         removed.append(item.name)
     _remove_windows_native(user_home)
+    remove_launcher_path(user_home, backend=path_backend)
     _remove_runtime(user_home)
     purged = None
     if purge_data:

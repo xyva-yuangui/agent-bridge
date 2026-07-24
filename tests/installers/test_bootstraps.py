@@ -41,6 +41,12 @@ class BootstrapInstallerTests(unittest.TestCase):
             )
             self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
             self.assertIn("agent-bridge:codex", (home / ".codex" / "config.toml").read_text(encoding="utf-8"))
+            removed = subprocess.run(
+                [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "install.ps1"),
+                 "-Agent", "codex", "-Uninstall", "-Python", sys.executable, "-InstallRoot", str(home)],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=90,
+            )
+            self.assertEqual(0, removed.returncode, removed.stdout + removed.stderr)
 
 
 if __name__ == "__main__":

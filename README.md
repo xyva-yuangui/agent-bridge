@@ -36,6 +36,14 @@ runtime, launcher, detected host integrations, profiles, and receipt-verified
 native notification helper. `bridge uninstall` preserves task data unless
 `--purge-data` is explicitly requested and names the exact data root first.
 
+Setup also makes the launcher discoverable conservatively: Windows appends only
+the exact absent launcher directory to `HKCU\Environment\Path` (preserving an
+expandable registry value), while macOS/Linux add a bounded managed block to
+`~/.profile`. The receipt records only that entry—not a whole PATH snapshot—so
+repair is idempotent and uninstall removes only an entry Agent Bridge added.
+`bridge setup status` reports a launcher-path degradation when the launcher is
+not discoverable.
+
 The macOS installer and platform-neutral tests are included, but a release
 should still run the acceptance commands below on a real macOS host.
 
