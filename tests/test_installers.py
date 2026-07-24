@@ -24,32 +24,26 @@ WINDOWS_NOTIFY = ROOT / "scripts" / "notify_windows.ps1"
 
 
 class InstallerContractTests(unittest.TestCase):
-    def test_windows_installer_has_complete_cross_app_contract(self):
+    def test_windows_installer_is_a_safe_setup_bootstrap(self):
         source = WINDOWS_INSTALLER.read_text(encoding="utf-8")
         for token in (
             "Resolve-Python",
-            "Install-Shared",
-            "Register-AgentProfile",
-            "Configure-Codex",
-            "Configure-Claude",
-            "Configure-Reasonix",
-            "Configure-ZCode",
-            "Uninstall-Agent",
             "[switch]$Auto",
             "[string]$Agent",
             "[string]$As",
             "[string]$Python",
             "[string[]]$WakeArgv",
             "[switch]$Uninstall",
-            "bridge_mcp.py",
-            "notify_windows.ps1",
-            "doctor",
-            "--strict",
+            "pip install",
+            "agent_bridge.cli",
+            "--home",
+            "@bridgeArgs",
+            "-LiteralPath",
         ):
             self.assertIn(token, source)
         self.assertNotIn("BurntToast", source)
 
-    def test_posix_installer_has_equivalent_contract(self):
+    def test_posix_installer_is_a_safe_setup_bootstrap(self):
         source = POSIX_INSTALLER.read_text(encoding="utf-8")
         for token in (
             "--auto",
@@ -58,13 +52,10 @@ class InstallerContractTests(unittest.TestCase):
             "--python",
             "--wake-cmd",
             "--uninstall",
-            "configure_codex",
-            "configure_claude",
-            "configure_reasonix",
-            "configure_zcode",
-            "bridge_mcp.py",
-            "notify_windows.ps1",
-            "doctor --strict",
+            "pip install",
+            "agent_bridge.cli",
+            "--home",
+            '"${bridge_args[@]}"',
         ):
             self.assertIn(token, source)
         self.assertNotIn(".local\\bin", source)

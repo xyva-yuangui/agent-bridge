@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import sys
@@ -26,12 +27,13 @@ from .notifications import (
 from .paths import get_data_root, require_local_data_root
 from .presentation import configure_streams, error_view, render, task_page, task_view, tasks_view
 from .service import BridgeService
+from . import setup as setup_lifecycle
 from .store import Store
 from .version import BRIDGE_VERSION, SCHEMA_VERSION
 
 
 MCP_EXCLUDED_COMMANDS = frozenset(("dispatch", "tui", "setup", "uninstall", "open-action"))
-UNAVAILABLE_COMMANDS = frozenset(("setup", "uninstall"))
+UNAVAILABLE_COMMANDS = frozenset()
 
 
 class CommandUnavailable(RuntimeError):
@@ -383,8 +385,18 @@ def build_parser() -> argparse.ArgumentParser:
     migrate = command("migrate"); migrate.add_argument("source")
     export = command("export"); export.add_argument("destination")
     dispatch = command("dispatch"); dispatch.add_argument("--burst", action="store_true")
-    for name in UNAVAILABLE_COMMANDS:
-        command(name, help="reserved for a later v2 component")
+    setup = command("setup", help="install, repair, or inspect owned host integrations")
+    setup.add_argument("action", nargs="?", choices=("status",), default="apply")
+    setup.add_argument("--dry-run", action="store_true")
+    setup.add_argument("--auto", action="store_true", help="install detected hosts")
+    setup.add_argument("--agent", choices=("codex", "claude", "reasonix", "zcode"))
+    setup.add_argument("--repair", action="store_true", help="re-apply owned configuration")
+    setup.add_argument("--home", help="host configuration home; defaults to the current user home")
+    uninstall = command("uninstall", help="remove only owned host integrations")
+    uninstall.add_argument("--dry-run", action="store_true")
+    uninstall.add_argument("--agent", choices=("codex", "claude", "reasonix", "zcode"))
+    uninstall.add_argument("--purge-data", action="store_true", help="also remove the exact .agent-bridge data root")
+    uninstall.add_argument("--home", help="host configuration home; defaults to the current user home")
     tui = command("tui", help="open the on-demand terminal dashboard")
     tui.add_argument("--project", default="default")
     open_action = command("open-action")
@@ -399,6 +411,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     configure_streams()
     parser = build_parser()
     arguments = parser.parse_args(argv)
+    try:
+        # Setup is intentionally outside the service open path: a dry run or
+        # host-status query must not create a SQLite database as a side effect.
+        if arguments.command == "setup":
+            home = Path(arguments.home) if arguments.home else None
+            if arguments.action == "status":
+                result = {"setup": setup_lifecycle.status(home=home, agent=arguments.agent)}
+            elif arguments.repair:
+                result = {"setup": dataclasses.asdict(setup_lifecycle.repair(
+                    home=home, agent=arguments.agent, dry_run=arguments.dry_run,
+                ))}
+            else:
+                plan = setup_lifecycle.build_setup_plan(home=home, auto=arguments.auto, agent=arguments.agent)
+                result = {"setup": dataclasses.asdict(setup_lifecycle.apply_setup_plan(plan, dry_run=arguments.dry_run))}
+            print(render(result, arguments.as_json))
+            return 0
+        if arguments.command == "uninstall":
+            home = Path(arguments.home) if arguments.home else None
+            result = {"uninstall": dataclasses.asdict(setup_lifecycle.uninstall(
+                home=home, agent=arguments.agent, purge_data=arguments.purge_data, dry_run=arguments.dry_run,
+            ))}
+            print(render(result, arguments.as_json))
+            return 0
+    except (KeyError, PermissionError, ValueError, RuntimeError) as error:
+        print(render(error_view(error), arguments.as_json), file=os.sys.stderr)
+        return 1
     service = open_service(arguments.data_root)
     try:
         if arguments.command == "tui":
