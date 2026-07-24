@@ -231,6 +231,31 @@ def _remove_runtime(home: Path) -> None:
                 continue
 
 
+def _marker_receipt(home: Path, adapter: HostAdapter) -> Path:
+    return _data_root(home) / "host-markers" / (adapter.name + ".json")
+
+
+def _write_owned_marker(home: Path, adapter: HostAdapter) -> None:
+    marker = adapter.marker_path
+    before = marker.read_bytes() if marker.exists() else b""
+    owned = json.dumps({"host": adapter.name, "mechanisms": [adapter.mechanism]}, sort_keys=True).encode("utf-8") + b"\n"
+    _write_owned_json(_marker_receipt(home, adapter), {"owner": OWNER, "path": str(marker), "present": marker.exists(), "before": before.hex(), "owned_hash": hashlib.sha256(owned).hexdigest()})
+    marker.parent.mkdir(parents=True, exist_ok=True); marker.write_bytes(owned)
+
+
+def _restore_owned_marker(home: Path, adapter: HostAdapter) -> None:
+    receipt = _marker_receipt(home, adapter)
+    try: state = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, ValueError): return
+    marker = adapter.marker_path
+    current = marker.read_bytes() if marker.exists() else b""
+    if state.get("owner") != OWNER or state.get("path") != str(marker) or hashlib.sha256(current).hexdigest() != state.get("owned_hash"):
+        return
+    if state.get("present"): marker.write_bytes(bytes.fromhex(state.get("before", "")))
+    else: marker.unlink(missing_ok=True)
+    receipt.unlink(missing_ok=True)
+
+
 def build_setup_plan(*, home: Optional[Path] = None, auto: bool = False, agent: Optional[str] = None) -> SetupPlan:
     """Create a no-write plan for currently detected hosts and an optional scope."""
     user_home = _home(home)
@@ -310,8 +335,8 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
             if plan.requested_agent and not _host_application_present(adapter):
                 adapter.config_path.parent.mkdir(parents=True, exist_ok=True)
             if not adapter._valid_installation_marker():
-                adapter.marker_path.parent.mkdir(parents=True, exist_ok=True)
-                _write_owned_json(adapter.marker_path, {"host": adapter.name, "mechanisms": [adapter.mechanism]})
+                inverses.append((adapter.name + " marker", lambda item=adapter: _restore_owned_marker(plan.home, item)))
+                _write_owned_marker(plan.home, adapter)
             inverses.append((adapter.name, adapter.uninstall))
             adapter.install()
             if not adapter.detect().found:
@@ -375,6 +400,7 @@ def uninstall(*, home: Optional[Path] = None, agent: Optional[str] = None, purge
     for item in removable:
         # Adapter removal only removes exact blocks/registrations that it owns.
         item.uninstall()
+        _restore_owned_marker(user_home, item)
         item._remove_installation_artifact()
         removed.append(item.name)
     _remove_windows_native(user_home)
