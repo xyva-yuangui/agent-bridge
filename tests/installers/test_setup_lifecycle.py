@@ -69,6 +69,13 @@ class SetupLifecycleTests(unittest.TestCase):
         self.assertEqual((), report.applied_hosts)
         self.assertFalse((self.home / ".codex" / "config.toml").exists())
 
+    def test_runtime_failure_rolls_back_owned_runtime(self) -> None:
+        with patch("agent_bridge.setup._install_windows_native", side_effect=RuntimeError("native boom")):
+            with self.assertRaisesRegex(RuntimeError, "native boom"):
+                apply_setup_plan(build_setup_plan(home=self.home, auto=True))
+        self.assertFalse((self.home / ".agent-bridge" / "skill").exists())
+        self.assertFalse((self.home / ".local" / "bin" / "bridge.cmd").exists())
+
     def test_cli_exposes_setup_lifecycle_without_opening_sqlite_service(self) -> None:
         parsed = build_parser().parse_args(["setup", "--auto", "--dry-run"])
         self.assertTrue(parsed.auto)

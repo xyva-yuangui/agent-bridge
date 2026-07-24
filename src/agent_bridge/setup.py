@@ -262,6 +262,9 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
                 backups.append(str(backup))
             if not _host_application_present(adapter):
                 raise RuntimeError("requested host application is not detected: {0}".format(adapter.name))
+            if not adapter._valid_installation_marker():
+                adapter.marker_path.parent.mkdir(parents=True, exist_ok=True)
+                _write_owned_json(adapter.marker_path, {"host": adapter.name, "mechanisms": [adapter.mechanism]})
             inverses.append((adapter.name, adapter.uninstall))
             adapter.install()
             if not adapter.detect().found:
