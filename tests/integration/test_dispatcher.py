@@ -17,6 +17,9 @@ from agent_bridge.service import BridgeService
 from agent_bridge.store import Store
 
 
+WINDOWS_SPAWN_SCHEDULER_TOLERANCE_SECONDS = 0.75
+
+
 class RecordingChannel:
     def __init__(self, effects) -> None:
         self.effects = effects
@@ -128,11 +131,19 @@ class DispatcherTests(unittest.TestCase):
             {"notification": blocking},
             lease_seconds=1.0,
         )
+        started = time.monotonic()
 
         report = dispatcher.run_burst(deadline_seconds=2.0)
 
         self.assertTrue(blocking.started.is_set())
         self.assertTrue(report.timed_out)
+        # Windows spawn and conclusive terminate/kill scheduling can lag the
+        # requested burst. Keep a fixed, documented tolerance while proving
+        # the dispatcher cannot overrun its 30-second operational budget.
+        self.assertLessEqual(
+            time.monotonic() - started,
+            2.0 + WINDOWS_SPAWN_SCHEDULER_TOLERANCE_SECONDS,
+        )
         second_store = Store.open(self.path)
         self.second_store = second_store
         competing = self._recording()
