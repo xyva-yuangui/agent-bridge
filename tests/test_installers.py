@@ -338,16 +338,18 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
                 timeout=15,
             )
             self.assertFalse(json.loads(unregistered.stdout)["ok"])
+            zcode_bundle_root = (
+                root
+                / ".zcode"
+                / "cli"
+                / "plugins"
+                / "cache"
+                / "local"
+                / "agent-bridge"
+            )
             self.assertFalse(
-                (
-                    root
-                    / ".zcode"
-                    / "cli"
-                    / "plugins"
-                    / "cache"
-                    / "local"
-                    / "agent-bridge"
-                ).exists()
+                zcode_bundle_root.exists(),
+                list(zcode_bundle_root.rglob("*")) if zcode_bundle_root.exists() else [],
             )
             for config in (
                 root / ".codex" / "config.toml",
