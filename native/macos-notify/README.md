@@ -3,6 +3,10 @@
 This is a short-lived Swift/UserNotifications app bundle. It accepts one
 bounded JSON request on stdin and writes exactly one JSON response on stdout.
 It does not start a shell or receive executable text from notification payloads.
+Set `AGENT_BRIDGE_MACOS_NOTIFY_ACTIVATION_ARGV` to an installer-owned JSON argv
+array whose first item is an absolute local `bridge` executable. Before posting,
+the Python channel performs `status -> register -> status` when needed; task
+content never enters that argv.
 
 Build a universal2 development bundle on macOS:
 
@@ -30,6 +34,10 @@ spctl -a -vv native/macos-notify/dist/AgentBridgeNotifier.app
 Then register a fixed absolute `bridge` argv, post a task, inspect Notification
 Center, exercise View/Claim/Snooze, and record authorization, persistence,
 terminal fallback, architecture, signing, and hashes in the evidence artifact.
-macOS supports replacing a pending local request by identifier; it has no API
-to expire an already-delivered immediate local notification, so expiry is
-validated but reported as unsupported rather than claimed.
+macOS supports replacing both pending and delivered local requests by
+identifier, but has no API to expire an already-delivered immediate local
+notification. For a 1–30 second TTL the helper starts one output-detached,
+capped cleanup child; longer TTLs are explicitly reported as unsupported and
+are only cleaned on a later helper invocation. The helper is an accessory app
+for cold notification activations, exits after an action or 30 seconds, and is
+not a resident service.

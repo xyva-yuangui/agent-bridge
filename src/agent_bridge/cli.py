@@ -18,7 +18,9 @@ from .migrate_v1 import export_json, import_v1
 from .notifications import (
     MacOSNotificationChannel,
     WindowsNotificationChannel,
+    macos_activation_argv,
     macos_notification_capability,
+    macos_signing_assessment,
     windows_notification_capability,
 )
 from .paths import get_data_root, require_local_data_root
@@ -223,6 +225,10 @@ def execute_command(
             "integrity": report.ok,
             "native_notifications": notification_capability.available,
         }
+        signing = None
+        if sys.platform == "darwin":
+            signing = macos_signing_assessment(notification_capability.helper_path)
+            checks["native_notification_signing"] = signing.status in ("signed", "notarized")
         strict = bool(_argument(arguments, "strict"))
         return {
             "ok": all(checks.values()) if strict else report.ok,
@@ -233,6 +239,10 @@ def execute_command(
                 "available": notification_capability.available,
                 "helper_path": notification_capability.helper_path,
                 "detail": notification_capability.detail,
+                "expiry_detail": notification_capability.expiry_detail,
+                "signing_status": notification_capability.signing_status,
+                "gatekeeper": notification_capability.gatekeeper,
+                **({"signing": {"status": signing.status, "detail": signing.detail, "gatekeeper": signing.gatekeeper}} if signing is not None else {}),
             },
             "strict": strict,
         }
@@ -301,7 +311,7 @@ def _native_notification_channel(database_path: Path) -> tuple[Any, Any]:
     """Select only the platform's helper; a configured foreign helper is degraded."""
     if sys.platform == "darwin":
         capability = macos_notification_capability()
-        return capability, MacOSNotificationChannel(database_path, capability.helper_path)
+        return capability, MacOSNotificationChannel(database_path, capability.helper_path, macos_activation_argv())
     capability = windows_notification_capability()
     return capability, WindowsNotificationChannel(database_path, capability.helper_path)
 

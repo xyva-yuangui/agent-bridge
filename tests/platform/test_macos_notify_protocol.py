@@ -12,6 +12,7 @@ from unittest.mock import patch
 from agent_bridge.cli import execute_command
 from agent_bridge.models import DeliveryStatus
 from agent_bridge.notifications import (
+    MacOSSigningAssessment,
     MacOSNotificationChannel,
     MacOSNotifier,
     NotificationNotice,
@@ -73,12 +74,40 @@ class MacOSNotifyProtocolTests(unittest.TestCase):
             item = OutboxItem(1, "delivery-1", "task.created", {"task_id": task.id}, "2026-01-01T00:00:00Z", 0)
             helper = self.helper("print('{\\\"ok\\\":true,\\\"notification_id\\\":\\\"mac-native-1\\\",\\\"status\\\":\\\"os_posted\\\",\\\"detail\\\":\\\"posted\\\"}')")
 
-            status = MacOSNotificationChannel(store.path, helper).deliver(item, "delivery-1", 1.0)
+            status = MacOSNotificationChannel(store.path, helper, [str(Path(sys.executable).resolve()), "open-action"]).deliver(item, "delivery-1", 1.0)
 
             self.assertEqual(status, DeliveryStatus.OS_POSTED)
             self.assertEqual(store.scalar("SELECT task_id FROM notification_mappings WHERE notification_id = ?", ("mac-native-1",)), task.id)
         finally:
             store.close()
+
+    def test_channel_registers_fixed_argv_before_post_when_status_is_unregistered(self) -> None:
+        capture = self.directory / "operations.json"
+        source = (
+            "import json,pathlib,sys; p=pathlib.Path(r'" + str(capture).replace("\\", "\\\\") + "'); "
+            "ops=json.loads(p.read_text()) if p.exists() else []; request=json.loads(sys.stdin.read()); ops.append(request['operation']); p.write_text(json.dumps(ops)); "
+            "response=({'ok':False,'notification_id':'','status':'failed','detail':'fixed activation argv is not registered'} if request['operation']=='status' and ops.count('status')==1 else "
+            "{'ok':True,'notification_id':('mac-native-2' if request['operation']=='post' else 'registration'),'status':'os_posted','detail':('expiration scheduled for 30 seconds' if request['operation']=='post' else 'ready')}); print(json.dumps(response))"
+        )
+        store = Store.open(self.directory / "registration.sqlite3")
+        try:
+            task = BridgeService(store).send_task("sender", "receiver", "Register", "body")
+            item = OutboxItem(1, "delivery-registration", "task.created", {"task_id": task.id}, "2026-01-01T00:00:00Z", 0)
+            channel = MacOSNotificationChannel(store.path, self.helper(source), [str(Path(sys.executable).resolve()), "open-action"])
+
+            self.assertEqual(channel.deliver(item, "delivery-registration", 1.0), DeliveryStatus.OS_POSTED)
+
+            self.assertEqual(json.loads(capture.read_text()), ["status", "register", "status", "post"])
+        finally:
+            store.close()
+
+    def test_long_expiry_does_not_claim_native_expiration_without_an_honest_helper_response(self) -> None:
+        helper = self.helper("print('{\\\"ok\\\":true,\\\"notification_id\\\":\\\"mac-native-3\\\",\\\"status\\\":\\\"os_posted\\\",\\\"detail\\\":\\\"expiration scheduled for 31 seconds\\\"}')")
+
+        result = MacOSNotifier(helper).post(NotificationNotice("Task", "Body", "task-opaque-3", 31))
+
+        self.assertFalse(result.ok)
+        self.assertIn("expiration", result.detail)
 
     def test_capability_and_doctor_degrade_honestly_off_macos(self) -> None:
         helper = self.helper("print('{\\\"ok\\\":true,\\\"notification_id\\\":\\\"registration\\\",\\\"status\\\":\\\"os_posted\\\",\\\"detail\\\":\\\"ready\\\"}')")
@@ -95,6 +124,31 @@ class MacOSNotifyProtocolTests(unittest.TestCase):
             store.close()
         self.assertIn("native_notifications", report["checks"])
         self.assertFalse(report["checks"]["native_notifications"])
+
+    def test_strict_doctor_separates_an_unsigned_helper_from_local_notification_availability(self) -> None:
+        helper = self.helper("print('{\\\"ok\\\":true,\\\"notification_id\\\":\\\"registration\\\",\\\"status\\\":\\\"os_posted\\\",\\\"detail\\\":\\\"ready\\\"}')")
+        store = Store.open(self.directory / "signing.sqlite3")
+        capability = type("Capability", (), {"available": True, "helper_path": str(helper), "detail": "ready", "expiry_detail": "no native expiry", "signing_status": "unsigned", "gatekeeper": "unknown"})()
+        assessment = MacOSSigningAssessment("unsigned", "codesign reports no signature", "notarization unknown")
+        try:
+            with patch("agent_bridge.cli.sys.platform", "darwin"), patch("agent_bridge.cli.macos_notification_capability", return_value=capability), patch("agent_bridge.cli.macos_signing_assessment", return_value=assessment):
+                report = execute_command(BridgeService(store), "codex", "doctor", {"strict": True})
+        finally:
+            store.close()
+
+        self.assertTrue(report["checks"]["native_notifications"])
+        self.assertFalse(report["checks"]["native_notification_signing"])
+        self.assertEqual(report["notification_capability"]["signing"]["status"], "unsigned")
+        self.assertFalse(report["ok"])
+
+    def test_macos_status_capability_exposes_signing_and_gatekeeper_separately(self) -> None:
+        helper = self.helper("print('{}')")
+        expected = MacOSSigningAssessment("notarized", "signature valid", "accepted and notarized")
+        with patch.dict(os.environ, {"AGENT_BRIDGE_MACOS_NOTIFY_HELPER": str(helper)}), patch("agent_bridge.notifications.sys.platform", "darwin"), patch("agent_bridge.notifications.MacOSNotifier.status", return_value=type("Result", (), {"ok": True, "detail": "ready"})()), patch("agent_bridge.notifications.macos_signing_assessment", return_value=expected):
+            capability = macos_notification_capability()
+
+        self.assertEqual(capability.signing_status, "notarized")
+        self.assertEqual(capability.gatekeeper, "accepted and notarized")
 
     def test_static_swift_package_and_release_assets_enforce_the_contract(self) -> None:
         root = Path(__file__).resolve().parents[2] / "native" / "macos-notify"
@@ -113,8 +167,10 @@ class MacOSNotifyProtocolTests(unittest.TestCase):
         self.assertIn("snooze", delegate)
         self.assertIn("UNNotificationRequest", delegate)
         self.assertIn("removePendingNotificationRequests", delegate)
+        self.assertIn("removeDeliveredNotifications", delegate)
         self.assertIn("Process()", delegate)
         self.assertIn("arguments =", delegate)
+        self.assertIn("--cleanup-expired", delegate)
         self.assertNotIn("/bin/sh", delegate)
         self.assertIn("maxInputBytes", source)
         self.assertIn("Decodable", source)
@@ -123,6 +179,7 @@ class MacOSNotifyProtocolTests(unittest.TestCase):
         self.assertIn("activation_argv", source)
         self.assertIn(".macOS(.v12)", package)
         self.assertIn("CFBundleIdentifier", plist)
+        self.assertIn("LSUIElement", plist)
         self.assertIn("com.apple.security.app-sandbox", entitlements)
         self.assertIn("x86_64", build)
         self.assertIn("arm64", build)

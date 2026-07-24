@@ -50,6 +50,18 @@ class NotificationCapability:
     available: bool
     helper_path: str
     detail: str
+    expiry_detail: str = ""
+    signing_status: str = "unknown"
+    gatekeeper: str = "unknown"
+
+
+@dataclass(frozen=True)
+class MacOSSigningAssessment:
+    """Code-signing and Gatekeeper evidence; never a notification delivery claim."""
+
+    status: str
+    detail: str
+    gatekeeper: str
 
 
 class WindowsNotifier:
@@ -108,19 +120,99 @@ class WindowsNotifier:
 class MacOSNotifier(WindowsNotifier):
     """Invoke the installed macOS UserNotifications helper through the same JSON contract."""
 
+    def __init__(
+        self,
+        helper_path: Path | str,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+        activation_argv: Sequence[str] = (),
+    ) -> None:
+        super().__init__(helper_path, timeout_seconds, max_output_bytes)
+        self.activation_argv = tuple(activation_argv)
+
+    def ensure_registered(self) -> NotificationResult:
+        """Register only a fixed local argv, then verify it before an OS post."""
+        status = self.status()
+        if status.ok:
+            return status
+        if not self.activation_argv:
+            return _failure("native macOS notification helper has no fixed activation argv")
+        registered = self.register(self.activation_argv)
+        if not registered.ok:
+            return registered
+        return self.status()
+
+    def post(self, notice: NotificationNotice) -> NotificationResult:
+        result = super().post(notice)
+        if result.ok and notice.expires_in_seconds > 30 and "expiration unsupported" not in result.detail.lower():
+            return _failure("native macOS helper did not report the unsupported long expiration")
+        return result
+
 
 def macos_notification_capability() -> NotificationCapability:
     """Report the optional signed macOS helper honestly without claiming a post."""
     configured = os.environ.get("AGENT_BRIDGE_MACOS_NOTIFY_HELPER", "").strip()
     if not configured:
-        return NotificationCapability(False, "", "native macOS notification helper is not installed")
+        return NotificationCapability(False, "", "native macOS notification helper is not installed", _macos_expiry_detail())
     helper = Path(configured)
     if not helper.is_file():
-        return NotificationCapability(False, str(helper), "configured native macOS notification helper is not installed")
+        return NotificationCapability(False, str(helper), "configured native macOS notification helper is not installed", _macos_expiry_detail())
     if sys.platform != "darwin":
-        return NotificationCapability(False, str(helper), "native macOS notification helper is unavailable on this platform")
+        return NotificationCapability(False, str(helper), "native macOS notification helper is unavailable on this platform", _macos_expiry_detail())
     result = MacOSNotifier(helper, timeout_seconds=1.0).status()
-    return NotificationCapability(result.ok, str(helper), result.detail)
+    signing = macos_signing_assessment(helper)
+    detail = result.detail if result.ok else "helper installed; registration or authorization still requires attention: {0}".format(result.detail)
+    return NotificationCapability(True, str(helper), detail, _macos_expiry_detail(), signing.status, signing.gatekeeper)
+
+
+def _macos_expiry_detail() -> str:
+    return "macOS has no native expiration for delivered local notifications; only 1..30 second cleanup is scheduled"
+
+
+def macos_activation_argv() -> tuple[str, ...]:
+    """Read only an installer-provided JSON argv array; task data never enters it."""
+    try:
+        value = json.loads(os.environ.get("AGENT_BRIDGE_MACOS_NOTIFY_ACTIVATION_ARGV", ""))
+        _request_payload("register", None, {"activation_argv": value})
+    except (TypeError, ValueError):
+        return ()
+    return tuple(value)
+
+
+def macos_signing_assessment(helper_path: Path | str) -> MacOSSigningAssessment:
+    """Use fixed macOS tools without a shell; do not expose certificate or profile secrets."""
+    if sys.platform != "darwin":
+        return MacOSSigningAssessment("unknown", "macOS signing tools are unavailable on this platform", "unknown")
+    helper = Path(helper_path)
+    app = next((parent for parent in (helper, *helper.parents) if parent.suffix == ".app"), None)
+    if app is None or not app.is_dir():
+        return MacOSSigningAssessment("unknown", "configured helper is not inside an app bundle", "unknown")
+    try:
+        codesign = subprocess.run(
+            ["/usr/bin/codesign", "-dvvv", str(app)], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=2.0, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return MacOSSigningAssessment("unknown", "could not assess code signature: {0}".format(error), "unknown")
+    output = (codesign.stdout + "\n" + codesign.stderr).lower()
+    if codesign.returncode != 0:
+        status = "unsigned" if "not signed" in output or "code object is not signed" in output else "unknown"
+        return MacOSSigningAssessment(status, "codesign did not validate the app bundle", "unknown")
+    if "signature=adhoc" in output or "signature=ad hoc" in output:
+        return MacOSSigningAssessment("ad_hoc", "codesign reports an ad-hoc signature", "not_assessed")
+    try:
+        gatekeeper = subprocess.run(
+            ["/usr/sbin/spctl", "-a", "-vv", str(app)], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=2.0, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return MacOSSigningAssessment("signed", "codesign validated the app bundle", "unknown: {0}".format(error))
+    gatekeeper_output = (gatekeeper.stdout + "\n" + gatekeeper.stderr).lower()
+    if gatekeeper.returncode == 0 and "notarized" in gatekeeper_output:
+        return MacOSSigningAssessment("notarized", "codesign validated the app bundle", "accepted and notarized")
+    if gatekeeper.returncode == 0:
+        return MacOSSigningAssessment("signed", "codesign validated the app bundle", "accepted, notarization not reported")
+    return MacOSSigningAssessment("signed", "codesign validated the app bundle", "rejected or unknown")
 
 
 def _run_capped_helper(path: Path, payload: bytes, timeout: float, limit: int) -> tuple[int, bytes, bytes, str]:
@@ -337,6 +429,12 @@ class WindowsNotificationChannel:
 class MacOSNotificationChannel(WindowsNotificationChannel):
     """macOS counterpart that preserves the same durable opaque-ID mapping."""
 
+    def __init__(
+        self, database_path: Path | str, helper_path: Path | str, activation_argv: Sequence[str] = ()
+    ) -> None:
+        super().__init__(database_path, helper_path)
+        self.activation_argv = tuple(activation_argv)
+
     def applicable(self, item: Any) -> bool:
         del item
         return sys.platform == "darwin" and self.helper_path.is_file()
@@ -353,7 +451,13 @@ class MacOSNotificationChannel(WindowsNotificationChannel):
             ).fetchone()
             if task is None:
                 raise RuntimeError("notification task no longer exists")
-            result = MacOSNotifier(self.helper_path, timeout_seconds=timeout_seconds).post(
+            notifier = MacOSNotifier(
+                self.helper_path, timeout_seconds=timeout_seconds, activation_argv=self.activation_argv
+            )
+            registered = notifier.ensure_registered()
+            if not registered.ok:
+                raise RuntimeError(registered.detail)
+            result = notifier.post(
                 NotificationNotice(str(task["subject"]), str(task["body"]), task_id)
             )
             if not result.ok or result.status is not DeliveryStatus.OS_POSTED:

@@ -1,3 +1,5 @@
+import AppKit
+import Darwin
 import Foundation
 
 func readRequest() throws -> Data {
@@ -11,9 +13,9 @@ func readRequest() throws -> Data {
     return input
 }
 
-func run() -> Response {
+func run(_ input: Data) -> Response {
     do {
-        let request = try parseRequest(readRequest())
+        let request = try parseRequest(input)
         let delegate = AppDelegate()
         delegate.configure()
         switch request {
@@ -26,7 +28,58 @@ func run() -> Response {
     } catch { return .failure(error.localizedDescription) }
 }
 
-let response = run()
-let encoder = JSONEncoder()
-encoder.outputFormatting = [.withoutEscapingSlashes]
-FileHandle.standardOutput.write((try! encoder.encode(response)) + Data([0x0a]))
+func protocolInput() -> Data? {
+    if isatty(STDIN_FILENO) != 0 { return nil }
+    var descriptor = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+    guard poll(&descriptor, 1, 250) > 0, let data = try? readRequest(), !data.isEmpty else { return nil }
+    return data
+}
+
+func writeResponse(_ response: Response) {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.withoutEscapingSlashes]
+    FileHandle.standardOutput.write((try! encoder.encode(response)) + Data([0x0a]))
+}
+
+final class ApplicationLifecycleDelegate: NSObject, NSApplicationDelegate {
+    private let notifier = AppDelegate()
+    private var timeout: Timer?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        notifier.configure()
+        notifier.onActionHandled = { [weak self] in self?.finish() }
+        timeout = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in self?.finish() }
+    }
+
+    private func finish() {
+        timeout?.invalidate()
+        NSApp.terminate(nil)
+    }
+}
+
+func runApplicationMode() {
+    let application = NSApplication.shared
+    application.setActivationPolicy(.accessory)
+    let lifecycle = ApplicationLifecycleDelegate()
+    application.delegate = lifecycle
+    application.run()
+}
+
+func runExpiryCleanupChild(arguments: [String]) -> Bool {
+    guard arguments.count == 4, arguments[1] == "--cleanup-expired",
+          let expiry = TimeInterval(arguments[3]) else { return false }
+    do { try opaqueID(arguments[2], "notification_id") } catch { return false }
+    let notifier = AppDelegate()
+    notifier.configure()
+    notifier.cleanupExpiredNotification(arguments[2], expectedAt: expiry)
+    return true
+}
+
+let arguments = CommandLine.arguments
+if runExpiryCleanupChild(arguments: arguments) {
+    // The bounded cleanup child deliberately emits no protocol output.
+} else if let input = protocolInput() {
+    writeResponse(run(input))
+} else {
+    runApplicationMode()
+}
