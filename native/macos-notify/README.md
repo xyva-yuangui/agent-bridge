@@ -3,6 +3,9 @@
 This is a short-lived Swift/UserNotifications app bundle. It accepts one
 bounded JSON request on stdin and writes exactly one JSON response on stdout.
 It does not start a shell or receive executable text from notification payloads.
+The Python client invokes that mode explicitly as `AgentBridgeNotifier --protocol`;
+an app launch with no argument enters the accessory lifecycle, and every other
+argument shape is rejected.
 Set `AGENT_BRIDGE_MACOS_NOTIFY_ACTIVATION_ARGV` to an installer-owned JSON argv
 array whose first item is an absolute local `bridge` executable. Before posting,
 the Python channel performs `status -> register -> status` when needed; task
@@ -41,3 +44,6 @@ capped cleanup child; longer TTLs are explicitly reported as unsupported and
 are only cleaned on a later helper invocation. The helper is an accessory app
 for cold notification activations, exits after an action or 30 seconds, and is
 not a resident service.
+Each cleanup child carries the persisted expiry generation and removes a stable
+notification ID only while that exact generation is still current, so an old
+child cannot remove a replacement notification.

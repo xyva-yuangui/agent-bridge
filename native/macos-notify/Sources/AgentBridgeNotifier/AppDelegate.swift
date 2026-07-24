@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import UserNotifications
 
@@ -58,19 +59,24 @@ final class AppDelegate: NSObject, UNUserNotificationCenterDelegate {
         content.title = title
         content.body = body
         content.categoryIdentifier = categoryIdentifier
-        content.userInfo = ["notification_id": notificationID, "task_id": taskID]
+        let expiry = ExpiryRecord(expiresAt: Date().timeIntervalSince1970 + TimeInterval(expiresInSeconds), generation: UUID().uuidString)
+        content.userInfo = ["notification_id": notificationID, "task_id": taskID, "expiry_generation": expiry.generation]
         // macOS has no native expiration for immediately delivered local requests.
         // Reusing this identifier replaces both pending and delivered task notices.
-        center.removePendingNotificationRequests(withIdentifiers: [notificationID])
-        center.removeDeliveredNotifications(withIdentifiers: [notificationID])
         let request = UNNotificationRequest(identifier: notificationID, content: content, trigger: nil)
-        let semaphore = DispatchSemaphore(value: 0)
-        var failure: Error?
-        center.add(request) { error in failure = error; semaphore.signal() }
-        guard semaphore.wait(timeout: .now() + 1.0) == .success else { return .failure("timed out posting UserNotifications request") }
-        guard failure == nil else { return .failure("UserNotifications rejected request: \(failure!.localizedDescription)") }
-        recordExpiry(notificationID: notificationID, after: expiresInSeconds)
-        if expiresInSeconds <= 30, scheduleExpiryCleanup(notificationID: notificationID, after: expiresInSeconds) {
+        let posted = withExpiryLock { () -> Bool in
+            center.removePendingNotificationRequests(withIdentifiers: [notificationID])
+            center.removeDeliveredNotifications(withIdentifiers: [notificationID])
+            let semaphore = DispatchSemaphore(value: 0)
+            var failure: Error?
+            center.add(request) { error in failure = error; semaphore.signal() }
+            guard semaphore.wait(timeout: .now() + 1.0) == .success, failure == nil else { return false }
+            var expiries = notificationExpiries()
+            expiries[notificationID] = expiry
+            return saveNotificationExpiries(expiries)
+        } ?? false
+        guard posted else { return .failure("UserNotifications could not post and persist the replacement request") }
+        if expiresInSeconds <= 30, scheduleExpiryCleanup(notificationID: notificationID, expiry: expiry, after: expiresInSeconds) {
             return .posted(notificationID, "UserNotifications accepted request; replacement is supported and expiration scheduled for \(expiresInSeconds) seconds")
         }
         return .posted(notificationID, "UserNotifications accepted request; replacement is supported, expiration unsupported beyond 30 seconds because macOS has no native expiration; cleanup runs on the next invocation")
@@ -111,44 +117,59 @@ final class AppDelegate: NSObject, UNUserNotificationCenterDelegate {
         try process.run()
     }
 
-    func cleanupExpiredNotification(_ notificationID: String, expectedAt: TimeInterval) {
-        guard Date().timeIntervalSince1970 >= expectedAt else { return }
-        center.removePendingNotificationRequests(withIdentifiers: [notificationID])
-        center.removeDeliveredNotifications(withIdentifiers: [notificationID])
-        var expiries = notificationExpiries()
-        expiries.removeValue(forKey: notificationID)
-        UserDefaults.standard.set(expiries, forKey: expiryKey)
+    func cleanupExpiredNotification(_ notificationID: String, expectedAt: TimeInterval, expectedGeneration: String) {
+        let shouldRemove = withExpiryLock {
+            var expiries = notificationExpiries()
+            guard let record = expiries[notificationID], record.expiresAt == expectedAt,
+                  record.generation == expectedGeneration, Date().timeIntervalSince1970 >= record.expiresAt else { return false }
+            center.removePendingNotificationRequests(withIdentifiers: [notificationID])
+            center.removeDeliveredNotifications(withIdentifiers: [notificationID])
+            expiries.removeValue(forKey: notificationID)
+            return saveNotificationExpiries(expiries)
+        } ?? false
+        guard shouldRemove else { return }
     }
 
     private func cleanupExpiredNotifications() {
         let now = Date().timeIntervalSince1970
-        for (notificationID, expiry) in notificationExpiries() where expiry <= now {
-            cleanupExpiredNotification(notificationID, expectedAt: expiry)
+        for (notificationID, expiry) in notificationExpiries() where expiry.expiresAt <= now {
+            cleanupExpiredNotification(notificationID, expectedAt: expiry.expiresAt, expectedGeneration: expiry.generation)
         }
     }
 
-    private func recordExpiry(notificationID: String, after seconds: Int) {
-        var expiries = notificationExpiries()
-        expiries[notificationID] = Date().timeIntervalSince1970 + TimeInterval(seconds)
-        UserDefaults.standard.set(expiries, forKey: expiryKey)
+    private func notificationExpiries() -> [String: ExpiryRecord] {
+        guard let data = UserDefaults.standard.data(forKey: expiryKey),
+              let values = try? JSONDecoder().decode([String: ExpiryRecord].self, from: data) else { return [:] }
+        return values
     }
 
-    private func notificationExpiries() -> [String: TimeInterval] {
-        let raw = UserDefaults.standard.dictionary(forKey: expiryKey) ?? [:]
-        return raw.reduce(into: [:]) { values, pair in
-            if let expiry = pair.value as? TimeInterval { values[pair.key] = expiry }
-        }
+    private func saveNotificationExpiries(_ values: [String: ExpiryRecord]) -> Bool {
+        guard let data = try? JSONEncoder().encode(values) else { return false }
+        UserDefaults.standard.set(data, forKey: expiryKey)
+        return UserDefaults.standard.synchronize()
     }
 
-    private func scheduleExpiryCleanup(notificationID: String, after seconds: Int) -> Bool {
+    private func scheduleExpiryCleanup(notificationID: String, expiry: ExpiryRecord, after seconds: Int) -> Bool {
         guard (1...30).contains(seconds), let executable = Bundle.main.executableURL else { return false }
         let child = Process()
         child.executableURL = executable
-        child.arguments = ["--cleanup-expired", notificationID, String(Date().timeIntervalSince1970 + TimeInterval(seconds))]
+        child.arguments = ["--cleanup-expired", notificationID, String(expiry.expiresAt), expiry.generation]
         child.standardInput = FileHandle.nullDevice
         child.standardOutput = FileHandle.nullDevice
         child.standardError = FileHandle.nullDevice
         do { try child.run(); return true } catch { return false }
+    }
+
+    private func withExpiryLock<T>(_ body: () -> T) -> T? {
+        let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AgentBridgeNotifier", isDirectory: true)
+        do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) } catch { return nil }
+        let fileDescriptor = open(directory.appendingPathComponent("expiry.lock").path, O_CREAT | O_RDWR, mode_t(0o600))
+        guard fileDescriptor >= 0 else { return nil }
+        defer { close(fileDescriptor) }
+        guard flock(fileDescriptor, LOCK_EX) == 0 else { return nil }
+        defer { flock(fileDescriptor, LOCK_UN) }
+        return body()
     }
 
     private func authorizationName(_ value: UNAuthorizationStatus) -> String {
@@ -161,4 +182,9 @@ final class AppDelegate: NSObject, UNUserNotificationCenterDelegate {
         @unknown default: return "unknown"
         }
     }
+}
+
+struct ExpiryRecord: Codable {
+    let expiresAt: TimeInterval
+    let generation: String
 }

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import patch
 
 from agent_bridge.cli import execute_command
@@ -36,7 +37,7 @@ class MacOSNotifyProtocolTests(unittest.TestCase):
         path = self.directory / "helper.cmd"
         encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
         command = "import base64;exec(base64.b64decode('" + encoded + "'))"
-        path.write_text('@"' + sys.executable + '" -c "' + command + '"\r\n', encoding="utf-8")
+        path.write_text('@"' + sys.executable + '" -c "' + command + '" %*\r\n', encoding="utf-8")
         return path
 
     def test_post_requires_a_complete_native_response(self) -> None:
@@ -60,6 +61,17 @@ class MacOSNotifyProtocolTests(unittest.TestCase):
             "operation": "post", "title": "Task ready", "body": "Read this safely", "task_id": "task-opaque-123",
             "actions": ["view", "claim", "snooze"], "expires_in_seconds": 30,
         })
+
+    def test_python_client_always_selects_explicit_protocol_mode(self) -> None:
+        capture = self.directory / "argv.json"
+        source = (
+            "import json,pathlib,sys; pathlib.Path(r'" + str(capture).replace("\\", "\\\\") + "').write_text(json.dumps(sys.argv[1:])); "
+            "print('{\\\"ok\\\":true,\\\"notification_id\\\":\\\"mac-native-argv\\\",\\\"status\\\":\\\"os_posted\\\",\\\"detail\\\":\\\"posted\\\"}')"
+        )
+
+        self.assertTrue(MacOSNotifier(self.helper(source)).post(self.notice).ok)
+
+        self.assertEqual(json.loads(capture.read_text()), ["--protocol"])
 
     def test_register_requires_an_absolute_fixed_argv(self) -> None:
         helper = self.helper("print('{\\\"ok\\\":true,\\\"notification_id\\\":\\\"registration\\\",\\\"status\\\":\\\"os_posted\\\",\\\"detail\\\":\\\"registered\\\"}')")
@@ -143,12 +155,46 @@ class MacOSNotifyProtocolTests(unittest.TestCase):
 
     def test_macos_status_capability_exposes_signing_and_gatekeeper_separately(self) -> None:
         helper = self.helper("print('{}')")
-        expected = MacOSSigningAssessment("notarized", "signature valid", "accepted and notarized")
+        expected = MacOSSigningAssessment("notarized", "signature valid", "notarized")
         with patch.dict(os.environ, {"AGENT_BRIDGE_MACOS_NOTIFY_HELPER": str(helper)}), patch("agent_bridge.notifications.sys.platform", "darwin"), patch("agent_bridge.notifications.MacOSNotifier.status", return_value=type("Result", (), {"ok": True, "detail": "ready"})()), patch("agent_bridge.notifications.macos_signing_assessment", return_value=expected):
             capability = macos_notification_capability()
 
         self.assertEqual(capability.signing_status, "notarized")
-        self.assertEqual(capability.gatekeeper, "accepted and notarized")
+        self.assertEqual(capability.gatekeeper, "notarized")
+
+    def test_signing_assessment_uses_verify_then_fixed_gatekeeper_assessment(self) -> None:
+        from agent_bridge.notifications import macos_signing_assessment
+        app = self.directory / "AgentBridgeNotifier.app"
+        helper = app / "Contents" / "MacOS" / "AgentBridgeNotifier"
+        helper.parent.mkdir(parents=True)
+        helper.write_text("helper", encoding="utf-8")
+        responses = [
+            CompletedProcess([], 0, "", ""),
+            CompletedProcess([], 0, "Signature=Developer ID Application", ""),
+            CompletedProcess([], 0, "accepted\nsource=Notarized Developer ID", ""),
+        ]
+        with patch("agent_bridge.notifications.sys.platform", "darwin"), patch("agent_bridge.notifications.subprocess.run", side_effect=responses) as run:
+            assessment = macos_signing_assessment(helper)
+
+        self.assertEqual(assessment.status, "notarized")
+        self.assertEqual(assessment.gatekeeper, "notarized")
+        self.assertEqual(run.call_args_list[0].args[0], ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)])
+        self.assertEqual(run.call_args_list[1].args[0], ["/usr/bin/codesign", "-dvvv", str(app)])
+        self.assertEqual(run.call_args_list[2].args[0], ["/usr/sbin/spctl", "--assess", "--type", "execute", "--verbose=4", str(app)])
+
+    def test_strict_doctor_rejects_gatekeeper_rejection_even_with_a_valid_signature(self) -> None:
+        helper = self.helper("print('{}')")
+        store = Store.open(self.directory / "gatekeeper.sqlite3")
+        capability = type("Capability", (), {"available": True, "helper_path": str(helper), "detail": "ready", "expiry_detail": "no native expiry", "signing_status": "signed", "gatekeeper": "rejected"})()
+        assessment = MacOSSigningAssessment("signed", "signature valid", "rejected")
+        try:
+            with patch("agent_bridge.cli.sys.platform", "darwin"), patch("agent_bridge.cli.macos_notification_capability", return_value=capability), patch("agent_bridge.cli.macos_signing_assessment", return_value=assessment):
+                report = execute_command(BridgeService(store), "codex", "doctor", {"strict": True})
+        finally:
+            store.close()
+
+        self.assertFalse(report["checks"]["native_notification_signing"])
+        self.assertFalse(report["ok"])
 
     def test_static_swift_package_and_release_assets_enforce_the_contract(self) -> None:
         root = Path(__file__).resolve().parents[2] / "native" / "macos-notify"

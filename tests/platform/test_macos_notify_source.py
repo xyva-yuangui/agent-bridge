@@ -15,7 +15,9 @@ class MacOSNotifySourceTests(unittest.TestCase):
         self.assertIn("setActivationPolicy(.accessory)", main)
         self.assertIn("applicationDidFinishLaunching", main)
         self.assertIn("onActionHandled", main)
-        self.assertIn("protocolInput", main)
+        self.assertNotIn("protocolInput", main)
+        self.assertIn('arguments == [CommandLine.arguments[0], "--protocol"]', main)
+        self.assertNotIn("poll(", main)
         self.assertIn("UNUserNotificationCenterDelegate", delegate)
         self.assertIn("didReceive", delegate)
         self.assertIn("onActionHandled", delegate)
@@ -32,6 +34,9 @@ class MacOSNotifySourceTests(unittest.TestCase):
         self.assertIn("scheduleExpiryCleanup", delegate)
         self.assertIn("macOS has no native expiration", delegate)
         self.assertIn("opaqueID(arguments[2]", (root / "main.swift").read_text(encoding="utf-8"))
+        self.assertIn("ExpiryRecord", delegate)
+        self.assertIn("expectedGeneration", delegate)
+        self.assertIn("record.generation == expectedGeneration", delegate)
 
 
 if __name__ == "__main__":

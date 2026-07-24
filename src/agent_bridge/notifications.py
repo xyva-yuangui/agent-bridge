@@ -101,7 +101,8 @@ class WindowsNotifier:
             return _failure(str(error))
         try:
             returncode, stdout, stderr, reason = _run_capped_helper(
-                self.helper_path, payload.encode("utf-8"), self.timeout_seconds, self.max_output_bytes
+                self.helper_path, payload.encode("utf-8"), self.timeout_seconds, self.max_output_bytes,
+                self._helper_arguments(),
             )
         except (OSError, UnicodeError) as error:
             return _failure("native notification helper unavailable: {0}".format(error))
@@ -115,6 +116,9 @@ class WindowsNotifier:
         if returncode != 0:
             return _failure(_bounded_detail(stderr_text) or "native notification helper exited {0}".format(returncode))
         return _parse_response(stdout_text)
+
+    def _helper_arguments(self) -> tuple[str, ...]:
+        return ()
 
 
 class MacOSNotifier(WindowsNotifier):
@@ -141,6 +145,9 @@ class MacOSNotifier(WindowsNotifier):
         if not registered.ok:
             return registered
         return self.status()
+
+    def _helper_arguments(self) -> tuple[str, ...]:
+        return ("--protocol",)
 
     def post(self, notice: NotificationNotice) -> NotificationResult:
         result = super().post(notice)
@@ -188,36 +195,48 @@ def macos_signing_assessment(helper_path: Path | str) -> MacOSSigningAssessment:
     if app is None or not app.is_dir():
         return MacOSSigningAssessment("unknown", "configured helper is not inside an app bundle", "unknown")
     try:
-        codesign = subprocess.run(
-            ["/usr/bin/codesign", "-dvvv", str(app)], capture_output=True, text=True,
+        verified = subprocess.run(
+            ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)], capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=2.0, check=False,
         )
     except (OSError, subprocess.SubprocessError) as error:
         return MacOSSigningAssessment("unknown", "could not assess code signature: {0}".format(error), "unknown")
-    output = (codesign.stdout + "\n" + codesign.stderr).lower()
-    if codesign.returncode != 0:
-        status = "unsigned" if "not signed" in output or "code object is not signed" in output else "unknown"
-        return MacOSSigningAssessment(status, "codesign did not validate the app bundle", "unknown")
-    if "signature=adhoc" in output or "signature=ad hoc" in output:
-        return MacOSSigningAssessment("ad_hoc", "codesign reports an ad-hoc signature", "not_assessed")
+    output = (verified.stdout + "\n" + verified.stderr).lower()
+    if verified.returncode != 0:
+        status = "unsigned" if "not signed" in output or "code object is not signed" in output else "invalid"
+        return MacOSSigningAssessment(status, "codesign verification did not validate the app bundle", "unknown")
     try:
-        gatekeeper = subprocess.run(
-            ["/usr/sbin/spctl", "-a", "-vv", str(app)], capture_output=True, text=True,
+        details = subprocess.run(
+            ["/usr/bin/codesign", "-dvvv", str(app)], capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=2.0, check=False,
         )
     except (OSError, subprocess.SubprocessError) as error:
-        return MacOSSigningAssessment("signed", "codesign validated the app bundle", "unknown: {0}".format(error))
+        return MacOSSigningAssessment("unknown", "could not inspect code signature: {0}".format(error), "unknown")
+    detail_output = (details.stdout + "\n" + details.stderr).lower()
+    if details.returncode != 0:
+        return MacOSSigningAssessment("unknown", "codesign verification passed but signature details are unavailable", "unknown")
+    if "signature=adhoc" in detail_output or "signature=ad hoc" in detail_output:
+        return MacOSSigningAssessment("ad_hoc", "codesign verified an ad-hoc signature", "unknown")
+    try:
+        gatekeeper = subprocess.run(
+            ["/usr/sbin/spctl", "--assess", "--type", "execute", "--verbose=4", str(app)], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=2.0, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return MacOSSigningAssessment("signed", "codesign verified the app bundle", "unknown")
     gatekeeper_output = (gatekeeper.stdout + "\n" + gatekeeper.stderr).lower()
     if gatekeeper.returncode == 0 and "notarized" in gatekeeper_output:
-        return MacOSSigningAssessment("notarized", "codesign validated the app bundle", "accepted and notarized")
+        return MacOSSigningAssessment("notarized", "codesign verified the app bundle", "notarized")
     if gatekeeper.returncode == 0:
-        return MacOSSigningAssessment("signed", "codesign validated the app bundle", "accepted, notarization not reported")
-    return MacOSSigningAssessment("signed", "codesign validated the app bundle", "rejected or unknown")
+        return MacOSSigningAssessment("signed", "codesign verified the app bundle", "accepted")
+    return MacOSSigningAssessment("signed", "codesign verified the app bundle", "rejected")
 
 
-def _run_capped_helper(path: Path, payload: bytes, timeout: float, limit: int) -> tuple[int, bytes, bytes, str]:
+def _run_capped_helper(
+    path: Path, payload: bytes, timeout: float, limit: int, arguments: Sequence[str] = ()
+) -> tuple[int, bytes, bytes, str]:
     """Drain both pipes concurrently; overflow and timeout always kill and join."""
-    process = subprocess.Popen([str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
+    process = subprocess.Popen([str(path), *arguments], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
     streams = [bytearray(), bytearray()]
     overflow = threading.Event()
     def drain(index: int, pipe: Any) -> None:

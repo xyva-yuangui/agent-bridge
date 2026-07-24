@@ -32,7 +32,24 @@
 - macOS capability/doctor output now separates signature state (`unsigned`,
   `ad_hoc`, `signed`, `notarized`, or `unknown`) from Gatekeeper assessment.
   Strict doctor rejects unsigned/ad-hoc helpers; non-strict local development
-  remains usable.
+remains usable.
+
+## P1 review fixes
+
+- Python now always starts the helper with `--protocol`; stdin is read only in
+  that explicit mode. A no-argument app launch enters the accessory lifecycle,
+  and unknown arguments receive a bounded JSON failure instead of racing a
+  stdin poll.
+- Expiry metadata now contains a unique generation. The bounded cleanup child
+  supplies both its expiry and generation; under a cross-process file lock the
+  helper re-reads persisted metadata, removes only a matching expired record,
+  then removes the stable pending/delivered notification. A stale child cannot
+  remove a replacement.
+- Signing now runs fixed `codesign --verify --deep --strict`, then inspected
+  signature details and fixed `spctl --assess --type execute --verbose=4`.
+  Status distinguishes `signed`, `notarized`, `ad_hoc`, `unsigned`, `invalid`,
+  and `unknown`; strict doctor requires valid signing plus Gatekeeper accepted
+  or notarized.
 
 ## Verification on this host
 
@@ -44,7 +61,7 @@ $env:PYTHONPATH='src'; py -3 -m compileall -q src tests
 git diff --check
 ```
 
-Focused result: 32 notifier and v2 CLI regression tests passed. `swift --version` and `bash` are unavailable
+Focused result: 35 notifier and v2 CLI regression tests passed. `swift --version` and `bash` are unavailable
 on this Windows host, so neither Swift compilation nor shell syntax validation
 could run. No authenticated, in-scope remote macOS runner is configured.
 

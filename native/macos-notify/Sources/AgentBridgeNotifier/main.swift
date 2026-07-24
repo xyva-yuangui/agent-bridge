@@ -1,5 +1,4 @@
 import AppKit
-import Darwin
 import Foundation
 
 func readRequest() throws -> Data {
@@ -26,13 +25,6 @@ func run(_ input: Data) -> Response {
         case let .action(action, notificationID, _): return delegate.forward(action: action, notificationID: notificationID)
         }
     } catch { return .failure(error.localizedDescription) }
-}
-
-func protocolInput() -> Data? {
-    if isatty(STDIN_FILENO) != 0 { return nil }
-    var descriptor = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
-    guard poll(&descriptor, 1, 250) > 0, let data = try? readRequest(), !data.isEmpty else { return nil }
-    return data
 }
 
 func writeResponse(_ response: Response) {
@@ -66,20 +58,27 @@ func runApplicationMode() {
 }
 
 func runExpiryCleanupChild(arguments: [String]) -> Bool {
-    guard arguments.count == 4, arguments[1] == "--cleanup-expired",
+    guard arguments.count == 5, arguments[1] == "--cleanup-expired",
           let expiry = TimeInterval(arguments[3]) else { return false }
     do { try opaqueID(arguments[2], "notification_id") } catch { return false }
+    do { try opaqueID(arguments[4], "expiry_generation") } catch { return false }
+    let delay = expiry - Date().timeIntervalSince1970
+    guard (0.0...30.0).contains(delay) else { return false }
+    if delay > 0 { Thread.sleep(forTimeInterval: delay) }
     let notifier = AppDelegate()
     notifier.configure()
-    notifier.cleanupExpiredNotification(arguments[2], expectedAt: expiry)
+    notifier.cleanupExpiredNotification(arguments[2], expectedAt: expiry, expectedGeneration: arguments[4])
     return true
 }
 
 let arguments = CommandLine.arguments
 if runExpiryCleanupChild(arguments: arguments) {
     // The bounded cleanup child deliberately emits no protocol output.
-} else if let input = protocolInput() {
-    writeResponse(run(input))
-} else {
+} else if arguments == [CommandLine.arguments[0], "--protocol"] {
+    do { writeResponse(run(try readRequest())) }
+    catch { writeResponse(.failure(error.localizedDescription)) }
+} else if arguments.count == 1 {
     runApplicationMode()
+} else {
+    writeResponse(.failure("helper arguments are invalid"))
 }

@@ -228,7 +228,7 @@ def execute_command(
         signing = None
         if sys.platform == "darwin":
             signing = macos_signing_assessment(notification_capability.helper_path)
-            checks["native_notification_signing"] = signing.status in ("signed", "notarized")
+            checks["native_notification_signing"] = signing.status in ("signed", "notarized") and signing.gatekeeper in ("accepted", "notarized")
         strict = bool(_argument(arguments, "strict"))
         return {
             "ok": all(checks.values()) if strict else report.ok,
