@@ -1,13 +1,13 @@
 # ZCode review: Agent Bridge v2
 
 Date: 2026-07-24
-Candidate: `e7ea9c8537cc1b463a09642bbf95d5f3abd6c00f`
+Candidate: `ce229dbfbae415f270c16db24f690976b294c46b`
 
 ## Review scope
 
 - Design: `docs/superpowers/specs/2026-07-23-agent-bridge-v2-lightweight-desktop-design.md`
 - Plan: `docs/superpowers/plans/2026-07-23-agent-bridge-v2-lightweight-desktop.md`
-- Commit range: `06ff3c222f78d20903a95a998de595c023386de5..e7ea9c8537cc1b463a09642bbf95d5f3abd6c00f`
+- Commit range: `06ff3c222f78d20903a95a998de595c023386de5..ce229dbfbae415f270c16db24f690976b294c46b`
 - Delivery model: package-only, SQLite + transactional outbox, short bounded
   dispatch bursts, on-demand terminal TUI, no resident daemon/listener/cloud
   service/default telemetry.
@@ -43,18 +43,23 @@ observed. No macOS machine, Swift toolchain, or final universal2 app was
 available locally; do not approve a macOS native-notification release claim
 without the CI/real-machine evidence named in the macOS report.
 
-**Current production E2E blocker:** an independent review found that the
-dispatcher is not yet wired to deliver HostAdapter session cards; the global
-launcher channel can classify a manual recipient as delivered; MCP actor values
-can be overridden; setup's production notification activation argv omits
-`--as`; the Claude hook/host-consumer workflow is incomplete; and Windows CAS
-displaced content can be lost. Treat the attached acceptance documents as
-provisional lower-level/package observations. Do not approve this candidate
-until those findings are fixed and the four-host production E2E evidence is
-rerun.
+The previous production blockers are now repaired: dispatcher HostAdapter
+delivery is wired and tested for all four hosts; a recipient with no applicable
+channel remains due; MCP/consumer identity is host-bound; Claude SessionStart
+consumes and acknowledges cards; notification actions use the stored assignee
+and fixed activation argv; Windows config CAS preserves displaced edits;
+shared runtime/scoped uninstall and public execution profiles are durable; and
+native upgrades roll back on registration failure.
 
-The local host also lacked `cargo`; the staged locked Windows helper hash was
-verified and exercised, while the Rust rebuild remains a CI/release gate.
+Final local evidence is `Ran 252 tests in 158.694s`, `OK`, with P95 create
+`0.988 ms`, inbox `1.828 ms`, tick `0.009 ms`, and TUI projection `2.005 ms`.
+The reproducible wheel, compileall, rustfmt, and whitespace checks passed.
+
+Rust/rustfmt are available locally, but a locked native rebuild could not link
+because this Windows host lacks Visual C++ `link.exe`. The checked-in baseline
+helper was exercised; the latest Rust ownership source must be rebuilt and
+Authenticode-signed by the release pipeline. macOS remains a real-machine/CI
+gate. Do not infer either platform-native UI acceptance from source tests.
 
 ## Reproduction commands
 
@@ -77,6 +82,11 @@ py -3 -m unittest tests.test_cli tests.test_mcp tests.integration.test_migrate_v
 On macOS, additionally follow every command and manual acceptance check in
 `artifacts/platform/macos/acceptance.md` and the portable ZIP smoke in
 `.github/workflows/release.yml` before approving native delivery.
+
+After review, return actionable `changes` or `approve`. If approved, ZCode is
+also the designated publisher: push `feature/agent-bridge-v2` and the reviewed
+commits to the intended GitHub repository, then report the exact remote,
+branch, and pushed commit. Codex must not perform the push.
 
 ## v1 review-finding disposition
 

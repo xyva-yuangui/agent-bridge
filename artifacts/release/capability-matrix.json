@@ -1,27 +1,65 @@
 {
   "schema": 1,
   "version": "2.0.0",
-  "candidate_commit": "e7ea9c8537cc1b463a09642bbf95d5f3abd6c00f",
+  "candidate_commit": "ce229dbfbae415f270c16db24f690976b294c46b",
   "primary_artifact": {
     "name_pattern": "agent-bridge-<version>-portable.zip",
     "status": "not_assembled_on_windows",
-    "reason": "A complete primary ZIP requires the macOS universal2 notification app from the aggregate GitHub Actions workflow. A Windows-only fixture ZIP is not a release artifact."
+    "reason": "A complete primary ZIP requires the signed macOS universal2 notification app from the aggregate GitHub Actions workflow. A Windows-only fixture ZIP is not a release artifact."
   },
   "hosts": {
-    "codex": {"mechanism": "mcp", "configured_surface": "session_card", "acknowledgement": "native host consumer", "terminal": "terminal_fallback", "windows_acceptance": "package-only entrypoint only; production dispatch pending remediation", "macos_acceptance": "not_run"},
-    "claude": {"mechanism": "hook", "configured_surface": "session_card", "acknowledgement": "native host consumer", "terminal": "terminal_fallback", "windows_acceptance": "package-only entrypoint only; production dispatch/hook pending remediation", "macos_acceptance": "not_run"},
-    "reasonix": {"mechanism": "plugin", "configured_surface": "session_card", "acknowledgement": "native host consumer", "terminal": "terminal_fallback", "windows_acceptance": "package-only entrypoint only; production dispatch pending remediation", "macos_acceptance": "not_run"},
-    "zcode": {"mechanism": "plugin_hook", "configured_surface": "session_card", "acknowledgement": "native host consumer", "terminal": "terminal_fallback", "windows_acceptance": "package-only entrypoint only; production dispatch pending remediation", "macos_acceptance": "not_run"}
+    "codex": {
+      "mechanism": "mcp",
+      "configured_surface": "session_card",
+      "acknowledgement": "host-bound consumer",
+      "terminal": "integrated_when_configured_else_fallback",
+      "windows_acceptance": "one-install production dispatcher card and acknowledgement contract passed",
+      "macos_acceptance": "not_run"
+    },
+    "claude": {
+      "mechanism": "session_start_hook",
+      "configured_surface": "session_card",
+      "acknowledgement": "hook consumes and durably acknowledges",
+      "terminal": "integrated_when_configured_else_fallback",
+      "windows_acceptance": "one-install production dispatcher card plus SessionStart acknowledgement passed",
+      "macos_acceptance": "not_run"
+    },
+    "reasonix": {
+      "mechanism": "plugin",
+      "configured_surface": "session_card",
+      "acknowledgement": "host-bound consumer",
+      "terminal": "integrated_when_configured_else_fallback",
+      "windows_acceptance": "one-install production dispatcher card and acknowledgement contract passed",
+      "macos_acceptance": "not_run"
+    },
+    "zcode": {
+      "mechanism": "plugin_hook",
+      "configured_surface": "session_card",
+      "acknowledgement": "host-bound consumer",
+      "terminal": "integrated_when_configured_else_fallback",
+      "windows_acceptance": "one-install production dispatcher card and acknowledgement contract passed",
+      "macos_acceptance": "not_run"
+    }
   },
   "notifications": {
-    "windows": {"helper": "native Windows WinRT Toast", "acceptance": "register/status/post/action-uri/unregister exercised", "ui_click_and_notification_center_visual": "not_observed"},
-    "macos": {"helper": "internal universal2 UserNotifications app", "acceptance": "not_run", "fallback": "terminal_fallback/degraded until receipted app and real-machine evidence exist"}
+    "windows": {
+      "helper": "native Windows WinRT Toast x86-64",
+      "acceptance": "baseline binary lifecycle exercised; latest source rebuild and Authenticode signing are release gates",
+      "ui_click_and_notification_center_visual": "not_observed"
+    },
+    "macos": {
+      "helper": "internal universal2 UserNotifications app",
+      "acceptance": "not_run",
+      "fallback": "terminal_fallback/degraded until receipted app and real-machine evidence exist"
+    }
   },
   "global_degradations": [
     "An absent host is skipped by --auto and reported as terminal_fallback/degraded; it is not claimed as installed.",
     "Host session-card surfaces are provided through each host's configured consumer; they are not native desktop panels.",
-    "Production host-session-card dispatch, manual-recipient launch classification, MCP actor binding, activation identity, Claude hook/consumer behavior, and Windows CAS displaced-content preservation are pending remediation; current Windows evidence is provisional.",
     "No default resident daemon, web dashboard, telemetry, or network listener exists; the dispatcher and TUI exit when idle.",
+    "Snooze is durable and due-time gated, but without a resident scheduler it is re-dispatched on the next bridge activity after the due time.",
+    "Windows native notification is x86-64 only in 2.0.0; ARM64 is not claimed.",
+    "The final release must rebuild and Authenticode-sign the Windows helper because the local host lacked the MSVC linker.",
     "macOS native-notification, signing, Gatekeeper, notarization, Intel, and Apple Silicon acceptance remain pending CI/real-machine evidence."
   ]
 }

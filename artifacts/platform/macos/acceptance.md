@@ -1,7 +1,7 @@
 # macOS acceptance evidence
 
 Date: 2026-07-24
-Candidate: `e7ea9c8537cc1b463a09642bbf95d5f3abd6c00f` (Agent Bridge 2.0.0)
+Candidate: `ce229dbfbae415f270c16db24f690976b294c46b` (Agent Bridge 2.0.0)
 
 ## Honest current status
 
@@ -17,7 +17,10 @@ was available, so none of the following has been executed for this candidate:
 Therefore macOS native notifications are **not** claimed as accepted. On macOS
 without the receipted app, Agent Bridge honestly reports terminal fallback/
 degraded notification capability. The Swift source, helper protocol tests, and
-receipted setup lifecycle are source-level coverage only on this host.
+receipted setup lifecycle are source-level coverage only on this host. The
+Windows-run suite did verify that a rejected native-app upgrade restores the
+previous app bytes, ownership receipt, and registration, but this is not a
+substitute for a macOS execution.
 
 ## Required CI/release evidence
 
