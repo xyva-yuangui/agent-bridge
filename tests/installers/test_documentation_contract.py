@@ -144,6 +144,14 @@ class DocumentationContractTests(unittest.TestCase):
         for token in ("portable-macos-smoke:", "assembled-release", "AgentBridgeNotifier.app", "setup --repair", "uninstall --home"):
             self.assertIn(token, release)
         self.assertLess(release.index("portable-macos-smoke:"), release.index("publish:"))
+        self.assertIn("verify_signed_app \"$extracted_app\"", release)
+        self.assertIn("verify_signed_app \"$owned_app\"", release)
+        self.assertIn("xcrun stapler validate", release)
+        self.assertIn("spctl --assess --type execute", release)
+        self.assertIn("signing=unsigned", release)
+        self.assertLess(release.index("unzip -q"), release.index("verify_signed_app \"$extracted_app\""))
+        self.assertLess(release.index("verify_signed_app \"$owned_app\""), release.index("uninstall --home"))
+        self.assertLess(release.index("uninstall --home"), release.index("publish:"))
 
     def test_macos_tag_signing_provisions_and_cleans_ephemeral_credentials_before_packaging(self) -> None:
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")

@@ -523,7 +523,7 @@ def _notification_status(home: Path) -> Dict[str, object]:
         try:
             owned = json.loads(receipt.read_text(encoding="utf-8"))
             if owned.get("owner") == "agent-bridge.macos-notify" and app.is_dir() and owned.get("app_sha256") == _tree_hash(app):
-                return {"available": True, "helper_path": str(executable), "detail": "owned macOS notification app installed; signing=" + str(owned.get("signing_status", "unknown"))}
+                return {"available": True, "helper_path": str(executable), "detail": "owned macOS notification app installed; signing={0}; gatekeeper={1}".format(owned.get("signing_status", "unknown"), owned.get("gatekeeper", "unknown"))}
         except (OSError, ValueError): pass
     capability = macos_notification_capability() if sys.platform == "darwin" else windows_notification_capability()
     return {"available": capability.available, "helper_path": capability.helper_path, "detail": capability.detail}

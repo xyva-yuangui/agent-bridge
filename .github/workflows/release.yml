@@ -303,6 +303,8 @@ jobs:
   portable-macos-smoke:
     needs: aggregate
     runs-on: macos-latest
+    env:
+      SIGNING_REQUIRED: ${{ needs.validate.outputs.signing }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -324,13 +326,51 @@ jobs:
           : > "$home/.reasonix/config.toml"
           printf '%s\n' '{}' > "$home/.zcode/cli/config.json"
           package=$(find "$root" -maxdepth 1 -type d -name 'agent-bridge-*' -print -quit)
+          extracted_app="$package/native/macos-universal2/AgentBridgeNotifier.app"
+          test -d "$extracted_app"
+          verify_signed_app() {
+            local app="$1"
+            codesign --verify --deep --strict --verbose=2 "$app"
+            xcrun stapler validate "$app"
+            spctl --assess --type execute --verbose=4 "$app"
+          }
+          if [[ "$SIGNING_REQUIRED" == true ]]; then
+            verify_signed_app "$extracted_app"
+            extracted_requirement="$(codesign -d -r- "$extracted_app" 2>&1 | grep 'designated =>')"
+            extracted_team="$(codesign -dvv "$extracted_app" 2>&1 | grep '^TeamIdentifier=')"
+            extracted_bundle="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$extracted_app/Contents/Info.plist")"
+          fi
           export PYTHONUSERBASE="$userbase"
-          export AGENT_BRIDGE_MACOS_NOTIFY_APP="$package/native/macos-universal2/AgentBridgeNotifier.app"
+          export AGENT_BRIDGE_MACOS_NOTIFY_APP="$extracted_app"
           unset PYTHONPATH
           "$package/install.sh" --auto --python python3 --install-root "$home"
-          test -d "$home/.agent-bridge/native/macos-universal2/AgentBridgeNotifier.app"
-          test -f "$home/.agent-bridge/native/macos-universal2/receipt.json"
-          python3 -m agent_bridge.cli setup status --home "$home"
+          owned_app="$home/.agent-bridge/native/macos-universal2/AgentBridgeNotifier.app"
+          receipt="$home/.agent-bridge/native/macos-universal2/receipt.json"
+          test -d "$owned_app"
+          test -f "$receipt"
+          if [[ "$SIGNING_REQUIRED" == true ]]; then
+            verify_signed_app "$owned_app"
+            test "$extracted_requirement" = "$(codesign -d -r- "$owned_app" 2>&1 | grep 'designated =>')"
+            test "$extracted_team" = "$(codesign -dvv "$owned_app" 2>&1 | grep '^TeamIdentifier=')"
+            test "$extracted_bundle" = "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$owned_app/Contents/Info.plist")"
+          fi
+          python3 - "$receipt" "$owned_app" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+          receipt, app = Path(sys.argv[1]), Path(sys.argv[2])
+          owned = json.loads(receipt.read_text(encoding='utf-8'))
+          executable = app / 'Contents' / 'MacOS' / 'AgentBridgeNotifier'
+          digest = hashlib.sha256()
+          for item in sorted(path for path in app.rglob('*') if path.is_file()):
+              digest.update(item.relative_to(app).as_posix().encode('utf-8') + b'\0'); digest.update(item.read_bytes())
+          assert owned['app_sha256'] == digest.hexdigest()
+          assert owned['executable_sha256'] == hashlib.sha256(executable.read_bytes()).hexdigest()
+          assert owned['app_path'] == str(app)
+          PY
+          smoke_status="$(python3 -m agent_bridge.cli --json setup status --home "$home")"
+          if [[ "$SIGNING_REQUIRED" != true ]]; then
+            printf '%s' "$smoke_status" | python3 -c 'import json,sys; value=json.load(sys.stdin); detail=value["setup"]["notifications"]["detail"]; assert "signing=unsigned" in detail and "gatekeeper=unknown" in detail'
+          fi
           python3 -m agent_bridge.cli setup --repair --home "$home"
           python3 -m agent_bridge.cli uninstall --home "$home"
 
