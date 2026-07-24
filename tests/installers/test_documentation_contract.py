@@ -136,7 +136,9 @@ class DocumentationContractTests(unittest.TestCase):
             "sign-and-notarize.sh", "Remove ephemeral signing keychain", "delete-generic-password", "security delete-keychain",
         ):
             self.assertIn(token, release)
+        self.assertNotIn("base64 --decode", release)
         self.assertLess(release.index("Provision ephemeral Developer ID keychain"), release.index("Build, sign, notarize"))
+        self.assertLess(release.index("base64.b64decode"), release.index("security import"))
         self.assertLess(release.index("Build, sign, notarize"), release.index("Build and exercise packaged macOS wheel"))
         self.assertLess(release.index("Remove ephemeral signing keychain"), release.index("Build and exercise packaged macOS wheel"))
         self.assertLess(release.index("Build and exercise packaged macOS wheel"), release.index("sha256sum -c"))

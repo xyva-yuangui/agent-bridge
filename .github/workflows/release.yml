@@ -142,7 +142,21 @@ jobs:
           keychain_password="$(uuidgen)"
           notary_profile="agent-bridge-notary-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           echo "::add-mask::$keychain_password"
-          printf '%s' "$AGENT_BRIDGE_SIGNING_P12_B64" | base64 --decode > "$certificate"
+          CERTIFICATE_PATH="$certificate" python - <<'PY'
+          import base64
+          import binascii
+          import os
+          from pathlib import Path
+
+          encoded = os.environ["AGENT_BRIDGE_SIGNING_P12_B64"]
+          try:
+              decoded = base64.b64decode(encoded, validate=True)
+          except binascii.Error as error:
+              raise SystemExit("invalid signing P12 base64") from error
+          target = Path(os.environ["CERTIFICATE_PATH"])
+          target.write_bytes(decoded)
+          target.chmod(0o600)
+          PY
           security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
