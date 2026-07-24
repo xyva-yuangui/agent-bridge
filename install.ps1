@@ -162,6 +162,11 @@ function Install-WindowsNotifier {
     if (-not (Test-Path -LiteralPath $source)) { throw "Windows notifier release helper is missing; build native/windows-notify before installation." }
     New-Item -ItemType Directory -Force -Path $script:NotifierHome | Out-Null
     $destination = Join-Path $script:NotifierHome "agent-bridge-windows-notify.exe"
+    $receipt = Join-Path $script:NotifierHome "receipt.json"
+    $priorProcess = $env:AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER
+    $priorUser = [Environment]::GetEnvironmentVariable("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", "User")
+    if ((Test-Path -LiteralPath $destination) -and -not (Test-Path -LiteralPath $receipt)) { throw "Refusing to overwrite an unowned Windows notifier helper." }
+    if (($priorProcess -and $priorProcess -ne $destination) -or ($priorUser -and $priorUser -ne $destination)) { throw "Refusing to overwrite an unrelated Windows notifier environment value." }
     Copy-Item -LiteralPath $source -Destination $destination -Force
     $json = (@($PythonPath, "-m", "agent_bridge.cli") | ConvertTo-Json -Compress)
     $env:AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER = $destination
@@ -170,9 +175,13 @@ function Install-WindowsNotifier {
     try {
         $result = $request | & $destination | ConvertFrom-Json
         if ($LASTEXITCODE -ne 0 -or -not $result.ok -or $result.status -ne "os_posted") { throw "Windows notifier registration returned an invalid result." }
+        @{ helper_path = $destination; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash } | ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath $receipt
     } catch {
-        [Environment]::SetEnvironmentVariable("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", $null, "User")
+        try { '{"operation":"unregister"}' | & $destination | Out-Null } catch {}
+        $env:AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER = $priorProcess
+        [Environment]::SetEnvironmentVariable("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", $priorUser, "User")
         Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $receipt -Force -ErrorAction SilentlyContinue
         throw
     }
 }
