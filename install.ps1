@@ -35,7 +35,20 @@ function Resolve-Python {
 }
 
 $pythonPath = Resolve-Python -Requested $Python
-& $pythonPath -m pip install --disable-pip-version-check --no-build-isolation --no-deps --user $sourceRoot
+$bootstrapWheel = Join-Path $sourceRoot "bootstrap\agent_bridge-2.0.0-py3-none-any.whl"
+$bootstrapMetadata = Join-Path $sourceRoot "bootstrap\agent_bridge-2.0.0.bootstrap.json"
+if (Test-Path -LiteralPath $bootstrapWheel) {
+    if (-not (Test-Path -LiteralPath $bootstrapMetadata)) { throw "Offline bootstrap metadata is missing; use a complete release archive." }
+    & $pythonPath -c "import hashlib,json,sys; wheel, metadata=sys.argv[1:]; value=json.load(open(metadata, encoding='utf-8')); actual=hashlib.sha256(open(wheel,'rb').read()).hexdigest(); raise SystemExit(0 if value.get('version') == '2.0.0' and value.get('wheel') == wheel.rsplit('\\',1)[-1] and value.get('sha256') == actual else 1)" $bootstrapWheel $bootstrapMetadata
+    if ($LASTEXITCODE -ne 0) { throw "Offline bootstrap metadata does not match its wheel; use a complete verified release archive." }
+    & $pythonPath -m pip install --disable-pip-version-check --no-index --no-deps --force-reinstall --user $bootstrapWheel
+} else {
+    & $pythonPath -c "import setuptools.build_meta"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Offline bootstrap wheel is missing and setuptools.build_meta is unavailable. Use a complete release archive containing bootstrap/agent_bridge-2.0.0-py3-none-any.whl."
+    }
+    & $pythonPath -m pip install --disable-pip-version-check --no-build-isolation --no-deps --force-reinstall --user $sourceRoot
+}
 if ($LASTEXITCODE -ne 0) {
     if (-not ($DevSourceFallback -or $env:AGENT_BRIDGE_DEV_SOURCE_FALLBACK -eq "1")) {
         throw "Package installation failed. Re-run after fixing pip, or explicitly pass -DevSourceFallback for a degraded checkout-only run."

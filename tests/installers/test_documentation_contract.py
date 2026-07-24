@@ -110,8 +110,12 @@ class DocumentationContractTests(unittest.TestCase):
             self.assertIn("actions/setup-python@v5", workflow)
             self.assertIn("--force-reinstall --no-deps", workflow)
         self.assertIn("verify-release.ps1", ci)
+        self.assertIn("bootstrap_wheel.py --check", ci)
+        self.assertIn("bootstrapMetadata", windows)
+        self.assertIn("bootstrap_metadata", shell)
         self.assertIn("git cat-file -t", release)
         self.assertIn("native/windows-x86_64/*.exe", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertTrue((ROOT / "bootstrap" / "agent_bridge-2.0.0-py3-none-any.whl").is_file())
 
     def test_release_is_a_signed_platform_pipeline_with_aggregate_inventory(self) -> None:
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8").lower()

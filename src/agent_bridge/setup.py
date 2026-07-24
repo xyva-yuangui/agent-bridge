@@ -132,15 +132,13 @@ def _install_runtime(home: Path) -> None:
     backup = data / (".skill-backup-" + next(tempfile._get_candidate_names()))
     try:
         scripts = stage / "scripts"; scripts.mkdir(parents=True)
-        (scripts / "bridge.py").write_text(
-            "#!/usr/bin/env python3\n"
-            "import sys\nfrom pathlib import Path\n"
-            "runtime = Path(__file__).resolve().parent.parent / 'runtime'\n"
-            "if runtime.is_dir(): sys.path.insert(0, str(runtime))\n"
-            "from agent_bridge.cli import main\n"
-            "if __name__ == '__main__': raise SystemExit(main())\n",
-            encoding="utf-8",
-        )
+        bootstrap = resources.files("agent_bridge").joinpath("bootstrap")
+        for name in ("bridge.py", "bridge_mcp.py", "notify_windows.ps1"):
+            resource = bootstrap.joinpath(name)
+            if not resource.is_file():
+                raise RuntimeError("Agent Bridge bootstrap resource is missing: " + name)
+            with resources.as_file(resource) as source:
+                shutil.copy2(source, scripts / name)
         # The installed distribution is authoritative.  Resolving relative to
         # a checkout worked only in development and made a wheel install fail
         # when setup first created the self-contained repair runtime.

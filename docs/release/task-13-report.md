@@ -77,3 +77,26 @@ removed immediately after the check.
 The Chinese README was rewritten as valid UTF-8 after detecting mojibake.  It
 now documents the explicit development fallback, four-host support, and the
 real-machine macOS release requirement.
+
+## Offline bootstrap and cleanup regression fixes (2026-07-24)
+
+The repository now tracks `bootstrap/agent_bridge-2.0.0-py3-none-any.whl` and
+its SHA-256/source inventory metadata.  `scripts/bootstrap_wheel.py --check`
+validates the portable wheel's version, RECORD, packaged source/resource hashes
+and native helper; CI and tag validation execute that check.  The Windows and
+shell installers prefer this wheel with `--no-index --no-deps --force-reinstall`
+and therefore do not need build isolation, a network connection, or
+`setuptools.build_meta`.  A checkout without that release payload can build
+from source only when its backend is already available; otherwise it explains
+that a complete release archive is required.
+
+The compatibility runtime now copies the wheel-owned `bridge.py`,
+`bridge_mcp.py`, and `notify_windows.ps1` bootstrap resources alongside the
+runtime package.  The package-only installer test proves the normal installer
+path, `site-packages` origin, no `PYTHONPATH`, and the real MCP entrypoint.
+
+The 30-send concurrency regression now uses the synchronous public service
+path, asserts all task and uncompleted-outbox rows, checks that no dispatcher
+lease remains, and repeats five times.  This preserves the concurrency/outbox
+coverage without detached dispatcher processes retaining a temporary SQLite
+handle after the test finishes.

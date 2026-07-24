@@ -46,7 +46,26 @@ resolve_python() {
 }
 
 python_path="$(resolve_python)"
-if ! "$python_path" -m pip install --disable-pip-version-check --no-build-isolation --no-deps --user "$source_root"; then
+bootstrap_wheel="$source_root/bootstrap/agent_bridge-2.0.0-py3-none-any.whl"
+bootstrap_metadata="$source_root/bootstrap/agent_bridge-2.0.0.bootstrap.json"
+install_failed=0
+if [ -f "$bootstrap_wheel" ]; then
+  if [ ! -f "$bootstrap_metadata" ]; then
+    echo "Offline bootstrap metadata is missing; use a complete release archive." >&2
+    exit 1
+  fi
+  if ! "$python_path" -c 'import hashlib,json,os,sys; wheel, metadata=sys.argv[1:]; value=json.load(open(metadata, encoding="utf-8")); actual=hashlib.sha256(open(wheel,"rb").read()).hexdigest(); raise SystemExit(0 if value.get("version") == "2.0.0" and value.get("wheel") == os.path.basename(wheel) and value.get("sha256") == actual else 1)' "$bootstrap_wheel" "$bootstrap_metadata"; then
+    echo "Offline bootstrap metadata does not match its wheel; use a complete verified release archive." >&2
+    exit 1
+  fi
+  if ! "$python_path" -m pip install --disable-pip-version-check --no-index --no-deps --force-reinstall --user "$bootstrap_wheel"; then install_failed=1; fi
+elif "$python_path" -c 'import setuptools.build_meta'; then
+  if ! "$python_path" -m pip install --disable-pip-version-check --no-build-isolation --no-deps --force-reinstall --user "$source_root"; then install_failed=1; fi
+else
+  echo "Offline bootstrap wheel is missing and setuptools.build_meta is unavailable. Use a complete release archive containing bootstrap/agent_bridge-2.0.0-py3-none-any.whl." >&2
+  exit 1
+fi
+if [ "$install_failed" -ne 0 ]; then
   if [ "$dev_source_fallback" -ne 1 ] && [ "${AGENT_BRIDGE_DEV_SOURCE_FALLBACK:-}" != "1" ]; then
     echo "Package installation failed. Fix pip or pass --dev-source-fallback for degraded checkout-only use." >&2
     exit 1

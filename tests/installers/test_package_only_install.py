@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import shutil
@@ -15,10 +14,7 @@ from pathlib import Path
 from tests.support import ROOT
 
 
-@unittest.skipUnless(
-    os.name == "nt" and shutil.which("powershell.exe") and importlib.util.find_spec("setuptools"),
-    "requires PowerShell and local setuptools to build the package",
-)
+@unittest.skipUnless(os.name == "nt" and shutil.which("powershell.exe"), "requires PowerShell")
 class PackageOnlyWindowsInstallerTests(unittest.TestCase):
     def test_one_normal_install_uses_site_package_with_no_pythonpath(self) -> None:
         powershell = shutil.which("powershell.exe")
@@ -49,7 +45,7 @@ class PackageOnlyWindowsInstallerTests(unittest.TestCase):
             origin = Path(json.loads(probe.stdout)["origin"]).resolve()
             self.assertIn(user_base.resolve(), origin.parents)
             self.assertNotIn((ROOT / "src").resolve(), origin.parents)
-            receipt = json.loads((home / ".codex" / "agent-bridge-installation.json").read_text(encoding="utf-8"))
+            receipt = json.loads((home / ".agent-bridge" / "host-integrations" / "codex.json").read_text(encoding="utf-8"))
             started = subprocess.run(
                 receipt["entrypoint"], input='{"jsonrpc":"2.0","id":1,"method":"initialize"}\n',
                 capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=30,

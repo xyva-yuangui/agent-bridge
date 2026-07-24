@@ -48,6 +48,7 @@ jobs:
           test "$(git cat-file -t "$REQUESTED_TAG")" = tag
           git describe --exact-match --tags HEAD | grep -Fx "$REQUESTED_TAG"
           test "${REQUESTED_TAG#v}" = "$(python -c 'from pathlib import Path; import re; print(re.search(r"version = \"([^\"]+)\"", Path("pyproject.toml").read_text()).group(1))')"
+          python scripts/bootstrap_wheel.py --check
           if [[ "$GITHUB_REF_TYPE" == tag || "$MANUAL_SIGN" == true ]]; then
             test -n "$AGENT_BRIDGE_CODESIGN_IDENTITY"
             test -n "$AGENT_BRIDGE_NOTARY_PROFILE"

@@ -23,6 +23,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m pip install --upgrade pip build
       - run: python -m pip install .
+      - run: python scripts/bootstrap_wheel.py --check
       - run: python -m unittest discover -s tests -v
       - run: python -m compileall -q src scripts tests
       - name: Build distributions
@@ -48,6 +49,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip build
+          python scripts/bootstrap_wheel.py --check
           python -m build
           python -m pip install --force-reinstall --no-deps dist/*.whl
       - name: Locked Rust release build and size gate
@@ -73,6 +75,7 @@ jobs:
       - name: Install built package before Python tests
         run: |
           python -m pip install --upgrade pip build
+          python scripts/bootstrap_wheel.py --check
           python -m build
           python -m pip install --force-reinstall --no-deps dist/*.whl
       - name: Universal2 Swift helper build and size gate
