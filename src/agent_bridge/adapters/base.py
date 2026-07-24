@@ -208,14 +208,17 @@ class HostAdapter(abc.ABC):
         self._assert_contained(self.config_path)
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         with _config_lock(self.config_path):
+            config_installed = False
             try:
                 self._install_config()
+                config_installed = True
                 self._write_installation_artifact()
             except BaseException:
-                try:
-                    self._uninstall_config()
-                finally:
-                    self._remove_installation_artifact()
+                if config_installed:
+                    try:
+                        self._uninstall_config()
+                    finally:
+                        self._remove_installation_artifact()
                 raise
         return OperationResult(self.name, True, DeliveryStatus.QUEUED, "managed session-card consumer installed")
 

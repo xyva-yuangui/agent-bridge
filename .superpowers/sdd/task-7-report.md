@@ -85,3 +85,9 @@
 - Per-card cross-process locks serialize staging/proof registration/publication so replacement cards cannot race through one deterministic pending filename.
 - ZCode records prior same-key registration values and bundle existence, restores only values it still owns, and only removes a bundle it created.
 - Focused adapter/config/MCP/store/service verification passed (52 tests), as did `compileall` and `git diff --check`.
+
+## ZCode ownership finalization
+
+- An existing ZCode bundle without the first-install ownership receipt now raises `ZCodeOwnershipConflict` before any config or bundle write.
+- Reinstall/repair reuses the original receipt rather than snapshotting Agent Bridge's own registration; uninstall restores the original same-key mappings and deletes only the bundle first created by this integration.
+- Exact byte preservation for refused installs and install/repair/uninstall mapping round trips are covered by focused config tests.

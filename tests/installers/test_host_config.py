@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from agent_bridge.adapters import ADAPTER_TYPES
 from agent_bridge.adapters import base
+from agent_bridge.adapters.zcode import ZCodeOwnershipConflict
 
 try:
     import tomllib
@@ -127,3 +128,34 @@ class HostConfigurationRoundTripTests(unittest.TestCase):
 
         self.assertEqual(path.read_text(encoding="utf-8"), original)
         self.assertFalse(adapter.installation_artifact_path.exists())
+
+    def test_zcode_refuses_to_overwrite_an_unowned_existing_bundle(self) -> None:
+        adapter = self._adapter("zcode")
+        path = self._copy_fixture("zcode", "unrelated.json")
+        original_config = path.read_bytes()
+        adapter.plugin_bundle_path.mkdir(parents=True)
+        plugin = adapter.plugin_bundle_path / "plugin.json"
+        plugin.write_bytes(b'{"third_party":true}\n')
+
+        with self.assertRaises(ZCodeOwnershipConflict):
+            adapter.install()
+
+        self.assertEqual(path.read_bytes(), original_config)
+        self.assertEqual(plugin.read_bytes(), b'{"third_party":true}\n')
+
+    def test_zcode_repair_keeps_first_ownership_snapshot_for_uninstall(self) -> None:
+        adapter = self._adapter("zcode")
+        path = self._copy_fixture("zcode", "unrelated.json")
+        original = json.loads(path.read_text(encoding="utf-8"))
+        original["plugins"].setdefault("enabledPlugins", {})["agent-bridge@local"] = False
+        original["plugins"].setdefault("localPlugins", {})["agent-bridge@local"] = "C:/third-party"
+        path.write_text(json.dumps(original) + "\n", encoding="utf-8")
+
+        adapter.install()
+        adapter.install()
+        adapter.uninstall()
+
+        restored = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(restored["plugins"]["enabledPlugins"]["agent-bridge@local"], False)
+        self.assertEqual(restored["plugins"]["localPlugins"]["agent-bridge@local"], "C:/third-party")
+        self.assertFalse(adapter.plugin_bundle_path.exists())

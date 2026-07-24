@@ -11,6 +11,10 @@ from .base import HostCapabilities, ManagedJsonAdapter, Surface, _atomic_write, 
 from ..version import PROTOCOL_VERSION
 
 
+class ZCodeOwnershipConflict(ValueError):
+    """A local plugin bundle exists but was not created by this integration."""
+
+
 class ZCodeAdapter(ManagedJsonAdapter):
     name = "zcode"
     fixture_suffix = ".json"
@@ -39,13 +43,18 @@ class ZCodeAdapter(ManagedJsonAdapter):
         return self.home / ".agent-bridge" / "host-integrations" / "zcode-ownership.json"
 
     def _install_config(self) -> None:
-        root_before = _read_json_object(self.config_path)
-        plugins_before = root_before.get("plugins", {}) if isinstance(root_before.get("plugins", {}), dict) else {}
-        enabled_before = plugins_before.get("enabledPlugins", {}) if isinstance(plugins_before.get("enabledPlugins", {}), dict) else {}
-        local_before = plugins_before.get("localPlugins", {}) if isinstance(plugins_before.get("localPlugins", {}), dict) else {}
-        ownership = {"enabled_present": "agent-bridge@local" in enabled_before, "enabled": enabled_before.get("agent-bridge@local"), "local_present": "agent-bridge@local" in local_before, "local": local_before.get("agent-bridge@local"), "bundle_existed": self.plugin_bundle_path.exists()}
-        self.ownership_path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(self.ownership_path, json.dumps(ownership, sort_keys=True) + "\n")
+        if self.ownership_path.exists():
+            ownership = _read_json_object(self.ownership_path)
+        else:
+            if self.plugin_bundle_path.exists():
+                raise ZCodeOwnershipConflict("refusing to overwrite an unowned ZCode plugin bundle")
+            root_before = _read_json_object(self.config_path)
+            plugins_before = root_before.get("plugins", {}) if isinstance(root_before.get("plugins", {}), dict) else {}
+            enabled_before = plugins_before.get("enabledPlugins", {}) if isinstance(plugins_before.get("enabledPlugins", {}), dict) else {}
+            local_before = plugins_before.get("localPlugins", {}) if isinstance(plugins_before.get("localPlugins", {}), dict) else {}
+            ownership = {"enabled_present": "agent-bridge@local" in enabled_before, "enabled": enabled_before.get("agent-bridge@local"), "local_present": "agent-bridge@local" in local_before, "local": local_before.get("agent-bridge@local"), "bundle_existed": False}
+            self.ownership_path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write(self.ownership_path, json.dumps(ownership, sort_keys=True) + "\n")
         self._assert_contained(self.plugin_bundle_path)
         self.plugin_bundle_path.mkdir(parents=True, exist_ok=True)
         source = Path(__file__).resolve().parents[3] / "integrations" / "zcode" / "plugin.json"
