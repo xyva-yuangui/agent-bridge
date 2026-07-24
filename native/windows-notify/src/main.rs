@@ -37,14 +37,14 @@ fn handle_activation_uri(uri: &str) -> Result<Response, String> {
     let notification_id = query.split('&').find_map(|part| part.strip_prefix("notification_id=")).ok_or_else(|| "activation URI has no notification ID".to_owned())?;
     if notification_id.is_empty() || notification_id.len() > 256 || !notification_id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')) { return Err("invalid activation notification ID".to_owned()); }
     // The target executable is a fixed sibling installed with the helper. User-controlled URI data is supplied only as argv.
-    bridge_command()?.args(["open-action", "--notification-id", notification_id, "--action", action]).status().map_err(|error| error.to_string())?;
+    Command::new(bridge_command()?).args(["open-action", "--notification-id", notification_id, "--action", action]).status().map_err(|error| error.to_string())?;
     Ok(Response::registered("forwarded constrained Agent Bridge activation"))
 }
 
 fn handle_action(action: protocol::Action, notification_id: String, task_id: String) -> Result<Response, String> {
     let name = match action { protocol::Action::View => "view", protocol::Action::Claim => "claim", protocol::Action::Snooze => "snooze" };
     let _ = task_id; // Native action resolution uses the durable notification mapping, never a caller-supplied task ID.
-    bridge_command()?.args(["open-action", "--notification-id", &notification_id, "--action", name]).status().map_err(|error| error.to_string())?;
+    Command::new(bridge_command()?).args(["open-action", "--notification-id", &notification_id, "--action", name]).status().map_err(|error| error.to_string())?;
     Ok(Response::posted(notification_id, format!("forwarded opaque {} action", name)))
 }
 

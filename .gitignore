@@ -2,3 +2,4 @@
 .superpowers/
 __pycache__/
 *.pyc
+/native/windows-notify/target/

@@ -54,9 +54,26 @@ impl Response {
 
 pub fn parse_request(input: &[u8]) -> Result<Request, String> {
     if input.len() > MAX_INPUT_BYTES { return Err("request exceeds 16384 bytes".to_owned()); }
-    let request: Request = serde_json::from_slice(input).map_err(|_| "malformed request JSON".to_owned())?;
+    let value: serde_json::Value = serde_json::from_slice(input).map_err(|_| "malformed request JSON".to_owned())?;
+    enforce_exact_fields(&value)?;
+    let request: Request = serde_json::from_value(value).map_err(|_| "malformed request JSON".to_owned())?;
     validate(&request)?;
     Ok(request)
+}
+
+fn enforce_exact_fields(value: &serde_json::Value) -> Result<(), String> {
+    let object = value.as_object().ok_or_else(|| "request must be an object".to_owned())?;
+    let operation = object.get("operation").and_then(serde_json::Value::as_str).ok_or_else(|| "request operation is missing".to_owned())?;
+    let allowed: &[&str] = match operation {
+        "post" => &["operation", "title", "body", "task_id", "actions", "expires_in_seconds"],
+        "register" | "unregister" => &["operation"],
+        "action" => &["operation", "action", "notification_id", "task_id"],
+        _ => return Err("unknown request operation".to_owned()),
+    };
+    if object.len() != allowed.len() || object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err("request has unknown or missing fields".to_owned());
+    }
+    Ok(())
 }
 
 fn validate(request: &Request) -> Result<(), String> {

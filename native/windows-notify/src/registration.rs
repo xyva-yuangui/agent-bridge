@@ -9,15 +9,16 @@ use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE};
 #[cfg(windows)]
 use winreg::RegKey;
 #[cfg(windows)]
-use windows::core::{HSTRING, Interface, PCWSTR};
+use windows::core::{HSTRING, Interface, PCWSTR, PROPVARIANT};
+#[cfg(windows)]
+use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
 #[cfg(windows)]
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 #[cfg(windows)]
-use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 #[cfg(windows)]
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 #[cfg(windows)]
-use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, PKEY_AppUserModel_ID};
+use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 
 pub const AUMID: &str = "OpenAI.AgentBridge.WindowsNotify";
 pub const PROTOCOL: &str = "agent-bridge";
@@ -62,13 +63,13 @@ fn create_start_menu_shortcut(executable: &str) -> Result<(), String> {
     let parent = shortcut.parent().ok_or_else(|| "invalid Start Menu shortcut path".to_owned())?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     unsafe {
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED).map_err(|error| error.to_string())?;
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().map_err(|error| error.to_string())?;
         let result = (|| -> windows::core::Result<()> {
             let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
             let executable = HSTRING::from(executable);
             link.SetPath(PCWSTR(executable.as_ptr()))?;
             let properties: IPropertyStore = link.cast()?;
-            let aumid = PROPVARIANT::from(HSTRING::from(AUMID));
+            let aumid = PROPVARIANT::from(AUMID);
             properties.SetValue(&PKEY_AppUserModel_ID, &aumid)?;
             properties.Commit()?;
             let persist: IPersistFile = link.cast()?;
