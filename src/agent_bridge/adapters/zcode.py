@@ -127,14 +127,16 @@ class ZCodeAdapter(ManagedJsonAdapter):
                 root.pop("agent_bridge", None)
         _optimistic_json_update(self.config_path, update)
         self._assert_contained(self.plugin_bundle_path)
-        if not ownership.get("bundle_existed") and self.plugin_bundle_path.exists() and not self.plugin_bundle_path.is_symlink():
-            shutil.rmtree(self.plugin_bundle_path)
-        legacy = self.plugin_bundle_path.parent / "1.3.0"
-        if not ownership.get("bundle_existed") and legacy.exists() and not legacy.is_symlink():
-            shutil.rmtree(legacy)
         parent = self.plugin_bundle_path.parent
-        if not ownership.get("bundle_existed") and parent.is_dir() and not parent.is_symlink() and not any(parent.iterdir()):
-            parent.rmdir()
+        if not ownership.get("bundle_existed"):
+            # These are the only version directories this adapter creates.
+            # Never sweep an unknown sibling: it may be a user plugin.
+            for version in ("1.0.0", "1.3.0"):
+                owned_version = parent / version
+                if owned_version.is_dir() and not owned_version.is_symlink():
+                    shutil.rmtree(owned_version)
+            if parent.is_dir() and not parent.is_symlink() and not any(parent.iterdir()):
+                parent.rmdir()
         try:
             self.ownership_path.unlink()
         except OSError:
