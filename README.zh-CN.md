@@ -72,6 +72,72 @@ bridge board            # 所有人任务一览
 
 ---
 
+## 工作原理
+
+```mermaid
+flowchart TB
+    subgraph Agents["你的 AI Agent — 同一台机器"]
+        C["Codex<br/>AGENTS.md + MCP"]
+        L["Claude Code<br/>UserPromptSubmit 钩子"]
+        Z["ZCode<br/>插件钩子"]
+        R["Reasonix<br/>system_prompt + MCP"]
+    end
+
+    subgraph Transport["传输层"]
+        CLI["bridge CLI<br/>终端 agent"]
+        MCP["bridge_mcp<br/>MCP 服务 · 桌面应用"]
+    end
+
+    subgraph Board["共享状态 — ~/.agent-bridge/"]
+        BJ["board.json<br/>任务状态"]
+        AJ["activity.jsonl<br/>操作日志"]
+        AR["archive.json<br/>归档任务"]
+    end
+
+    C --> CLI
+    L --> CLI
+    Z --> CLI
+    C -.-> MCP
+    L -.-> MCP
+    R -.-> MCP
+    CLI --> BJ
+    MCP --> BJ
+    BJ --> AJ
+    BJ --> AR
+    Agents -.->|"通知 + 唤醒"| Agents
+```
+
+### 交付状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued: bridge send
+    queued --> wake_launched: 唤醒进程启动
+    queued --> unavailable: 无唤醒通道
+    wake_launched --> acknowledged: 目标签到
+    wake_launched --> failed: 推送失败
+    unavailable --> [*]
+    failed --> [*]
+    acknowledged --> [*]
+```
+
+### 任务生命周期
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: bridge send
+    pending --> working: bridge claim
+    working --> completed: bridge done
+    working --> input_required: bridge question
+    input_required --> working: bridge answer
+    working --> review_requested: bridge review
+    review_requested --> completed: bridge review --verdict approve
+    review_requested --> changes_requested: bridge review --verdict changes
+    changes_requested --> working: bridge claim
+    completed --> [*]
+```
+
+
 ## 核心特性
 
 ### 跨平台文件锁

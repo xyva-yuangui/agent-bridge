@@ -72,6 +72,72 @@ The whole loop: **send → claim → done**. Everything else is extra.
 
 ---
 
+## How it works
+
+```mermaid
+flowchart TB
+    subgraph Agents["Your AI Agents — one machine"]
+        C["Codex<br/>AGENTS.md + MCP"]
+        L["Claude Code<br/>UserPromptSubmit hook"]
+        Z["ZCode<br/>plugin hook"]
+        R["Reasonix<br/>system_prompt + MCP"]
+    end
+
+    subgraph Transport["Transport Layer"]
+        CLI["bridge CLI<br/>terminal agents"]
+        MCP["bridge_mcp<br/>MCP server · desktop apps"]
+    end
+
+    subgraph Board["Shared State — ~/.agent-bridge/"]
+        BJ["board.json<br/>task state"]
+        AJ["activity.jsonl<br/>audit log"]
+        AR["archive.json<br/>old tasks"]
+    end
+
+    C --> CLI
+    L --> CLI
+    Z --> CLI
+    C -.-> MCP
+    L -.-> MCP
+    R -.-> MCP
+    CLI --> BJ
+    MCP --> BJ
+    BJ --> AJ
+    BJ --> AR
+    Agents -.->|"notify + wake"| Agents
+```
+
+### Delivery state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued: bridge send
+    queued --> wake_launched: wake process started
+    queued --> unavailable: no wake channel
+    wake_launched --> acknowledged: target checks in
+    wake_launched --> failed: delivery error
+    unavailable --> [*]
+    failed --> [*]
+    acknowledged --> [*]
+```
+
+### Task lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: bridge send
+    pending --> working: bridge claim
+    working --> completed: bridge done
+    working --> input_required: bridge question
+    input_required --> working: bridge answer
+    working --> review_requested: bridge review
+    review_requested --> completed: bridge review --verdict approve
+    review_requested --> changes_requested: bridge review --verdict changes
+    changes_requested --> working: bridge claim
+    completed --> [*]
+```
+
+
 ## Key features
 
 ### Cross-platform file locking
