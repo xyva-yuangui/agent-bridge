@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import uuid
 from urllib.parse import urlsplit
 from datetime import datetime, timezone
@@ -14,7 +15,12 @@ from typing import Any, Dict, Optional, Sequence
 from . import dispatcher
 from .launchers import LaunchDeliveryChannel, launch_stored_agent
 from .migrate_v1 import export_json, import_v1
-from .notifications import WindowsNotificationChannel, windows_notification_capability
+from .notifications import (
+    MacOSNotificationChannel,
+    WindowsNotificationChannel,
+    macos_notification_capability,
+    windows_notification_capability,
+)
 from .paths import get_data_root, require_local_data_root
 from .presentation import configure_streams, error_view, render, task_page, task_view, tasks_view
 from .service import BridgeService
@@ -88,11 +94,9 @@ def execute_command(
             "SELECT 1 FROM agents WHERE execution_policy = 'auto' AND launch_argv_json <> '[]' LIMIT 1"
         )
         channels = {"launcher": LaunchDeliveryChannel(str(service.store.path))} if configured else {}
-        notification_capability = windows_notification_capability()
+        notification_capability, notification_channel = _native_notification_channel(service.store.path)
         if notification_capability.available:
-            channels["notification"] = WindowsNotificationChannel(
-                service.store.path, notification_capability.helper_path
-            )
+            channels["notification"] = notification_channel
         report = dispatcher.Dispatcher(service.store, channels).run_burst()
         return {"dispatch": {
             "acquired": report.acquired,
@@ -212,7 +216,7 @@ def execute_command(
     if command == "doctor":
         report = service.store.integrity_report()
         actual_version = service.store.scalar("SELECT MAX(version) FROM schema_migrations")
-        notification_capability = windows_notification_capability()
+        notification_capability, _ = _native_notification_channel(service.store.path)
         checks = {
             "data_root": service.store.path.parent.is_dir(),
             "schema_version": actual_version == SCHEMA_VERSION,
@@ -291,6 +295,15 @@ def execute_command(
         destination = export_json(service.store, Path(str(_argument(arguments, "destination"))))
         return {"destination": str(destination)}
     raise ValueError("unknown command: {0}".format(command))
+
+
+def _native_notification_channel(database_path: Path) -> tuple[Any, Any]:
+    """Select only the platform's helper; a configured foreign helper is degraded."""
+    if sys.platform == "darwin":
+        capability = macos_notification_capability()
+        return capability, MacOSNotificationChannel(database_path, capability.helper_path)
+    capability = windows_notification_capability()
+    return capability, WindowsNotificationChannel(database_path, capability.helper_path)
 
 
 def _activity_since(value: Any) -> Optional[str]:

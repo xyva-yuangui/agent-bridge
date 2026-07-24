@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -102,6 +103,24 @@ class WindowsNotifier:
         if returncode != 0:
             return _failure(_bounded_detail(stderr_text) or "native notification helper exited {0}".format(returncode))
         return _parse_response(stdout_text)
+
+
+class MacOSNotifier(WindowsNotifier):
+    """Invoke the installed macOS UserNotifications helper through the same JSON contract."""
+
+
+def macos_notification_capability() -> NotificationCapability:
+    """Report the optional signed macOS helper honestly without claiming a post."""
+    configured = os.environ.get("AGENT_BRIDGE_MACOS_NOTIFY_HELPER", "").strip()
+    if not configured:
+        return NotificationCapability(False, "", "native macOS notification helper is not installed")
+    helper = Path(configured)
+    if not helper.is_file():
+        return NotificationCapability(False, str(helper), "configured native macOS notification helper is not installed")
+    if sys.platform != "darwin":
+        return NotificationCapability(False, str(helper), "native macOS notification helper is unavailable on this platform")
+    result = MacOSNotifier(helper, timeout_seconds=1.0).status()
+    return NotificationCapability(result.ok, str(helper), result.detail)
 
 
 def _run_capped_helper(path: Path, payload: bytes, timeout: float, limit: int) -> tuple[int, bytes, bytes, str]:
@@ -313,3 +332,39 @@ class WindowsNotificationChannel:
         if row is None:
             raise KeyError("unknown native notification")
         return str(row["task_id"]), action
+
+
+class MacOSNotificationChannel(WindowsNotificationChannel):
+    """macOS counterpart that preserves the same durable opaque-ID mapping."""
+
+    def applicable(self, item: Any) -> bool:
+        del item
+        return sys.platform == "darwin" and self.helper_path.is_file()
+
+    def deliver(self, item: Any, idempotency_key: str, timeout_seconds: float) -> DeliveryStatus:
+        del idempotency_key
+        task_id = item.payload.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise RuntimeError("notification item requires task_id")
+        store = Store.open(Path(self.database_path))
+        try:
+            task = store.connection.execute(
+                "SELECT subject, body FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if task is None:
+                raise RuntimeError("notification task no longer exists")
+            result = MacOSNotifier(self.helper_path, timeout_seconds=timeout_seconds).post(
+                NotificationNotice(str(task["subject"]), str(task["body"]), task_id)
+            )
+            if not result.ok or result.status is not DeliveryStatus.OS_POSTED:
+                raise RuntimeError(result.detail)
+            with store.transaction(immediate=True) as connection:
+                connection.execute(
+                    "INSERT INTO notification_mappings(notification_id, task_id, action, created_at) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT(notification_id) DO UPDATE SET "
+                    "task_id = excluded.task_id, action = excluded.action, created_at = excluded.created_at",
+                    (result.notification_id, task_id, "view", utc_now()),
+                )
+            return DeliveryStatus.OS_POSTED
+        finally:
+            store.close()
