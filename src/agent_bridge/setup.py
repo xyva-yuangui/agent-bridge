@@ -107,6 +107,7 @@ def _install_runtime(home: Path) -> None:
     """Copy the compatibility runtime used by retained bridge.py launchers."""
     data = _data_root(home); root = _source_root()
     data.mkdir(parents=True, exist_ok=True)
+    skill = data / "skill"
     launcher = home / ".local" / "bin" / ("bridge.cmd" if os.name == "nt" else "bridge")
     if skill.exists() or launcher.exists():
         receipt = _runtime_receipt(home)
@@ -115,7 +116,7 @@ def _install_runtime(home: Path) -> None:
         if prior.get("owner") != OWNER or prior.get("skill") != str(skill) or prior.get("launcher") != str(launcher) or skill.is_symlink() or launcher.is_symlink():
             raise RuntimeError("refusing to replace unowned runtime")
     stage = data / (".skill-stage-" + next(tempfile._get_candidate_names()))
-    skill = data / "skill"; backup = data / (".skill-backup-" + next(tempfile._get_candidate_names()))
+    backup = data / (".skill-backup-" + next(tempfile._get_candidate_names()))
     try:
         shutil.copytree(root / "scripts", stage / "scripts")
         shutil.copytree(root / "src" / "agent_bridge", stage / "runtime" / "agent_bridge")
