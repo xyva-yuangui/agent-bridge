@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -71,6 +73,9 @@ class WindowsNotifier:
     def unregister(self) -> NotificationResult:
         return self._request("unregister")
 
+    def status(self) -> NotificationResult:
+        return self._request("status")
+
     def action(self, action: str, notification_id: str, task_id: str) -> NotificationResult:
         if action not in _ACTIONS:
             return _failure("invalid action")
@@ -82,32 +87,64 @@ class WindowsNotifier:
         except ValueError as error:
             return _failure(str(error))
         try:
-            completed = subprocess.run(
-                [str(self.helper_path)],
-                input=payload,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="strict",
-                timeout=self.timeout_seconds,
-                check=False,
-                shell=False,
+            returncode, stdout, stderr, reason = _run_capped_helper(
+                self.helper_path, payload.encode("utf-8"), self.timeout_seconds, self.max_output_bytes
             )
-        except subprocess.TimeoutExpired:
-            return _failure("native notification helper timed out")
         except (OSError, UnicodeError) as error:
             return _failure("native notification helper unavailable: {0}".format(error))
-        stdout = completed.stdout
-        stderr = completed.stderr
-        if len(stdout.encode("utf-8")) > self.max_output_bytes:
-            return _failure("native notification helper output too large")
-        if completed.returncode != 0:
-            return _failure(_bounded_detail(stderr) or "native notification helper exited {0}".format(completed.returncode))
-        return _parse_response(stdout)
+        if reason:
+            return _failure(reason)
+        try:
+            stdout_text = stdout.decode("utf-8", errors="strict")
+            stderr_text = stderr.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return _failure("native notification helper returned invalid UTF-8")
+        if returncode != 0:
+            return _failure(_bounded_detail(stderr_text) or "native notification helper exited {0}".format(returncode))
+        return _parse_response(stdout_text)
+
+
+def _run_capped_helper(path: Path, payload: bytes, timeout: float, limit: int) -> tuple[int, bytes, bytes, str]:
+    """Drain both pipes concurrently; overflow and timeout always kill and join."""
+    process = subprocess.Popen([str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
+    streams = [bytearray(), bytearray()]
+    overflow = threading.Event()
+    def drain(index: int, pipe: Any) -> None:
+        while True:
+            block = pipe.read(4096)
+            if not block:
+                return
+            streams[index].extend(block)
+            if len(streams[index]) > limit:
+                overflow.set()
+                return
+    readers = [threading.Thread(target=drain, args=(0, process.stdout), daemon=True), threading.Thread(target=drain, args=(1, process.stderr), daemon=True)]
+    for reader in readers: reader.start()
+    assert process.stdin is not None
+    try:
+        process.stdin.write(payload); process.stdin.close()
+        deadline = time.monotonic() + timeout
+        while process.poll() is None and not overflow.is_set() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+            reason = "native notification helper output too large" if overflow.is_set() else "native notification helper timed out"
+        else:
+            reason = ""
+    finally:
+        if process.poll() is None:
+            process.kill(); process.wait()
+        for reader in readers: reader.join(1.0)
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None: pipe.close()
+        if overflow.is_set():
+            reason = "native notification helper output too large"
+    return process.returncode or 0, bytes(streams[0]), bytes(streams[1]), reason
 
 
 def _request_payload(operation: str, notice: NotificationNotice | None, extra: Mapping[str, str]) -> str:
-    if operation not in ("post", "register", "unregister", "action"):
+    if operation not in ("post", "register", "unregister", "status", "action"):
         raise ValueError("invalid native notification operation")
     payload: dict[str, Any] = {"operation": operation}
     if operation == "post":
@@ -199,7 +236,8 @@ def windows_notification_capability() -> NotificationCapability:
         return NotificationCapability(False, str(helper), "configured native Windows toast helper is not installed")
     if os.name != "nt":
         return NotificationCapability(False, str(helper), "native Windows toast helper is unavailable on this platform")
-    return NotificationCapability(True, str(helper), "native Windows toast helper is available")
+    result = WindowsNotifier(helper, timeout_seconds=1.0).status()
+    return NotificationCapability(result.ok, str(helper), result.detail)
 
 
 class WindowsNotificationChannel:

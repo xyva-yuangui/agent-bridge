@@ -52,6 +52,16 @@ pub fn unregister() -> Result<String, String> {
 }
 
 #[cfg(windows)]
+pub fn status() -> Result<String, String> {
+    let classes = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags("Software\\Classes", KEY_WRITE).map_err(|error| error.to_string())?;
+    let command = classes.open_subkey(format!("{}\\shell\\open\\command", PROTOCOL)).map_err(|_| "Agent Bridge protocol registration is missing".to_owned())?;
+    let value: String = command.get_value("").map_err(|_| "Agent Bridge protocol command is missing".to_owned())?;
+    if !value.contains("action-uri") { return Err("Agent Bridge protocol command is invalid".to_owned()); }
+    if !shortcut_path()?.is_file() { return Err("Agent Bridge AUMID shortcut is missing".to_owned()); }
+    Ok(format!("per-user {} protocol and {} shortcut are registered", PROTOCOL, AUMID))
+}
+
+#[cfg(windows)]
 fn shortcut_path() -> Result<PathBuf, String> {
     let app_data = env::var_os("APPDATA").ok_or_else(|| "APPDATA is unavailable".to_owned())?;
     Ok(PathBuf::from(app_data).join("Microsoft").join("Windows").join("Start Menu").join("Programs").join("Agent Bridge.lnk"))
@@ -96,3 +106,5 @@ fn remove_start_menu_shortcut() -> Result<(), String> {
 pub fn register() -> Result<String, String> { Err("Windows registration is unavailable on this platform".to_owned()) }
 #[cfg(not(windows))]
 pub fn unregister() -> Result<String, String> { Err("Windows registration is unavailable on this platform".to_owned()) }
+#[cfg(not(windows))]
+pub fn status() -> Result<String, String> { Err("Windows registration is unavailable on this platform".to_owned()) }

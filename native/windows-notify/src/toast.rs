@@ -26,6 +26,9 @@ pub fn post(request: &Request) -> Result<String, String> {
     let document = XmlDocument::new().map_err(|error| error.to_string())?;
     document.LoadXml(&HSTRING::from(xml)).map_err(|error| error.to_string())?;
     let toast = ToastNotification::CreateToastNotification(&document).map_err(|error| error.to_string())?;
+    // Tag/group make retries for the same logical task replace the native notification instead of duplicating it.
+    toast.SetTag(&HSTRING::from(&notification_id)).map_err(|error| error.to_string())?;
+    toast.SetGroup(&HSTRING::from("agent-bridge")).map_err(|error| error.to_string())?;
     let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(AUMID)).map_err(|error| error.to_string())?;
     notifier.Show(&toast).map_err(|error| error.to_string())?;
     Ok(notification_id)

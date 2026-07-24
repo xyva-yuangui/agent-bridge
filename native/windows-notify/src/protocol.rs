@@ -18,6 +18,7 @@ pub enum Request {
     },
     Register,
     Unregister,
+    Status,
     Action {
         action: Action,
         notification_id: String,
@@ -66,7 +67,7 @@ fn enforce_exact_fields(value: &serde_json::Value) -> Result<(), String> {
     let operation = object.get("operation").and_then(serde_json::Value::as_str).ok_or_else(|| "request operation is missing".to_owned())?;
     let allowed: &[&str] = match operation {
         "post" => &["operation", "title", "body", "task_id", "actions", "expires_in_seconds"],
-        "register" | "unregister" => &["operation"],
+        "register" | "unregister" | "status" => &["operation"],
         "action" => &["operation", "action", "notification_id", "task_id"],
         _ => return Err("unknown request operation".to_owned()),
     };
@@ -89,7 +90,7 @@ fn validate(request: &Request) -> Result<(), String> {
             opaque(notification_id, "notification_id")?;
             opaque(task_id, "task_id")?;
         }
-        Request::Register | Request::Unregister => {}
+        Request::Register | Request::Unregister | Request::Status => {}
     }
     Ok(())
 }

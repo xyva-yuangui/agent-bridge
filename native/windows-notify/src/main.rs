@@ -24,6 +24,7 @@ fn run() -> Result<Response, String> {
     match parse_request(&input)? {
         Request::Register => registration::register().map(Response::registered),
         Request::Unregister => registration::unregister().map(Response::registered),
+        Request::Status => registration::status().map(Response::registered),
         request @ Request::Post { .. } => toast::post(&request).map(|id| Response::posted(id, "WinRT toast accepted by the operating system")),
         Request::Action { action, notification_id, task_id } => handle_action(action, notification_id, task_id),
     }
