@@ -1,6 +1,6 @@
 {
   "name": "@xyva-yuangui/agent-bridge",
-  "version": "1.1.0",
+  "version": "1.3.0",
   "description": "Cross-agent collaboration for AI coding tools: Claude Code, Codex, Reasonix, ZCode. Share a task board, delegate work, review code — all on one machine. Zero dependencies, local-first.",
   "bin": {
     "bridge": "bin/agent-bridge.js",

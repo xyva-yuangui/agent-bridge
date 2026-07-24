@@ -90,6 +90,8 @@ bridge review ID [--verdict approve|changes] [--body TEXT]
 bridge agents                    bridge activity
 bridge project init|list|show    bridge context --show|--add TEXT
 bridge clean --days N|--all      bridge doctor [--strict]
+bridge whoami                     bridge wake AGENT
+bridge who-coordinates            bridge log --what TEXT
 ```
 
 The MCP server exposes the same non-interactive workflows.
