@@ -118,6 +118,8 @@ def launch_agent(decision: LaunchDecision) -> LaunchResult:
 class LaunchDeliveryChannel:
     """Pickleable dispatcher adapter which resolves policy in its child process."""
 
+    effect_kind = "launch"
+
     def __init__(self, database_path: str) -> None:
         self.database_path = str(database_path)
 

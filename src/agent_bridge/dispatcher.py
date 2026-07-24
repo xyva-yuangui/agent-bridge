@@ -20,6 +20,7 @@ from .models import DeliveryStatus
 from .outbox import OutboxItem, due_items, utc_now
 from .paths import get_data_root
 from .store import Store
+from .launchers import LaunchDeliveryChannel
 
 
 LEASE_NAME = "delivery"
@@ -226,7 +227,7 @@ class Dispatcher:
                 retried += retry_result[1]
                 failed += retry_result[2]
                 continue
-            self.store.trigger_fault(_effect_fault_point(channel))
+            self.store.trigger_fault(_effect_fault_point(adapter))
             if self.after_effect is not None:
                 # This hook intentionally sits after the external effect and
                 # before durable completion so fault tests exercise that gap.
@@ -494,9 +495,11 @@ def _attempt_key(item: OutboxItem, channel: str) -> str:
     return "{0}:{1}".format(item.idempotency_key, channel)
 
 
-def _effect_fault_point(channel: str) -> str:
-    """Name the durable-effect gap without inferring delivery success."""
-    return "after_launch_effect" if channel == "launch" or channel.startswith("launch:") else "after_notification_effect"
+def _effect_fault_point(adapter: DeliveryChannel) -> str:
+    """Classify durable effects by adapter capability, not registry spelling."""
+    if isinstance(adapter, LaunchDeliveryChannel) or getattr(adapter, "effect_kind", None) == "launch":
+        return "after_launch_effect"
+    return "after_notification_effect"
 
 
 def _invoke(adapter: DeliveryChannel, item: OutboxItem, idempotency_key: str, timeout_seconds: float):
