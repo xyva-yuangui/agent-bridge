@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import time
+from typing import Any, Callable, Optional
 
 from .input_common import Action
 
@@ -19,9 +20,10 @@ def parse_windows_key(first: str, second: str = "") -> Optional[Action]:
 class WindowsInputAdapter:
     """Use msvcrt if available and restore a supplied/native console mode in finally."""
 
-    def __init__(self, *, msvcrt_module: Any = None, console: Any = None) -> None:
+    def __init__(self, *, msvcrt_module: Any = None, console: Any = None, sleep_fn: Callable[[float], None] = time.sleep) -> None:
         self._msvcrt = msvcrt_module
         self.console = console
+        self._sleep = sleep_fn
         self._saved_mode: Any = None
 
     def __enter__(self) -> "WindowsInputAdapter":
@@ -43,7 +45,10 @@ class WindowsInputAdapter:
 
     def read_key(self, timeout: float) -> Optional[Action]:
         msvcrt = self._load_msvcrt()
-        if msvcrt is None or not msvcrt.kbhit():
+        if msvcrt is None:
+            return None
+        if not msvcrt.kbhit():
+            self._sleep(max(0.0, min(0.5, timeout)))
             return None
         first = msvcrt.getwch()
         return parse_windows_key(first, msvcrt.getwch() if first in ("\x00", "\xe0") else "")

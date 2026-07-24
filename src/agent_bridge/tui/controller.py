@@ -4,21 +4,24 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import sys
+import threading
 from typing import Any, Mapping
 
 from .input_common import Action
-from .model import Dashboard, build_dashboard
+from .model import Dashboard, build_dashboard, sanitize_text
 from .render import render_compact, render_dashboard, truncate_cells
 
 
 REFRESH_SECONDS = 0.25
 PAGE_SIZE = 100
+PAGE_CAP = 300
 
 
 def run_tui(
     service: Any, input_adapter: Any, output: Any, *, actor: str = "unknown", project_id: str = "default",
-    refresh_seconds: float = REFRESH_SECONDS,
+    refresh_seconds: float = REFRESH_SECONDS, dispatch_tick: Any = None,
 ) -> int:
     """Run while an interactive terminal exists; render one safe fallback otherwise."""
     interactive = (
@@ -32,9 +35,12 @@ def run_tui(
     selected = 0
     query = ""
     notice = ""
+    handlers = _install_signal_handlers()
     try:
         with input_adapter:
+            _write(output, "\x1b[?1049h")
             while True:
+                _tick(dispatch_tick)
                 dashboard = _dashboard(service, project_id, selected, query)
                 selected = dashboard.selected
                 width, height = _terminal_size()
@@ -65,25 +71,39 @@ def run_tui(
                     notice = "no task selected"
                     continue
                 if action is Action.VIEW:
-                    notice = _result("view", service.show(task.id))
+                    notice = _call("view", service.show, task.id)
                 elif action is Action.CLAIM:
-                    notice = _result("claim", service.claim(task.id, actor))
+                    notice = _call("claim", service.claim, task.id, actor)
                 elif action is Action.RETRY:
-                    notice = _result("retry", service.retry_delivery(task.id))
+                    notice = _call("retry", service.retry_delivery, task.id)
                 elif action is Action.OPEN:
-                    notice = _result("terminal", service.open_terminal(task.id))
+                    notice = _call("terminal", service.open_terminal, task.id)
+                _tick(dispatch_tick)
     except KeyboardInterrupt:
         return 130
+    finally:
+        _restore_signal_handlers(handlers)
+        if interactive:
+            _write(output, "\x1b[?1049l")
 
 
-def _dashboard(service: Any, project_id: str, selected: int = 0, query: str = "") -> Dashboard:
-    page = service.board_page(project_id, limit=PAGE_SIZE, cursor=None)
+def _dashboard(service: Any, project_id: str, selected: int = 0, query: str = "", sort_by: str = "updated") -> Dashboard:
+    cursor = None
     tasks = []
-    for task in page.tasks:
-        value = _as_mapping(task)
-        evidence = service.delivery_evidence(str(value.get("id", "")))
-        value["delivery"] = _evidence_text(evidence)
-        tasks.append(value)
+    while len(tasks) < PAGE_CAP:
+        page = service.board_page(project_id, limit=PAGE_SIZE, cursor=cursor)
+        for task in page.tasks:
+            value = _as_mapping(task)
+            evidence = service.delivery_evidence(str(value.get("id", "")))
+            value["delivery"] = _evidence_text(evidence)
+            tasks.append(value)
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    if sort_by == "subject":
+        tasks.sort(key=lambda task: str(task.get("subject", "")).casefold())
+    elif sort_by == "state":
+        tasks.sort(key=lambda task: (str(task.get("state", "")), str(task.get("id", ""))))
     return build_dashboard({"agents": tuple(service.agents()), "tasks": tasks}, selected, query)
 
 
@@ -101,7 +121,43 @@ def _evidence_text(value: Any) -> str:
 
 
 def _result(action: str, result: Any) -> str:
-    return "{0}: {1}".format(action, result)
+    return sanitize_text("{0}: {1}".format(action, result))
+
+
+def _call(action: str, method: Any, *args: Any) -> str:
+    try:
+        return _result(action, method(*args))
+    except (PermissionError, ValueError, RuntimeError, OSError) as error:
+        return sanitize_text("{0} failed: {1}".format(action, error))
+
+
+def _tick(callback: Any) -> None:
+    if callable(callback):
+        try:
+            callback()
+        except (RuntimeError, OSError, ValueError):
+            pass
+
+
+def _install_signal_handlers() -> dict[int, Any]:
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+    previous: dict[int, Any] = {}
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous[signum] = signal.getsignal(signum)
+        signal.signal(signum, _terminate)
+    return previous
+
+
+def _restore_signal_handlers(previous: Mapping[int, Any]) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
+
+
+def _terminate(signum: int, frame: Any) -> None:
+    if signum == signal.SIGINT:
+        raise KeyboardInterrupt
+    raise SystemExit(128 + signum)
 
 
 def _terminal_size() -> tuple[int, int]:
@@ -114,7 +170,18 @@ def _supports_vt(output: Any) -> bool:
     declared = getattr(output, "supports_vt", None)
     if declared is not None:
         return bool(declared)
-    return os.environ.get("TERM", "").lower() != "dumb"
+    term = os.environ.get("TERM", "").lower()
+    if term:
+        return term != "dumb"
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        mode = ctypes.c_uint32()
+        handle = ctypes.windll.kernel32.GetStdHandle(-11)
+        return bool(handle and ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)) and (mode.value & 0x0004))
+    except (AttributeError, OSError):
+        return False
 
 
 def _write(output: Any, text: str) -> None:

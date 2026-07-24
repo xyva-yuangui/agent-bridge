@@ -58,6 +58,16 @@ class InputAdapterTests(unittest.TestCase):
 
         self.assertEqual(PosixInputAdapter(Stream()).read_line("filter: "), "rew")
 
+    def test_windows_reader_waits_for_a_bounded_timeout_when_no_key_is_ready(self) -> None:
+        from agent_bridge.tui.input_windows import WindowsInputAdapter
+
+        class Msvcrt:
+            def kbhit(self): return False
+        waits = []
+        adapter = WindowsInputAdapter(msvcrt_module=Msvcrt(), sleep_fn=waits.append)
+        self.assertIsNone(adapter.read_key(0.25))
+        self.assertEqual(waits, [0.25])
+
 
 if __name__ == "__main__":
     unittest.main()

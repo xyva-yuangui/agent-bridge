@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
 from .models import DeliveryStatus, TaskState
+from .delivery import DeliveryAttempt, aggregate_delivery
 from .outbox import enqueue, utc_now
 from .state_machine import authorize_transition
 from .store import Store
@@ -71,6 +72,7 @@ class DeliveryEvidence:
     status: str
     channel: str = ""
     attempts: int = 0
+    detail: str = ""
 
 
 MAX_INBOX_PAGE_SIZE = 100
@@ -291,12 +293,15 @@ class BridgeService:
 
     def delivery_evidence(self, task_id: str) -> DeliveryEvidence:
         """Return the newest delivery proof, or queued when delivery work remains."""
-        row = self.store.connection.execute(
-            "SELECT channel, status, attempts FROM delivery_attempts WHERE task_id = ? "
-            "ORDER BY updated_at DESC, id DESC LIMIT 1", (task_id,)
-        ).fetchone()
-        if row is not None:
-            return DeliveryEvidence(str(row["status"]), str(row["channel"]), int(row["attempts"]))
+        rows = self.store.connection.execute(
+            "SELECT channel, status, attempts, error FROM delivery_attempts WHERE task_id = ? "
+            "ORDER BY updated_at DESC, id DESC", (task_id,)
+        ).fetchall()
+        if rows:
+            attempts = tuple(DeliveryAttempt(str(row["channel"]), DeliveryStatus(str(row["status"])), int(row["attempts"]), str(row["error"] or "")) for row in rows)
+            strongest = aggregate_delivery(attempts)
+            proof = next((attempt for attempt in attempts if attempt.status == strongest), attempts[0])
+            return DeliveryEvidence(strongest.value, proof.channel, sum(attempt.attempts for attempt in attempts), proof.error)
         queued = self.store.connection.execute(
             "SELECT 1 FROM outbox WHERE completed_at IS NULL "
             "AND json_extract(payload_json, '$.task_id') = ? LIMIT 1",

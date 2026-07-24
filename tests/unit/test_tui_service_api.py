@@ -27,6 +27,21 @@ class TuiServiceApiTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_delivery_evidence_keeps_the_strongest_proven_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store.open(Path(directory) / "bridge.sqlite3")
+            service = BridgeService(store)
+            try:
+                task = service.send_task("codex", "zcode", "Review", "body")
+                with store.transaction(immediate=True) as connection:
+                    connection.execute("INSERT INTO delivery_attempts(task_id, channel, status, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", (task.id, "host", "plugin_delivered", 2, "2020", "2020"))
+                    connection.execute("INSERT INTO delivery_attempts(task_id, channel, status, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", (task.id, "retry", "retry_wait", 1, "2021", "2021"))
+                evidence = service.delivery_evidence(task.id)
+                self.assertEqual(evidence.status, "plugin_delivered")
+                self.assertEqual(evidence.attempts, 3)
+            finally:
+                store.close()
+
     def test_compact_tui_accepts_service_agent_views_without_storage_access(self) -> None:
         from agent_bridge.tui.controller import run_tui
 

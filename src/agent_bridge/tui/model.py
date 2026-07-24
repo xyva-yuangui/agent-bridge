@@ -6,6 +6,48 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence, Tuple
 
 
+def sanitize_text(value: Any) -> str:
+    """Make external data inert before it can reach a terminal renderer."""
+    text = str(value)
+    output: list[str] = []
+    index = 0
+    while index < len(text):
+        character = text[index]
+        code = ord(character)
+        if character == "\x1b" and index + 1 < len(text):
+            marker = text[index + 1]
+            if marker == "[":
+                index += 2
+                while index < len(text) and not ("@" <= text[index] <= "~"):
+                    index += 1
+                index += 1
+                continue
+            if marker == "]":
+                index += 2
+                while index < len(text) and text[index] != "\x07" and not text.startswith("\x1b\\", index):
+                    index += 1
+                index += 2 if text.startswith("\x1b\\", index) else 1
+                continue
+        if code == 0x9B:
+            index += 1
+            while index < len(text) and not ("@" <= text[index] <= "~"):
+                index += 1
+            index += 1
+            continue
+        if code == 0x9D:
+            index += 1
+            while index < len(text) and text[index] not in ("\x07", "\x9c"):
+                index += 1
+            index += 1
+            continue
+        if code < 32 or 0x7F <= code <= 0x9F:
+            output.append(" ")
+        else:
+            output.append(character)
+        index += 1
+    return "".join(output).strip()
+
+
 @dataclass(frozen=True)
 class DashboardCounts:
     inbox: int = 0
@@ -60,20 +102,20 @@ def _task(value: Any) -> DashboardTask:
     state = field("state")
     delivery = field("delivery", "")
     return DashboardTask(
-        id=str(field("id")), sender=str(field("sender")), assignee=str(field("assignee")),
-        subject=str(field("subject")), body=str(field("body")), state=str(getattr(state, "value", state)),
-        delivery=str(getattr(delivery, "value", delivery)), artifacts=tuple(str(item) for item in artifacts),
+        id=sanitize_text(field("id")), sender=sanitize_text(field("sender")), assignee=sanitize_text(field("assignee")),
+        subject=sanitize_text(field("subject")), body=sanitize_text(field("body")), state=sanitize_text(getattr(state, "value", state)),
+        delivery=sanitize_text(getattr(delivery, "value", delivery)), artifacts=tuple(sanitize_text(item) for item in artifacts),
     )
 
 
 def _agent(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
-        return dict(value)
+        return {str(key): sanitize_text(item) if not isinstance(item, (tuple, list)) else tuple(sanitize_text(part) for part in item) for key, item in value.items()}
     return {
-        "name": str(getattr(value, "name", "?")),
-        "health": str(getattr(value, "health", "unknown")),
-        "execution_policy": str(getattr(value, "execution_policy", "manual")),
-        "capabilities": tuple(getattr(value, "capabilities", ())),
+        "name": sanitize_text(getattr(value, "name", "?")),
+        "health": sanitize_text(getattr(value, "health", "unknown")),
+        "execution_policy": sanitize_text(getattr(value, "execution_policy", "manual")),
+        "capabilities": tuple(sanitize_text(item) for item in getattr(value, "capabilities", ())),
     }
 
 

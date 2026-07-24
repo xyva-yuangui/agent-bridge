@@ -93,8 +93,18 @@ class TuiControllerTests(unittest.TestCase):
         output = _Output(True)
         with patch("agent_bridge.tui.controller._terminal_size", return_value=(40, 20)):
             run_tui(service, _Input((Action.CLAIM, Action.QUIT)), output, actor="zcode")
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", output.getvalue().replace("\x1b[2J\x1b[H", "\n"))
+        plain = re.sub(r"\x1b\[[?0-9;]*[A-Za-z]", "", output.getvalue().replace("\x1b[2J\x1b[H", "\n"))
         self.assertTrue(all(display_width(line) <= 40 for line in plain.splitlines()))
+
+    def test_action_errors_are_rendered_and_session_continues(self) -> None:
+        from agent_bridge.tui.controller import run_tui
+        from agent_bridge.tui.input_common import Action
+        service = _Service()
+        service.claim = lambda task_id, actor: (_ for _ in ()).throw(PermissionError("no\x1b[2J access"))
+        output = _Output(True)
+        self.assertEqual(run_tui(service, _Input((Action.CLAIM, Action.QUIT)), output, actor="zcode"), 0)
+        self.assertIn("no access", output.getvalue())
+        self.assertNotIn("no\x1b", output.getvalue())
 
 
 if __name__ == "__main__":

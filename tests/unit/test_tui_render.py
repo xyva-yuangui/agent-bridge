@@ -41,6 +41,19 @@ class DashboardRenderTests(unittest.TestCase):
         screen = render_dashboard(self.dashboard, width=120, height=20, color=False)
         self.assertTrue(all(display_width(line) <= 120 for line in screen.splitlines()))
 
+    def test_untrusted_terminal_controls_are_removed_from_all_rendered_fields(self) -> None:
+        from agent_bridge.tui.render import render_dashboard
+
+        dashboard = build_dashboard({"agents": [{"name": "bad\x1b]8;;https://x\x07name\n", "health": "ok\t"}], "tasks": [{
+            "id": "id\x1b[2J", "sender": "a\r", "assignee": "b\n", "state": "pending",
+            "subject": "subject\x1b[31m", "body": "body\x1b]0;title\x07\n", "delivery": "queued\x9b2J",
+            "artifacts": ("path\t\x1b[2K",),
+        }]})
+        screen = render_dashboard(dashboard, 120, 20, color=False)
+        self.assertNotIn("\x1b", screen)
+        self.assertNotIn("\x9b", screen)
+        self.assertNotIn("\nname", screen)
+
 
 if __name__ == "__main__":
     unittest.main()

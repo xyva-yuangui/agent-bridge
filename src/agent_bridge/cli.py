@@ -408,6 +408,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return run_tui(
                 service, default_input_adapter(), sys.stdout,
                 actor=str(arguments.identity).strip() or "unknown", project_id=str(arguments.project),
+                dispatch_tick=lambda: dispatcher.tick(service.store),
             )
         result = execute_command(service, str(arguments.identity).strip() or "unknown", arguments.command, vars(arguments))
         if arguments.command == "status" and arguments.oneliner and not arguments.as_json:

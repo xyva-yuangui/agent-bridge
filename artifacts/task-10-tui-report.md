@@ -34,3 +34,24 @@ An additional full `unittest discover -s tests` attempt reached legacy v1
 tests that fail independently of the v2 TUI surface (their tests expect the
 removed v1 file-based bridge and stale documentation contract). The scoped v2
 service/CLI regressions above are green.
+
+## Review follow-up
+
+Addressed the Task 10 review findings:
+
+- Windows input now waits up to the supplied refresh interval when no key is
+  ready; VT output requires an explicit capability, a non-dumb `TERM`, or the
+  Windows console VT mode bit. Unset `TERM` is compact fallback.
+- All display data is sanitized before model/rendering. C0/C1 controls,
+  CSI, OSC, tabs, and line breaks cannot create terminal controls.
+- Claim/retry/open/view errors are sanitized, bounded notices and do not end
+  the interactive session. The alternate screen and terminal mode restore on
+  normal exit, exceptions, Ctrl-C, and SIGTERM.
+- Delivery evidence aggregates all durable attempts with
+  `aggregate_delivery`, retaining the strongest proof and total attempt count.
+- Dashboard loading follows bounded pages (cap 300), search covers loaded
+  pages, and the controller accepts only a CLI-supplied dispatch tick callback
+  (initial, refresh, and post-mutation).
+
+Follow-up verification: 49 focused TUI/service/CLI/dispatcher tests passed,
+plus `py -3 -m compileall -q src`.
