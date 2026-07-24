@@ -33,16 +33,19 @@ BOOLEAN = {"type": "boolean"}
 INTEGER = {"type": "integer"}
 
 TOOL_SCHEMAS = {
-    "status": _schema({"oneliner": BOOLEAN, "actor": STRING}),
-    "inbox": _schema({"limit": INTEGER, "cursor": STRING, "actor": STRING}),
+    # Identity is bound by the installed MCP command (`--as`) rather than a
+    # model-controlled tool argument.  Accepting an actor field here would let
+    # one desktop client claim or complete another client's work.
+    "status": _schema({"oneliner": BOOLEAN}),
+    "inbox": _schema({"limit": INTEGER, "cursor": STRING}),
     "send": _schema({"to": STRING, "subject": STRING, "body": STRING, "project": STRING, "no_wake": BOOLEAN}, ("to", "subject")),
-    "claim": _schema({"task_id": STRING, "body": STRING, "actor": STRING}, ("task_id",)),
-    "done": _schema({"task_id": STRING, "result": STRING, "files": STRING, "actor": STRING}, ("task_id",)),
+    "claim": _schema({"task_id": STRING, "body": STRING, "no_wake": BOOLEAN}, ("task_id",)),
+    "done": _schema({"task_id": STRING, "result": STRING, "files": STRING, "no_wake": BOOLEAN}, ("task_id",)),
     "show": _schema({"task_id": STRING}, ("task_id",)),
     "board": _schema({"project": STRING}),
-    "question": _schema({"task_id": STRING, "body": STRING, "actor": STRING}, ("task_id", "body")),
-    "answer": _schema({"task_id": STRING, "body": STRING, "actor": STRING}, ("task_id", "body")),
-    "review": _schema({"task_id": STRING, "verdict": {"type": "string", "enum": ["approve", "changes"]}, "body": STRING, "actor": STRING}, ("task_id",)),
+    "question": _schema({"task_id": STRING, "body": STRING, "no_wake": BOOLEAN}, ("task_id", "body")),
+    "answer": _schema({"task_id": STRING, "body": STRING, "no_wake": BOOLEAN}, ("task_id", "body")),
+    "review": _schema({"task_id": STRING, "verdict": {"type": "string", "enum": ["approve", "changes"]}, "body": STRING, "no_wake": BOOLEAN}, ("task_id",)),
     "wake": _schema({"agent": STRING, "project": STRING}, ("agent",)),
     "agents": _schema({}),
     "activity": _schema({"project": STRING, "since": STRING}),

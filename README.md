@@ -18,6 +18,10 @@ telemetry.
 - Windows 10/11 with PowerShell 5.1+, or macOS/Linux with Bash
 - A local filesystem; network shares and cloud-sync folders are unsupported
 
+The packaged Windows notification helper targets x86-64. Windows on ARM is
+not currently a native release target; macOS ships a universal2 helper for
+Intel and Apple Silicon inside the portable ZIP.
+
 The four integrations ship as versioned session-card templates. `bridge setup
 status` reports the actual capability for Codex, Claude Code, Reasonix, or
 ZCode; when a host is unavailable, use the terminal fallback. Windows source

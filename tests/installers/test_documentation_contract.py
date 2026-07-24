@@ -120,8 +120,9 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertEqual(shell.count('export PYTHONPATH="${source_root}/src'), 1)
         self.assertLess(shell.index("--dev-source-fallback"), shell.index('export PYTHONPATH="${source_root}/src'))
         for workflow in (ci, release):
-            self.assertIn("actions/setup-python@v5", workflow)
+            self.assertIn("actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065", workflow)
             self.assertIn("--force-reinstall --no-deps", workflow)
+            self.assertNotRegex(workflow, r"uses:\s+[^#\s]+@v\d")
         self.assertIn("verify-release.ps1", ci)
         self.assertIn("bootstrap_wheel.py --check", ci)
         self.assertIn("bootstrapMetadata", windows)
@@ -134,11 +135,16 @@ class DocumentationContractTests(unittest.TestCase):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8").lower()
         for token in (
             "windows:", "macos:", "python:", "aggregate:", "platform-windows", "platform-macos",
-            "actions/download-artifact@v4", "actions/upload-artifact@v4", "verify-release.ps1",
+            "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", "verify-release.ps1",
             "sign-and-notarize.sh", "before staging", "unsigned manual artifact", "cyclonedx",
-            "sha256sum -c", "softprops/action-gh-release", "retag_wheel.py",
+            "sha256sum -c", "gh release create", "retag_wheel.py",
+            "agent_bridge_windows_signing_pfx_b64", "portable-windows-smoke:",
         ):
             self.assertIn(token, release)
+        self.assertIn("permissions: {}", release)
+        self.assertNotRegex(release, r"uses:\s+[^#\s]+@v\d")
+        self.assertNotIn("softprops/action-gh-release", release)
         self.assertTrue((ROOT / "scripts" / "retag_wheel.py").is_file())
 
     def test_release_is_zip_first_and_uses_the_portable_zip_builder(self) -> None:

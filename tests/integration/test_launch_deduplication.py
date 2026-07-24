@@ -160,7 +160,7 @@ class LaunchDeduplicationTests(unittest.TestCase):
         self.assertEqual(marker.read_text(encoding="utf-8"), "started")
         self.assertIsNotNone(self.store.scalar("SELECT completed_at FROM outbox"))
 
-    def test_manual_recipient_is_not_a_retry_when_auto_channel_is_enabled(self) -> None:
+    def test_manual_recipient_without_an_applicable_channel_remains_due(self) -> None:
         self._configure_auto_profile()
         task = self.service.send_task("sender", "manual", "manual", "body", "project")
         with self.store.transaction(immediate=True) as connection:
@@ -168,10 +168,14 @@ class LaunchDeduplicationTests(unittest.TestCase):
 
         report = Dispatcher(self.store, {"launcher": LaunchDeliveryChannel(str(self.store.path))}).run_burst()
 
-        self.assertEqual(report.delivered, 1)
-        self.assertEqual(report.retried, 0)
-        self.assertIsNotNone(self.store.scalar("SELECT completed_at FROM outbox"))
-        self.assertEqual(self.store.scalar("SELECT COUNT(*) FROM delivery_attempts WHERE task_id = ?", (task.id,)), 0)
+        self.assertEqual(report.delivered, 0)
+        self.assertEqual(report.retried, 1)
+        self.assertIsNone(self.store.scalar("SELECT completed_at FROM outbox"))
+        self.assertEqual(self.store.scalar("SELECT COUNT(*) FROM delivery_attempts WHERE task_id = ?", (task.id,)), 1)
+        self.assertEqual(
+            self.store.scalar("SELECT status FROM delivery_attempts WHERE task_id = ?", (task.id,)),
+            "retry_wait",
+        )
 
     def _configure_auto_profile(self) -> None:
         with self.store.transaction(immediate=True) as connection:

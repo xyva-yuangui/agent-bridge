@@ -92,5 +92,5 @@ class TerminalTests(unittest.TestCase):
                 self.assertFalse(result.opened)
                 self.assertEqual(result.method, "instructions")
                 self.assertIn("not a shell command", result.instructions)
-                self.assertIn(json.dumps([sys.executable, "-m", "agent_bridge.cli", "show", task_id]), result.instructions)
+                self.assertIn(json.dumps([sys.executable, "-m", "agent_bridge.cli", "--as", "unknown", "show", task_id]), result.instructions)
                 self.assertNotIn("inspect task " + task_id, result.instructions)

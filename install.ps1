@@ -35,6 +35,48 @@ function Resolve-Python {
 }
 
 $pythonPath = Resolve-Python -Requested $Python
+$bridgeArgs = @("-m", "agent_bridge.cli")
+
+# Removal is deliberately independent of bootstrap.  Downloading/reinstalling
+# a package just to remove it can replace a healthy user installation and can
+# never be made safe for a shared interpreter.
+if ($Uninstall) {
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    & $pythonPath -c "import agent_bridge.cli" 2>$null
+    $packageImportable = $LASTEXITCODE -eq 0
+    & $pythonPath -c "import importlib.metadata as m, pathlib, site; d=m.distribution('agent-bridge'); root=pathlib.Path(d.locate_file('')).resolve(); user=pathlib.Path(site.USER_SITE).resolve(); raise SystemExit(0 if root == user or user in root.parents else 1)" 2>$null
+    $userOwnedPackage = $LASTEXITCODE -eq 0
+    $ErrorActionPreference = $previousPreference
+    if (-not $packageImportable) {
+        $ownedRuntime = Join-Path $userRoot ".agent-bridge\skill\runtime"
+        if (-not (Test-Path -LiteralPath (Join-Path $ownedRuntime "agent_bridge\cli.py"))) {
+            throw "Agent Bridge is not importable and its owned runtime is absent; refusing to install anything during uninstall."
+        }
+        $runtimeProgram = "import sys; sys.path.insert(0, sys.argv[1]); from agent_bridge.cli import main; raise SystemExit(main(sys.argv[2:]))"
+        $bridgeArgs = @("-c", $runtimeProgram, $ownedRuntime)
+    }
+    $bridgeArgs += "uninstall", "--home", $userRoot
+    if ($Agent) { $bridgeArgs += "--agent", $Agent }
+    if ($PurgeData) { $bridgeArgs += "--purge-data" }
+    & $pythonPath @bridgeArgs
+    if ($LASTEXITCODE -ne 0) { throw "agent-bridge uninstall command failed." }
+    # Only a distribution located in this interpreter's user site can have
+    # been installed by this script (--user). pip removes files from that
+    # distribution's RECORD only; global, venv, and unrelated packages stay.
+    $sharedRuntime = Join-Path $userRoot ".agent-bridge\runtime-receipt.json"
+    if ($userOwnedPackage -and -not (Test-Path -LiteralPath $sharedRuntime)) {
+        & $pythonPath -m pip uninstall --disable-pip-version-check --yes agent-bridge
+        if ($LASTEXITCODE -ne 0) { throw "Agent Bridge lifecycle was removed, but its user-owned Python distribution could not be removed." }
+    } elseif (Test-Path -LiteralPath $sharedRuntime) {
+        Write-Verbose "Retaining the shared Agent Bridge distribution because other host integrations remain."
+    } else {
+        Write-Verbose "Retaining Agent Bridge distribution outside this interpreter's user site."
+    }
+    Write-Output "OK agent-bridge lifecycle completed"
+    exit 0
+}
+
 $bootstrapWheel = Join-Path $sourceRoot "bootstrap\agent_bridge-2.0.0-py3-none-any.whl"
 $bootstrapMetadata = Join-Path $sourceRoot "bootstrap\agent_bridge-2.0.0.bootstrap.json"
 if (Test-Path -LiteralPath $bootstrapWheel) {
@@ -58,17 +100,10 @@ if ($LASTEXITCODE -ne 0) {
     $env:PYTHONPATH = if ($env:PYTHONPATH) { "$sourcePackage;$env:PYTHONPATH" } else { $sourcePackage }
 }
 
-$bridgeArgs = @("-m", "agent_bridge.cli")
-if ($Uninstall) {
-    $bridgeArgs += "uninstall", "--home", $userRoot
-    if ($Agent) { $bridgeArgs += "--agent", $Agent }
-    if ($PurgeData) { $bridgeArgs += "--purge-data" }
-} else {
-    $bridgeArgs += "setup", "--home", $userRoot
-    if ($Auto) { $bridgeArgs += "--auto" }
-    if ($Agent) { $bridgeArgs += "--agent", $Agent }
-    if (-not $Auto -and -not $Agent) { $bridgeArgs += "--auto" }
-}
+$bridgeArgs += "setup", "--home", $userRoot
+if ($Auto) { $bridgeArgs += "--auto" }
+if ($Agent) { $bridgeArgs += "--agent", $Agent }
+if (-not $Auto -and -not $Agent) { $bridgeArgs += "--auto" }
 if ($As -or $WakeArgv) { Write-Verbose "-As and -WakeArgv are legacy options; setup uses local host scope only." }
 & $pythonPath @bridgeArgs
 if ($LASTEXITCODE -ne 0) { throw "agent-bridge setup command failed." }

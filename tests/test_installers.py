@@ -180,7 +180,7 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
             receipt = json.loads((notifier / "receipt.json").read_text(encoding="utf-8-sig"))
             self.assertEqual(
                 set(receipt),
-                {"schema", "owner", "helper_path", "sha256"},
+                {"schema", "owner", "helper_path", "sha256", "activation_argv"},
             )
             self.assertEqual(receipt["schema"], 1)
             self.assertEqual(receipt["owner"], "agent-bridge.windows-notify")
@@ -188,6 +188,18 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
             self.assertEqual(
                 receipt["sha256"].lower(),
                 hashlib.sha256(helper.read_bytes()).hexdigest(),
+            )
+            activation_argv = receipt["activation_argv"]
+            self.assertEqual(
+                activation_argv[2:],
+                ["--as", "notification-action", "--data-root", activation_argv[5]],
+            )
+            self.assertTrue(os.path.samefile(activation_argv[0], sys.executable))
+            self.assertTrue(
+                os.path.samefile(activation_argv[1], skill / "scripts" / "bridge.py")
+            )
+            self.assertTrue(
+                os.path.samefile(activation_argv[5], root / ".agent-bridge")
             )
             status = subprocess.run(
                 [str(helper)],
@@ -218,10 +230,10 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
                     skill / "scripts" / "bridge.py",
                 )
             )
-            self.assertEqual(activation_argv[2], "--data-root")
+            self.assertEqual(activation_argv[2:5], ["--as", "notification-action", "--data-root"])
             self.assertTrue(
                 os.path.samefile(
-                    activation_argv[3],
+                    activation_argv[5],
                     root / ".agent-bridge",
                 )
             )

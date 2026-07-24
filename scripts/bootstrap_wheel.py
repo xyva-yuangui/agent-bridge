@@ -105,10 +105,13 @@ def write() -> dict[str, object]:
     with tempfile.TemporaryDirectory() as temporary:
         environment = os.environ.copy()
         environment["SOURCE_DATE_EPOCH"] = "315532800"
-        subprocess.run(
+        built_result = subprocess.run(
             [sys.executable, "-m", "pip", "wheel", ".", "--no-build-isolation", "--no-deps", "--wheel-dir", temporary],
-            cwd=ROOT, env=environment, check=True,
+            cwd=ROOT, env=environment, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=False,
         )
+        if built_result.returncode != 0:
+            raise RuntimeError("offline wheel build failed: " + (built_result.stderr or built_result.stdout).strip())
         built = next(Path(temporary).glob("agent_bridge-{}-py3-none-any.whl".format(version())))
         shutil.copy2(built, wheel_path())
     metadata = {

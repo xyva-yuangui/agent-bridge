@@ -13,6 +13,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Tuple
 
 from .delivery import DeferredDelivery, DeliveryChannel, EVIDENCE_RANK
@@ -190,15 +191,30 @@ class Dispatcher:
     def _deliver_group(self, group: tuple[OutboxItem, ...], deadline_at: float) -> tuple[int, int, int]:
         if not self.channels:
             return self._retry_group(group, "unavailable", "no configured delivery channel", deadline_at)
-        delivered = retried = failed = 0
+        successful_channel = False
+        retry_pending = False
+        terminal_failure = False
+        deferred_pending = False
         representative = group[0]
+        attempted_channel = False
+        outbox_attempt_recorded = False
         for channel, adapter in self.channels.items():
             if not _is_applicable(adapter, representative):
                 continue
+            attempted_channel = True
+            if all(self._has_delivery_evidence(item, channel) for item in group):
+                # A crash can happen after channel evidence commits but before
+                # the outbox row is completed.  Do not repeat that external
+                # effect merely to finish the local transaction.
+                successful_channel = True
+                continue
             for item in group:
-                if not self._mark_dispatching(item, channel, deadline_at):
+                if not self._mark_dispatching(
+                    item, channel, deadline_at, increment_outbox=not outbox_attempt_recorded
+                ):
                     self._lease_lost = True
-                    return delivered, retried, failed
+                    return 0, 0, 0
+            outbox_attempt_recorded = True
             self.store.trigger_fault("after_attempt_recorded")
             remaining = deadline_at - time.monotonic()
             if remaining <= EFFECT_CLEANUP_RESERVE_SECONDS + SPAWN_RESERVE_SECONDS:
@@ -209,7 +225,7 @@ class Dispatcher:
                 timeout_seconds + EFFECT_CLEANUP_RESERVE_SECONDS + SPAWN_RESERVE_SECONDS, deadline_at
             ):
                 self._lease_lost = True
-                return delivered, retried, failed
+                return 0, 0, 0
             try:
                 completed, result = _invoke_bounded(
                     adapter, representative, representative.idempotency_key, timeout_seconds, deadline_at
@@ -218,14 +234,16 @@ class Dispatcher:
                     self._deadline_reached = True
                     return self._retry_group(group, channel, "channel exceeded bounded timeout", deadline_at)
                 if isinstance(result, DeferredDelivery):
-                    return self._defer_group(group, channel, result, deadline_at)
+                    deferred = self._defer_group(group, channel, result, deadline_at)
+                    deferred_pending = deferred_pending or deferred[1] > 0
+                    continue
                 status = _delivery_status(result)
                 if status not in EVIDENCE_RANK or EVIDENCE_RANK[status] < EVIDENCE_RANK[DeliveryStatus.OS_POSTED]:
                     raise RuntimeError("channel returned no delivery evidence")
             except Exception as error:
                 retry_result = self._retry_group(group, channel, str(error), deadline_at)
-                retried += retry_result[1]
-                failed += retry_result[2]
+                retry_pending = retry_pending or retry_result[1] > 0
+                terminal_failure = terminal_failure or retry_result[2] > 0
                 continue
             self.store.trigger_fault(_effect_fault_point(adapter))
             if self.after_effect is not None:
@@ -248,17 +266,45 @@ class Dispatcher:
             for item in group:
                 if not self._record_evidence(item, channel, status, deadline_at):
                     self._lease_lost = True
-                    return delivered, retried, failed
-        if not retried and not failed:
-            for item in group:
-                self.store.trigger_fault("before_outbox_complete")
-                if not self._complete(item, deadline_at):
-                    self._lease_lost = True
-                    return delivered, retried, failed
-            delivered = len(group)
-        return delivered, retried, failed
+                    return 0, 0, 0
+            successful_channel = True
+        # A configured but inapplicable channel (for example a different
+        # agent's automatic launcher) is not delivery evidence.  Keep the
+        # intent due for retry rather than completing it with zero attempts.
+        if not attempted_channel:
+            return self._retry_group(group, "unavailable", "no applicable delivery channel for recipient", deadline_at)
+        if retry_pending or deferred_pending:
+            return 0, len(group), 0
+        for item in group:
+            self.store.trigger_fault("before_outbox_complete")
+            if not self._complete(item, deadline_at):
+                self._lease_lost = True
+                return 0, 0, 0
+        if successful_channel:
+            return len(group), 0, 0
+        return 0, 0, len(group) if terminal_failure else 0
 
-    def _mark_dispatching(self, item: OutboxItem, channel: str, deadline_at: float) -> bool:
+    def _has_delivery_evidence(self, item: OutboxItem, channel: str) -> bool:
+        row = self.store.connection.execute(
+            "SELECT status FROM delivery_attempts WHERE idempotency_key = ?",
+            (_attempt_key(item, channel),),
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            status = DeliveryStatus(str(row["status"]))
+        except ValueError:
+            return False
+        return EVIDENCE_RANK.get(status, -1) >= EVIDENCE_RANK[DeliveryStatus.OS_POSTED]
+
+    def _mark_dispatching(
+        self,
+        item: OutboxItem,
+        channel: str,
+        deadline_at: float,
+        *,
+        increment_outbox: bool = True,
+    ) -> bool:
         task_id = _task_id(item)
         if task_id is None:
             raise ValueError("outbox item has no task_id")
@@ -268,9 +314,12 @@ class Dispatcher:
             with transaction as connection:
                 if not _connection_can_mutate_item(connection, self.owner, item.id):
                     return False
-                if connection.execute(
-                    "UPDATE outbox SET attempts = attempts + 1 WHERE id = ? AND completed_at IS NULL", (item.id,)
-                ).rowcount != 1:
+                update = (
+                    "UPDATE outbox SET attempts = attempts + 1 WHERE id = ? AND completed_at IS NULL"
+                    if increment_outbox
+                    else "UPDATE outbox SET attempts = attempts WHERE id = ? AND completed_at IS NULL"
+                )
+                if connection.execute(update, (item.id,)).rowcount != 1:
                     return False
                 connection.execute(
                 "INSERT INTO delivery_attempts(task_id, channel, status, attempts, created_at, updated_at, error, idempotency_key) "
@@ -393,12 +442,10 @@ class Dispatcher:
                 "UPDATE delivery_attempts SET status = ?, updated_at = ?, error = ? WHERE idempotency_key = ?",
                 (status.value, now, error[:1000], _attempt_key(item, channel)),
                 )
-                if terminal:
-                    connection.execute("UPDATE outbox SET completed_at = ? WHERE id = ?", (now, item.id))
-                else:
+                if not terminal:
                     connection.execute(
-                    "UPDATE outbox SET due_at = ? WHERE id = ?",
-                    (_retry_due_at(attempts, minimum_delay), item.id),
+                        "UPDATE outbox SET due_at = ? WHERE id = ?",
+                        (_retry_due_at(attempts, minimum_delay), item.id),
                     )
                 return terminal
         except (_DeadlineExceeded, sqlite3.OperationalError):
@@ -434,9 +481,12 @@ class Dispatcher:
             return False
 
 
-def request_dispatch() -> bool:
+def request_dispatch(data_root: Optional[Path] = None) -> bool:
     """Start a detached dispatcher using a fixed, content-free command line."""
-    argv = [sys.executable, "-m", "agent_bridge.cli", "dispatch", "--burst"]
+    argv = [sys.executable, "-m", "agent_bridge.cli"]
+    if data_root is not None:
+        argv.extend(("--data-root", str(Path(data_root).resolve())))
+    argv.extend(("dispatch", "--burst"))
     kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if os.name == "nt":
         kwargs["creationflags"] = (
@@ -461,7 +511,7 @@ def tick(store: Optional[Store] = None) -> bool:
         due = store.connection.execute(
             "SELECT 1 FROM outbox WHERE completed_at IS NULL AND due_at <= ? LIMIT 1", (utc_now(),)
         ).fetchone()
-        return bool(due) and request_dispatch()
+        return bool(due) and request_dispatch(store.path.parent)
     finally:
         if owned_store:
             store.close()

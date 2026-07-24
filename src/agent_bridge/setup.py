@@ -30,6 +30,7 @@ from .path_ownership import (
     path_status,
     remove_launcher_path,
 )
+from .permissions import secure_directory, secure_file
 
 
 def _home(value: Optional[Path]) -> Path:
@@ -77,9 +78,40 @@ def _select_adapters(home: Path, agent: Optional[str]) -> Tuple[HostAdapter, ...
 def _host_application_present(adapter: HostAdapter) -> bool:
     """Probe host-owned config/executable state, never our integration receipt."""
     names = (adapter.name, adapter.name + "-cli")
-    return adapter._valid_installation_marker() or adapter.config_path.exists() or any(
-        _which_shutil.which(name) is not None for name in names
-    )
+    if adapter._valid_installation_marker() or adapter.config_path.exists():
+        return True
+    # Global desktop application locations describe the current interactive
+    # user only.  Applying those probes to an explicit alternate --home would
+    # install unrelated integrations into test, portable, or managed profiles.
+    if adapter.home != Path.home().resolve(strict=False):
+        return False
+    if any(_which_shutil.which(name) is not None for name in names):
+        return True
+    display = {
+        "codex": ("Codex",),
+        "claude": ("Claude", "Claude Code"),
+        "reasonix": ("Reasonix",),
+        "zcode": ("ZCode",),
+    }[adapter.name]
+    candidates = []
+    if os.name == "nt":
+        roots = [
+            Path(value) for value in (
+                os.environ.get("LOCALAPPDATA"),
+                os.environ.get("ProgramFiles"),
+                os.environ.get("ProgramFiles(x86)"),
+            ) if value
+        ]
+        for root in roots:
+            for product in display:
+                candidates.extend((
+                    root / product / (product + ".exe"),
+                    root / "Programs" / product / (product + ".exe"),
+                ))
+    elif sys.platform == "darwin":
+        for root in (Path("/Applications"), Path.home() / "Applications"):
+            candidates.extend(root / (product + ".app") for product in display)
+    return any(candidate.exists() for candidate in candidates)
 
 
 def _owns_integration(adapter: HostAdapter) -> bool:
@@ -102,7 +134,7 @@ def _source_root() -> Path:
 
 
 def _write_owned_json(path: Path, value: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    secure_directory(path.parent)
     descriptor, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
     temporary = Path(name)
     try:
@@ -110,12 +142,57 @@ def _write_owned_json(path: Path, value: object) -> None:
             json.dump(value, stream, ensure_ascii=False, sort_keys=True)
             stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
         os.replace(temporary, path)
+        secure_file(path)
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def _runtime_receipt(home: Path) -> Path:
     return _data_root(home) / "runtime-receipt.json"
+
+
+def _snapshot_runtime(home: Path) -> Optional[Path]:
+    """Copy an owned runtime so a later setup failure can restore the upgrade."""
+    receipt = _runtime_receipt(home)
+    if not receipt.is_file():
+        return None
+    data = _data_root(home)
+    snapshot = data / (".runtime-rollback-" + next(tempfile._get_candidate_names()))
+    snapshot.mkdir(parents=True)
+    skill = data / "skill"
+    launcher = home / ".local" / "bin" / ("bridge.cmd" if os.name == "nt" else "bridge")
+    if skill.is_dir():
+        shutil.copytree(skill, snapshot / "skill")
+    if launcher.is_file():
+        shutil.copy2(launcher, snapshot / "launcher")
+    shutil.copy2(receipt, snapshot / "runtime-receipt.json")
+    return snapshot
+
+
+def _restore_runtime_snapshot(home: Path, snapshot: Path) -> None:
+    data = _data_root(home)
+    skill = data / "skill"
+    launcher = home / ".local" / "bin" / ("bridge.cmd" if os.name == "nt" else "bridge")
+    if skill.exists():
+        shutil.rmtree(skill)
+    if (snapshot / "skill").is_dir():
+        shutil.copytree(snapshot / "skill", skill)
+    if (snapshot / "launcher").is_file():
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(snapshot / "launcher", launcher)
+    shutil.copy2(snapshot / "runtime-receipt.json", _runtime_receipt(home))
+    shutil.rmtree(snapshot)
+
+
+def _restore_profile_files(profile: Path, receipt: Path, before: Tuple[Optional[bytes], Optional[bytes]]) -> None:
+    for path, content in ((profile, before[0]), (receipt, before[1])):
+        if content is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+    if profile.parent.is_dir() and not any(profile.parent.iterdir()):
+        profile.parent.rmdir()
 
 
 def _replace_runtime_path(source: Path, destination: Path) -> None:
@@ -183,9 +260,23 @@ def _install_profiles(home: Path, names: Tuple[str, ...]) -> None:
         receipt = _data_root(home) / "agents" / name / "agent-bridge-profile.json"
         if profile.exists() and not receipt.exists():
             raise RuntimeError("refusing to overwrite unowned agent profile: " + name)
-        _write_owned_json(profile, {
-            "name": name, "skills": [], "strengths": "local host integration", "last_seen": "managed",
-        })
+        try:
+            existing = json.loads(profile.read_text(encoding="utf-8")) if profile.exists() else {}
+        except (OSError, ValueError) as error:
+            raise RuntimeError("invalid owned agent profile: " + name) from error
+        if not isinstance(existing, dict):
+            raise RuntimeError("invalid owned agent profile: " + name)
+        # This is the public, agent-owned policy profile.  Repair preserves
+        # the policy fields a user or host changed after setup.
+        defaults = {
+            "name": name, "home": str(home), "skills": [], "strengths": "local host integration", "last_seen": "managed",
+            "execution_policy": "manual", "launch_argv": [], "terminal_preference": "auto",
+            "max_concurrency": 1, "cooldown_seconds": 30, "workspace_allowlist": [],
+        }
+        defaults.update(existing)
+        defaults["name"] = name
+        defaults["home"] = str(home)
+        _write_owned_json(profile, defaults)
         _write_owned_json(receipt, {"owner": OWNER, "profile": str(profile), "sha256": hashlib.sha256(profile.read_bytes()).hexdigest()})
 
 
@@ -234,26 +325,56 @@ def _install_macos_native(home: Path) -> None:
     source = _macos_source_app()
     if source is None or not source.is_dir():
         return  # A wheel-only installation remains terminal-fallback capable.
-    source_executable, source_hash, source_tree_hash = _validate_macos_app(source)
+    _validate_macos_app(source)
     app, executable, receipt = _macos_native_paths(home)
+    old_activation = None
     if app.exists() or receipt.exists():
         try: owned = json.loads(receipt.read_text(encoding="utf-8"))
         except (OSError, ValueError) as error: raise RuntimeError("invalid macOS native helper ownership receipt") from error
         if owned.get("owner") != "agent-bridge.macos-notify" or owned.get("app_path") != str(app) or not app.is_dir() or owned.get("app_sha256") != _tree_hash(app):
             raise RuntimeError("refusing to overwrite an unowned macOS notification app")
+        old_activation = owned.get("activation_argv")
     app.parent.mkdir(parents=True, exist_ok=True)
     stage = app.parent / (".macos-stage-" + next(tempfile._get_candidate_names()))
-    shutil.copytree(source, stage)
-    if app.exists(): shutil.rmtree(app)
-    _replace_runtime_path(stage, app)
-    installed_executable, executable_hash, app_hash = _validate_macos_app(app)
-    signing = macos_signing_assessment(installed_executable)
-    activation = [sys.executable, str(_data_root(home) / "skill" / "scripts" / "bridge.py"), "--data-root", str(_data_root(home))]
-    _write_owned_json(receipt, {"schema": 1, "owner": "agent-bridge.macos-notify", "source_app": str(source), "app_path": str(app), "executable_path": str(executable), "executable_sha256": executable_hash, "app_sha256": app_hash, "signing_status": signing.status, "gatekeeper": signing.gatekeeper, "activation_argv": activation})
-    result = MacOSNotifier(installed_executable, activation_argv=activation).register(activation)
-    if not result.ok:
-        _remove_macos_native(home)
-        raise RuntimeError("macOS notification registration failed: " + result.detail)
+    rollback_app = app.parent / (".macos-rollback-" + next(tempfile._get_candidate_names()))
+    old_receipt = receipt.read_bytes() if receipt.is_file() else None
+    installed_executable = executable
+    try:
+        shutil.copytree(source, stage)
+        if app.exists():
+            os.replace(app, rollback_app)
+        _replace_runtime_path(stage, app)
+        installed_executable, executable_hash, app_hash = _validate_macos_app(app)
+        signing = macos_signing_assessment(installed_executable)
+        activation = [sys.executable, str(_data_root(home) / "skill" / "scripts" / "bridge.py"), "--as", "notification-action", "--data-root", str(_data_root(home))]
+        _write_owned_json(receipt, {"schema": 1, "owner": "agent-bridge.macos-notify", "source_app": str(source), "app_path": str(app), "executable_path": str(executable), "executable_sha256": executable_hash, "app_sha256": app_hash, "signing_status": signing.status, "gatekeeper": signing.gatekeeper, "activation_argv": activation})
+        result = MacOSNotifier(installed_executable, activation_argv=activation).register(activation)
+        if not result.ok:
+            raise RuntimeError("macOS notification registration failed: " + result.detail)
+    except BaseException:
+        try:
+            MacOSNotifier(installed_executable, activation_argv=()).unregister()
+        except BaseException:
+            pass
+        if app.exists():
+            shutil.rmtree(app)
+        if rollback_app.exists():
+            os.replace(rollback_app, app)
+        if old_receipt is None:
+            receipt.unlink(missing_ok=True)
+        else:
+            receipt.write_bytes(old_receipt)
+        if old_activation and app.is_dir():
+            old_executable, ignored_hash, ignored_tree_hash = _validate_macos_app(app)
+            restored = MacOSNotifier(old_executable, activation_argv=old_activation).register(old_activation)
+            if not restored.ok:
+                raise RuntimeError("macOS notification rollback registration failed: " + restored.detail)
+        raise
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+        if rollback_app.exists():
+            shutil.rmtree(rollback_app)
 
 
 def _remove_macos_native(home: Path) -> None:
@@ -278,6 +399,10 @@ def _install_windows_native(home: Path) -> None:
     helper, receipt = _native_paths(home)
     env_receipt = helper.parent / "environment-receipt.json"
     configured = os.environ.get("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", "")
+    old_helper = helper.read_bytes() if helper.is_file() else None
+    old_receipt = receipt.read_bytes() if receipt.is_file() else None
+    old_env_receipt = env_receipt.read_bytes() if env_receipt.is_file() else None
+    old_activation = None
     if configured and Path(configured).is_file() and Path(configured).absolute() != helper.absolute():
         raise RuntimeError("refusing to overwrite an unrelated Windows notifier environment value")
     if helper.exists() or receipt.exists():
@@ -285,35 +410,84 @@ def _install_windows_native(home: Path) -> None:
         except (OSError, ValueError) as error: raise RuntimeError("invalid native helper ownership receipt") from error
         if old.get("owner") != "agent-bridge.windows-notify" or old.get("helper_path") != str(helper) or old.get("sha256", "").lower() != hashlib.sha256(helper.read_bytes()).hexdigest():
             raise RuntimeError("Windows notifier ownership hash mismatch")
-    if packaged.is_file():
-        helper.parent.mkdir(parents=True, exist_ok=True)
-        # ``as_file`` supports both unpacked installs and zipped resources.
-        with resources.as_file(packaged) as source:
-            shutil.copy2(source, helper)
-    elif not helper.is_file():
-        raise RuntimeError("Windows notifier release helper is missing")
-    _write_owned_json(receipt, {"schema": 1, "owner": "agent-bridge.windows-notify", "helper_path": str(helper), "sha256": hashlib.sha256(helper.read_bytes()).hexdigest()})
-    activation = [sys.executable, str(_data_root(home) / "skill" / "scripts" / "bridge.py"), "--data-root", str(_data_root(home))]
-    result = WindowsNotifier(helper).register(activation)
-    if not result.ok: raise RuntimeError("native notification registration failed: " + result.detail)
-    os.environ["AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER"] = str(helper)
+        old_activation = old.get("activation_argv")
     import winreg
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
         try: prior_user, _ = winreg.QueryValueEx(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER")
         except FileNotFoundError: prior_user = None
-        # A repair sees the value that the first setup itself registered.  Its
-        # receipt must retain the original environment state so uninstall does
-        # not restore Agent Bridge's own stale helper path.
-        if env_receipt.is_file():
+    stage = helper.parent / (".windows-stage-" + next(tempfile._get_candidate_names()) + ".exe")
+    try:
+        if packaged.is_file():
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            # ``as_file`` supports both unpacked installs and zipped resources.
+            with resources.as_file(packaged) as source:
+                shutil.copy2(source, stage)
+            os.replace(stage, helper)
+        elif not helper.is_file():
+            raise RuntimeError("Windows notifier release helper is missing")
+        activation = [sys.executable, str(_data_root(home) / "skill" / "scripts" / "bridge.py"), "--as", "notification-action", "--data-root", str(_data_root(home))]
+        _write_owned_json(receipt, {
+            "schema": 1,
+            "owner": "agent-bridge.windows-notify",
+            "helper_path": str(helper),
+            "sha256": hashlib.sha256(helper.read_bytes()).hexdigest(),
+            "activation_argv": activation,
+        })
+        result = WindowsNotifier(helper).register(activation)
+        if not result.ok:
+            raise RuntimeError("native notification registration failed: " + result.detail)
+        os.environ["AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER"] = str(helper)
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
+            # A repair sees the value that the first setup itself registered.
+            # Keep the original environment state for final uninstall.
+            receipt_process, receipt_user = configured or None, prior_user
+            if old_env_receipt is not None:
+                try:
+                    existing_environment = json.loads(old_env_receipt.decode("utf-8-sig"))
+                except (UnicodeDecodeError, ValueError):
+                    existing_environment = {}
+                if existing_environment.get("owner") == OWNER and existing_environment.get("helper") == str(helper):
+                    receipt_process = existing_environment.get("process")
+                    receipt_user = existing_environment.get("user")
+            winreg.SetValueEx(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", 0, winreg.REG_SZ, str(helper))
+        _write_owned_json(env_receipt, {"owner": OWNER, "helper": str(helper), "process": receipt_process, "user": receipt_user})
+    except BaseException:
+        try:
+            WindowsNotifier(helper).unregister()
+        except BaseException:
+            pass
+        if old_helper is None:
+            helper.unlink(missing_ok=True)
+        else:
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.write_bytes(old_helper)
+        if old_receipt is None:
+            receipt.unlink(missing_ok=True)
+        else:
+            receipt.write_bytes(old_receipt)
+        if old_env_receipt is None:
+            env_receipt.unlink(missing_ok=True)
+        else:
+            env_receipt.write_bytes(old_env_receipt)
+        if configured:
+            os.environ["AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER"] = configured
+        else:
+            os.environ.pop("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", None)
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
             try:
-                existing_environment = json.loads(env_receipt.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                existing_environment = {}
-            if existing_environment.get("owner") == OWNER and existing_environment.get("helper") == str(helper):
-                configured = existing_environment.get("process")
-                prior_user = existing_environment.get("user")
-        winreg.SetValueEx(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", 0, winreg.REG_SZ, str(helper))
-    _write_owned_json(env_receipt, {"owner": OWNER, "helper": str(helper), "process": configured or None, "user": prior_user})
+                if prior_user is None:
+                    winreg.DeleteValue(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER")
+                else:
+                    winreg.SetValueEx(key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", 0, winreg.REG_SZ, prior_user)
+            except FileNotFoundError:
+                pass
+        if old_activation and helper.is_file():
+            restored = WindowsNotifier(helper).register(old_activation)
+            if not restored.ok:
+                raise RuntimeError("native notification rollback registration failed: " + restored.detail)
+        raise
+    finally:
+        stage.unlink(missing_ok=True)
 
 
 def _remove_windows_native(home: Path) -> None:
@@ -370,6 +544,31 @@ def _remove_runtime(home: Path) -> None:
                 if not any(profile.parent.iterdir()): profile.parent.rmdir()
             except (OSError, ValueError, KeyError, TypeError):
                 continue
+
+
+def _remove_owned_profile(home: Path, name: str) -> None:
+    """Remove one unchanged bridge-owned profile without touching siblings."""
+    directory = _data_root(home) / "agents" / name
+    profile = directory / "agent.json"
+    receipt = directory / "agent-bridge-profile.json"
+    if not receipt.is_file() or receipt.is_symlink():
+        return
+    try:
+        owned = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if (
+        owned.get("owner") != OWNER
+        or owned.get("profile") != str(profile)
+        or not profile.is_file()
+        or profile.is_symlink()
+        or owned.get("sha256") != hashlib.sha256(profile.read_bytes()).hexdigest()
+    ):
+        return
+    profile.unlink()
+    receipt.unlink()
+    if directory.is_dir() and not any(directory.iterdir()):
+        directory.rmdir()
 
 
 def _marker_receipt(home: Path, adapter: HostAdapter) -> Path:
@@ -447,6 +646,7 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False, path_backend: Op
     backups = []
     rollback = []
     inverses = []
+    runtime_snapshot = None
     backend = default_path_backend() if path_backend is None else path_backend
     try:
         if os.name == "nt":
@@ -457,6 +657,13 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False, path_backend: Op
         runtime_was_present = _runtime_receipt(plan.home).exists()
         if not runtime_was_present:
             inverses.append(("runtime", lambda: _remove_runtime(plan.home)))
+        else:
+            runtime_snapshot = _snapshot_runtime(plan.home)
+            if runtime_snapshot is not None:
+                inverses.append((
+                    "runtime upgrade",
+                    lambda snapshot=runtime_snapshot: _restore_runtime_snapshot(plan.home, snapshot),
+                ))
         _install_runtime(plan.home)
         launcher_entry = str(launcher_directory(plan.home))
         # Register the scoped inverse before touching profile/registry state.
@@ -466,15 +673,18 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False, path_backend: Op
         if not has_launcher_path_receipt(plan.home, launcher_entry):
             inverses.append(("launcher PATH", lambda: remove_launcher_path(plan.home, backend=backend)))
         ensure_launcher_path(plan.home, launcher_directory(plan.home), backend=backend)
+        for profile_name in plan.scope:
+            profile = data_root / "agents" / profile_name / "agent.json"
+            profile_receipt = profile.with_name("agent-bridge-profile.json")
+            before = (
+                profile.read_bytes() if profile.is_file() else None,
+                profile_receipt.read_bytes() if profile_receipt.is_file() else None,
+            )
+            inverses.append((
+                profile_name + " profile",
+                lambda p=profile, r=profile_receipt, value=before: _restore_profile_files(p, r, value),
+            ))
         _install_profiles(plan.home, plan.scope)
-        native_helper, native_receipt = _native_paths(plan.home)
-        native_was_present = native_helper.exists() or native_receipt.exists()
-        if not native_was_present:
-            inverses.append(("native", lambda: _remove_windows_native(plan.home)))
-        _install_windows_native(plan.home)
-        mac_app, ignored_mac_executable, mac_receipt = _macos_native_paths(plan.home)
-        if not (mac_app.exists() or mac_receipt.exists()): inverses.append(("macOS native", lambda: _remove_macos_native(plan.home)))
-        _install_macos_native(plan.home)
         for mutation in plan.mutations:
             adapter = next(
                 item for item in plan.adapters if item.config_path == mutation.target
@@ -497,6 +707,17 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False, path_backend: Op
             if not adapter.detect().found:
                 raise RuntimeError("post-install validation failed for host: {0}".format(adapter.name))
             applied.append(adapter)
+        # Native components are last because each install is internally
+        # transactional. A native failure can roll back host/runtime changes,
+        # while a host failure can no longer leave an upgraded helper behind.
+        native_helper, native_receipt = _native_paths(plan.home)
+        native_was_present = native_helper.exists() or native_receipt.exists()
+        if not native_was_present:
+            inverses.append(("native", lambda: _remove_windows_native(plan.home)))
+        _install_windows_native(plan.home)
+        mac_app, ignored_mac_executable, mac_receipt = _macos_native_paths(plan.home)
+        if not (mac_app.exists() or mac_receipt.exists()): inverses.append(("macOS native", lambda: _remove_macos_native(plan.home)))
+        _install_macos_native(plan.home)
     except BaseException as error:
         for name, inverse in reversed(inverses):
             try:
@@ -505,6 +726,8 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False, path_backend: Op
             except BaseException as rollback_error:
                 rollback.append({"host": name, "outcome": "failed: {0}".format(rollback_error)})
         raise RuntimeError("setup failed: {0}; rollback={1}".format(error, rollback)) from error
+    if runtime_snapshot is not None and runtime_snapshot.exists():
+        shutil.rmtree(runtime_snapshot)
     return SetupReport(plan.scope, tuple(item.name for item in applied), backups=tuple(backups))
 
 
@@ -523,10 +746,62 @@ def _notification_status(home: Path) -> Dict[str, object]:
         try:
             owned = json.loads(receipt.read_text(encoding="utf-8"))
             if owned.get("owner") == "agent-bridge.macos-notify" and app.is_dir() and owned.get("app_sha256") == _tree_hash(app):
-                return {"available": True, "helper_path": str(executable), "detail": "owned macOS notification app installed; signing={0}; gatekeeper={1}".format(owned.get("signing_status", "unknown"), owned.get("gatekeeper", "unknown"))}
+                return {
+                    "available": True,
+                    "helper_path": str(executable),
+                    "detail": "owned macOS notification app installed; signing={0}; gatekeeper={1}".format(owned.get("signing_status", "unknown"), owned.get("gatekeeper", "unknown")),
+                    "signing_status": owned.get("signing_status", "unknown"),
+                    "gatekeeper": owned.get("gatekeeper", "unknown"),
+                }
         except (OSError, ValueError): pass
+    if os.name == "nt":
+        helper, receipt = _native_paths(home)
+        if helper.exists() or receipt.exists():
+            try:
+                owned = json.loads(receipt.read_text(encoding="utf-8-sig"))
+                activation = owned.get("activation_argv")
+                if (
+                    owned.get("owner") != "agent-bridge.windows-notify"
+                    or Path(str(owned.get("helper_path", ""))).resolve(strict=False)
+                    != helper.resolve(strict=False)
+                    or not helper.is_file()
+                    or helper.is_symlink()
+                    or owned.get("sha256", "").lower()
+                    != hashlib.sha256(helper.read_bytes()).hexdigest()
+                    or not isinstance(activation, list)
+                    or len(activation) != 6
+                    or not all(isinstance(item, str) and item for item in activation)
+                    or not Path(activation[0]).is_absolute()
+                    or not Path(activation[1]).is_absolute()
+                    or activation[2:5] != ["--as", "notification-action", "--data-root"]
+                    or Path(str(activation[5])).resolve(strict=False)
+                    != _data_root(home).resolve(strict=False)
+                ):
+                    raise ValueError("invalid receipt")
+                capability = windows_notification_capability(helper)
+                return {
+                    "available": capability.available,
+                    "helper_path": capability.helper_path,
+                    "detail": capability.detail,
+                    "signing_status": capability.signing_status,
+                    "gatekeeper": capability.gatekeeper,
+                }
+            except (OSError, ValueError, TypeError):
+                return {
+                    "available": False,
+                    "helper_path": str(helper),
+                    "detail": "owned Windows notification helper receipt is invalid; run bridge setup --repair",
+                    "signing_status": "unknown",
+                    "gatekeeper": "unknown",
+                }
     capability = macos_notification_capability() if sys.platform == "darwin" else windows_notification_capability()
-    return {"available": capability.available, "helper_path": capability.helper_path, "detail": capability.detail}
+    return {
+        "available": capability.available,
+        "helper_path": capability.helper_path,
+        "detail": capability.detail,
+        "signing_status": capability.signing_status,
+        "gatekeeper": capability.gatekeeper,
+    }
 
 
 def status(*, home: Optional[Path] = None, agent: Optional[str] = None, path_backend: Optional[PathBackend] = None) -> Dict[str, object]:
@@ -534,6 +809,13 @@ def status(*, home: Optional[Path] = None, agent: Optional[str] = None, path_bac
     hosts = []
     for adapter in _select_adapters(user_home, agent):
         health = adapter.health_check()
+        profile_path = _data_root(user_home) / "agents" / adapter.name / "agent.json"
+        try:
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            policy = str(profile["execution_policy"])
+            terminal_preference = str(profile["terminal_preference"])
+        except (OSError, ValueError, KeyError, TypeError):
+            policy, terminal_preference = "unconfigured", "fallback"
         hosts.append({
             "host": adapter.name,
             "installed": health.ok,
@@ -546,6 +828,8 @@ def status(*, home: Optional[Path] = None, agent: Optional[str] = None, path_bac
                 "integration_version": health.capabilities.integration_version,
             },
             "degradation": health.warning,
+            "execution_policy": policy,
+            "terminal_preference": terminal_preference,
             "launch_policy": "terminal-fallback" if not health.capabilities.can_open_terminal else "integrated-terminal",
         })
     return {
@@ -560,8 +844,12 @@ def status(*, home: Optional[Path] = None, agent: Optional[str] = None, path_bac
 def uninstall(*, home: Optional[Path] = None, agent: Optional[str] = None, purge_data: bool = False, dry_run: bool = False, path_backend: Optional[PathBackend] = None) -> SetupReport:
     """Remove owned host integration artifacts; data deletion requires opt-in."""
     user_home = _home(home)
+    backend = default_path_backend() if path_backend is None else path_backend
     adapters = _select_adapters(user_home, agent)
     removable = tuple(item for item in adapters if _owns_integration(item))
+    initially_owned = tuple(item for item in _select_adapters(user_home, None) if _owns_integration(item))
+    if purge_data and any(item.name not in {target.name for target in removable} for item in initially_owned):
+        raise ValueError("refusing to purge shared data while host integrations remain")
     if dry_run:
         return SetupReport(tuple(item.name for item in removable), removed_hosts=tuple(item.name for item in removable), dry_run=True)
     removed = []
@@ -570,11 +858,20 @@ def uninstall(*, home: Optional[Path] = None, agent: Optional[str] = None, purge
         item.uninstall()
         _restore_owned_marker(user_home, item)
         item._remove_installation_artifact()
+        _remove_owned_profile(user_home, item.name)
         removed.append(item.name)
-    _remove_windows_native(user_home)
-    _remove_macos_native(user_home)
-    remove_launcher_path(user_home, backend=path_backend)
-    _remove_runtime(user_home)
+    remaining = tuple(
+        item for item in _select_adapters(user_home, None)
+        if item.name not in removed and _owns_integration(item)
+    )
+    # Runtime, PATH, notification registration, and package profiles are
+    # shared by all four host integrations.  A scoped uninstall must leave
+    # them intact until the final owned host is removed.
+    if not remaining:
+        _remove_windows_native(user_home)
+        _remove_macos_native(user_home)
+        remove_launcher_path(user_home, backend=backend)
+        _remove_runtime(user_home)
     purged = None
     if purge_data:
         data_root = _data_root(user_home)

@@ -4,13 +4,17 @@ import json
 import io
 import tempfile
 import unittest
+import sys
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from agent_bridge.cli import build_parser, main
+from agent_bridge.launchers import load_agent_profile
+from agent_bridge.models import ExecutionPolicy
 from agent_bridge.path_ownership import PosixPathBackend
 from agent_bridge.setup import apply_setup_plan, build_setup_plan, repair, status, uninstall
+from agent_bridge.store import Store
 
 
 class SetupLifecycleTests(unittest.TestCase):
@@ -108,6 +112,93 @@ class SetupLifecycleTests(unittest.TestCase):
         self.assertFalse((self.home / ".local" / "bin" / "bridge.cmd").exists())
         self.assertFalse((self.home / ".agent-bridge" / "launcher-path-receipt.json").exists())
         self.assertEqual(b"", (self.home / ".profile").read_bytes())
+
+    def test_scoped_uninstall_keeps_shared_runtime_until_the_last_host(self) -> None:
+        claude = self.home / ".claude" / "settings.json"
+        claude.parent.mkdir(parents=True)
+        claude.write_text("{}", encoding="utf-8")
+        with patch("agent_bridge.setup._install_windows_native"), patch(
+            "agent_bridge.setup._install_macos_native"
+        ), patch("agent_bridge.setup._remove_windows_native") as remove_windows, patch(
+            "agent_bridge.setup._remove_macos_native"
+        ) as remove_macos:
+            apply_setup_plan(
+                build_setup_plan(home=self.home, auto=True),
+                path_backend=self.path_backend,
+            )
+            first = uninstall(
+                home=self.home,
+                agent="codex",
+                path_backend=self.path_backend,
+            )
+            self.assertEqual(("codex",), first.removed_hosts)
+            self.assertTrue(
+                (self.home / ".agent-bridge" / "runtime-receipt.json").is_file()
+            )
+            self.assertTrue(
+                (
+                    self.home
+                    / ".agent-bridge"
+                    / "host-integrations"
+                    / "claude.json"
+                ).is_file()
+            )
+            remove_windows.assert_not_called()
+            remove_macos.assert_not_called()
+
+            final = uninstall(
+                home=self.home,
+                agent="claude",
+                path_backend=self.path_backend,
+            )
+            self.assertEqual(("claude",), final.removed_hosts)
+            self.assertFalse(
+                (self.home / ".agent-bridge" / "runtime-receipt.json").exists()
+            )
+            remove_windows.assert_called_once()
+            remove_macos.assert_called_once()
+
+    def test_repair_preserves_public_per_agent_execution_policy(self) -> None:
+        with patch("agent_bridge.setup._install_windows_native"), patch(
+            "agent_bridge.setup._install_macos_native"
+        ):
+            apply_setup_plan(
+                build_setup_plan(home=self.home, auto=True),
+                path_backend=self.path_backend,
+            )
+            profile_path = (
+                self.home / ".agent-bridge" / "agents" / "codex" / "agent.json"
+            )
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            profile.update(
+                {
+                    "execution_policy": "auto",
+                    "launch_argv": [sys.executable, "-c", "pass"],
+                    "terminal_preference": "integrated",
+                    "max_concurrency": 2,
+                    "cooldown_seconds": 0,
+                    "workspace_allowlist": [str(self.home)],
+                }
+            )
+            profile_path.write_text(
+                json.dumps(profile, sort_keys=True), encoding="utf-8"
+            )
+            repair(
+                home=self.home,
+                agent="codex",
+                path_backend=self.path_backend,
+            )
+
+        store = Store.open(self.home / ".agent-bridge" / "agent-bridge.sqlite3")
+        try:
+            loaded = load_agent_profile(store, "codex")
+        finally:
+            store.close()
+        self.assertEqual(ExecutionPolicy.AUTO, loaded.execution_policy)
+        self.assertEqual((sys.executable, "-c", "pass"), loaded.launch_argv)
+        self.assertEqual("integrated", loaded.terminal_preference)
+        self.assertEqual(2, loaded.max_concurrency)
+        self.assertEqual((str(self.home),), loaded.workspace_allowlist)
 
     def test_setup_plan_records_the_owned_launcher_path_effect(self) -> None:
         plan = build_setup_plan(home=self.home, auto=True)

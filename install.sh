@@ -46,6 +46,45 @@ resolve_python() {
 }
 
 python_path="$(resolve_python)"
+bridge_args=(-m agent_bridge.cli)
+
+# Never bootstrap during removal.  In particular, uninstall must not replace
+# a user package or touch a shared interpreter merely to obtain an entrypoint.
+if [ "$uninstall" -eq 1 ]; then
+  package_importable=0
+  user_owned_package=0
+  if "$python_path" -c 'import agent_bridge.cli' 2>/dev/null; then package_importable=1; fi
+  if "$python_path" -c 'import importlib.metadata as m, pathlib, site; d=m.distribution("agent-bridge"); root=pathlib.Path(d.locate_file("")).resolve(); user=pathlib.Path(site.USER_SITE).resolve(); raise SystemExit(0 if root == user or user in root.parents else 1)' 2>/dev/null; then
+    user_owned_package=1
+  fi
+  if [ "$package_importable" -ne 1 ]; then
+    owned_runtime="$install_root/.agent-bridge/skill/runtime"
+    if [ ! -f "$owned_runtime/agent_bridge/cli.py" ]; then
+      echo "Agent Bridge is not importable and its owned runtime is absent; refusing to install anything during uninstall." >&2
+      exit 1
+    fi
+    runtime_program='import sys; sys.path.insert(0, sys.argv[1]); from agent_bridge.cli import main; raise SystemExit(main(sys.argv[2:]))'
+    bridge_args=(-c "$runtime_program" "$owned_runtime")
+  fi
+  bridge_args+=(uninstall --home "$install_root")
+  if [ -n "$agent" ]; then bridge_args+=(--agent "$agent"); fi
+  if [ "$purge_data" -eq 1 ]; then bridge_args+=(--purge-data); fi
+  "$python_path" "${bridge_args[@]}"
+  # Only --user-installed distributions live below USER_SITE. pip uninstalls
+  # the package's RECORD, so it cannot remove other distributions or a global
+  # / virtualenv installation that this script does not own.
+  shared_runtime="$install_root/.agent-bridge/runtime-receipt.json"
+  if [ ! -f "$shared_runtime" ] && [ "$user_owned_package" -eq 1 ]; then
+    "$python_path" -m pip uninstall --disable-pip-version-check --yes agent-bridge
+  elif [ -f "$shared_runtime" ]; then
+    echo "Retaining the shared Agent Bridge distribution because other host integrations remain." >&2
+  else
+    echo "Retaining Agent Bridge distribution outside this interpreter's user site." >&2
+  fi
+  printf '%s\n' "OK agent-bridge lifecycle completed"
+  exit 0
+fi
+
 bootstrap_wheel="$source_root/bootstrap/agent_bridge-2.0.0-py3-none-any.whl"
 bootstrap_metadata="$source_root/bootstrap/agent_bridge-2.0.0.bootstrap.json"
 install_failed=0
@@ -74,22 +113,15 @@ if [ "$install_failed" -ne 0 ]; then
   export PYTHONPATH="${source_root}/src${PYTHONPATH:+:${PYTHONPATH}}"
 fi
 
-bridge_args=(-m agent_bridge.cli)
 portable_macos_app="$source_root/native/macos-universal2/AgentBridgeNotifier.app"
 if [ -d "$portable_macos_app" ]; then
   export AGENT_BRIDGE_MACOS_NOTIFY_APP="$portable_macos_app"
 elif [ "$(uname -s)" = "Darwin" ]; then
   echo "DEGRADED macOS native notifications: portable AgentBridgeNotifier.app is absent; terminal fallback remains available." >&2
 fi
-if [ "$uninstall" -eq 1 ]; then
-  bridge_args+=(uninstall --home "$install_root")
-  if [ -n "$agent" ]; then bridge_args+=(--agent "$agent"); fi
-  if [ "$purge_data" -eq 1 ]; then bridge_args+=(--purge-data); fi
-else
-  bridge_args+=(setup --home "$install_root")
-  if [ "$auto" -eq 1 ] || [ -z "$agent" ]; then bridge_args+=(--auto); fi
-  if [ -n "$agent" ]; then bridge_args+=(--agent "$agent"); fi
-fi
+bridge_args+=(setup --home "$install_root")
+if [ "$auto" -eq 1 ] || [ -z "$agent" ]; then bridge_args+=(--auto); fi
+if [ -n "$agent" ]; then bridge_args+=(--agent "$agent"); fi
 if [ -n "$identity" ] || [ -n "$wake_cmd" ]; then
   echo "--as and --wake-cmd are legacy options; setup uses local host scope only." >&2
 fi

@@ -49,7 +49,7 @@ class HostMcpConsumerTests(unittest.TestCase):
                 card = json.loads(adapter.task_card_path(task.id).read_text(encoding="utf-8"))
                 env = os.environ.copy()
                 env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
-                command = self._registered_command(adapter)
+                command = self._consumer_command(adapter)
                 self.assertEqual(command[0], sys.executable)
                 process = subprocess.Popen(
                     command,
@@ -62,14 +62,20 @@ class HostMcpConsumerTests(unittest.TestCase):
                         process.stdin.flush()
                         return json.loads(process.stdout.readline())
 
-                    self.assertEqual(call({"jsonrpc": "2.0", "id": 1, "method": "initialize"})["result"]["serverInfo"]["name"], "agent-bridge-host-consumer")
+                    initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+                    self.assertEqual(initialized["result"]["serverInfo"]["name"], "agent-bridge-host-consumer")
+                    self.assertEqual(initialized["result"]["protocolVersion"], "2024-11-05")
                     tools = call({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
-                    self.assertEqual({tool["name"] for tool in tools}, {"list_task_cards", "read_task_card", "acknowledge"})
-                    listed = call({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "list_task_cards", "arguments": {}}})
-                    self.assertEqual(listed["result"]["cards"][0]["task_id"], task.id)
+                    self.assertEqual({tool["name"] for tool in tools}, {
+                        "bridge_inbox", "bridge_show", "bridge_ack", "bridge_claim",
+                        "bridge_question", "bridge_answer", "bridge_review", "bridge_done",
+                    })
+                    self.assertTrue(all("inputSchema" in tool for tool in tools))
+                    listed = call({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "bridge_inbox", "arguments": {}}})
+                    self.assertEqual(listed["result"]["tasks"][0]["id"], task.id)
                     ack_args = {key: card[key] for key in ("task_id", "integration_version", "protocol_version", "delivery_token")}
-                    self.assertTrue(call({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "acknowledge", "arguments": ack_args}})["result"]["acknowledged"])
-                    self.assertIn("error", call({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "acknowledge", "arguments": ack_args}}))
+                    self.assertTrue(call({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "bridge_ack", "arguments": ack_args}})["result"]["acknowledged"])
+                    self.assertIn("error", call({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "bridge_ack", "arguments": ack_args}}))
                 finally:
                     process.terminate()
                     process.communicate(timeout=10)
@@ -83,7 +89,7 @@ class HostMcpConsumerTests(unittest.TestCase):
         adapter = self._adapter(ADAPTER_TYPES[0])
         env = os.environ.copy()
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
-        command = self._registered_command(adapter)
+        command = self._consumer_command(adapter)
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env)
         try:
             assert process.stdin is not None and process.stdout is not None
@@ -101,12 +107,12 @@ class HostMcpConsumerTests(unittest.TestCase):
         adapter = self._adapter(ADAPTER_TYPES[0])
         env = os.environ.copy()
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
-        process = subprocess.Popen(self._registered_command(adapter), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env)
+        process = subprocess.Popen(self._consumer_command(adapter), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env)
         try:
             assert process.stdin is not None and process.stdout is not None
             for request in (
                 {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": []},
-                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "acknowledge", "arguments": []}},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "bridge_ack", "arguments": []}},
                 {"jsonrpc": "1.0", "id": 3, "method": "initialize"},
             ):
                 process.stdin.write(json.dumps(request) + "\n")
@@ -138,19 +144,68 @@ class HostMcpConsumerTests(unittest.TestCase):
             store.close()
         env = os.environ.copy()
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
-        process = subprocess.Popen(self._registered_command(adapter), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env)
+        process = subprocess.Popen(self._consumer_command(adapter), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env)
         try:
             assert process.stdin is not None and process.stdout is not None
-            process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list_task_cards", "arguments": {}}}) + "\n")
+            process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "bridge_inbox", "arguments": {}}}) + "\n")
             process.stdin.flush()
-            self.assertEqual(json.loads(process.stdout.readline())["result"]["cards"], [])
+            self.assertEqual(json.loads(process.stdout.readline())["result"]["tasks"][0]["id"], task.id)
             self.assertFalse(adapter.task_card_path(task.id).exists())
-            process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "acknowledge", "arguments": {"task_id": task.id}}}) + "\n")
+            process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "bridge_ack", "arguments": {"task_id": task.id}}}) + "\n")
             process.stdin.flush()
             self.assertIn("error", json.loads(process.stdout.readline()))
         finally:
             process.terminate()
             process.communicate(timeout=10)
+
+    def test_claude_session_start_hook_consumes_and_acknowledges_queued_cards(self) -> None:
+        adapter = self._adapter(next(item for item in ADAPTER_TYPES if item.name == "claude"))
+        store = Store.open(self.data_root / "agent-bridge.sqlite3")
+        try:
+            service = BridgeService(store)
+            task = service.send_task("sender", "claude", "Hook task", "body")
+            self.assertEqual(
+                adapter.notify_in_app(TaskCard(task.id, task.subject, task.body), service).status.value,
+                "queued",
+            )
+        finally:
+            store.close()
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+
+        result = subprocess.run(
+            self._registered_command(adapter),
+            input=json.dumps({"hook_event_name": "SessionStart"}),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            env=env,
+            timeout=30,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        context = json.loads(result.stdout)
+        self.assertTrue(context["continue"])
+        self.assertIn("Hook task", context["additionalContext"])
+        self.assertFalse(adapter.task_card_path(task.id).exists())
+        verify = Store.open(self.data_root / "agent-bridge.sqlite3")
+        try:
+            self.assertEqual(
+                1,
+                verify.scalar(
+                    "SELECT COUNT(*) FROM delivery_attempts "
+                    "WHERE task_id = ? AND channel = 'host:claude' "
+                    "AND status = 'agent_acknowledged'",
+                    (task.id,),
+                ),
+            )
+        finally:
+            verify.close()
+
+    def _consumer_command(self, adapter):
+        receipt = json.loads(adapter.installation_artifact_path.read_text(encoding="utf-8"))
+        return receipt["entrypoint"]
 
     def _registered_command(self, adapter):
         if adapter.name == "codex":

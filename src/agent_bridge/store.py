@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Generator, Iterable, Optional
 
+from .permissions import secure_directory, secure_file
+
 
 @dataclass(frozen=True)
 class IntegrityReport:
@@ -38,8 +40,17 @@ class Store:
     def open(
         cls, path: Path, *, fault_hook: Optional[Callable[[str], None]] = None,
     ) -> "Store":
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        requested_path = Path(path)
+        if requested_path.is_symlink():
+            raise ValueError("refusing a symlinked Agent Bridge database")
+        # Canonicalize once so Windows long/8.3 spellings address the same
+        # database and profile receipts.  Setup already persists canonical
+        # paths; retaining an alternate spelling here made legitimate public
+        # agent profiles appear unowned to production delivery.
+        path = requested_path.resolve(strict=False)
+        secure_directory(path.parent)
+        if path.is_file():
+            secure_file(path)
         deadline = time.monotonic() + 5.0
         while True:
             connection = sqlite3.connect(str(path), timeout=5.0, isolation_level=None)
@@ -50,6 +61,7 @@ class Store:
                 connection.execute("PRAGMA journal_mode=WAL")
                 store = cls(path, connection, fault_hook)
                 store.apply_migrations()
+                secure_file(path)
                 return store
             except sqlite3.OperationalError as error:
                 connection.close()

@@ -673,16 +673,29 @@ def _atomic_write(path: Path, text: str, expected_source: Optional[str] = None) 
                 return _AtomicWriteResult(False, displaced)
             fsync_parent(path)
             return _AtomicWriteResult(True, displaced)
-        backup = Path(tempfile.mktemp(prefix=path.name + ".", suffix=".bak", dir=str(path.parent)))
+        backup = path.with_name(
+            path.name + "." + secrets.token_hex(12) + ".bak"
+        )
         replaced = ctypes.windll.kernel32.ReplaceFileW(str(path), str(temporary), str(backup), 0, None, None)
         if not replaced:
             raise OSError(ctypes.get_last_error(), "ReplaceFileW failed")
         displaced = backup.read_text(encoding="utf-8") if backup.exists() else ""
+        if displaced != expected_source:
+            # ReplaceFileW has already installed our candidate.  Restore the
+            # exact concurrently-written file before asking the caller to
+            # transform it again; otherwise a failing next transform would
+            # permanently discard the user's edit.
+            try:
+                os.replace(str(backup), str(path))
+            except OSError as error:
+                raise RuntimeError(
+                    "failed to restore concurrently edited Windows host config"
+                ) from error
+            return _AtomicWriteResult(False, displaced)
         try:
             backup.unlink()
         except OSError:
             pass
-        return _AtomicWriteResult(displaced == expected_source, displaced)
         try:
             parent_descriptor = os.open(str(path.parent), os.O_RDONLY)
             try:
@@ -691,6 +704,7 @@ def _atomic_write(path: Path, text: str, expected_source: Optional[str] = None) 
                 os.close(parent_descriptor)
         except OSError:
             pass
+        return _AtomicWriteResult(True, displaced)
     finally:
         if temporary.exists():
             temporary.unlink()

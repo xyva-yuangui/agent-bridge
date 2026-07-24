@@ -64,6 +64,42 @@ class MacOSSigningAssessment:
     gatekeeper: str
 
 
+def windows_signing_assessment(helper_path: Path | str) -> str:
+    """Return Authenticode status using a fixed PowerShell command."""
+    if os.name != "nt":
+        return "unknown"
+    environment = os.environ.copy()
+    environment["AGENT_BRIDGE_SIGNATURE_TARGET"] = str(Path(helper_path).resolve())
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+                "-Command",
+                "(Get-AuthenticodeSignature -LiteralPath $env:AGENT_BRIDGE_SIGNATURE_TARGET).Status.ToString()",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+            timeout=5.0,
+            check=False,
+            shell=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    value = result.stdout.strip().lower()
+    return {
+        "valid": "valid",
+        "notsigned": "unsigned",
+        "hashmismatch": "invalid",
+        "nottrusted": "untrusted",
+        "unknownerror": "unknown",
+    }.get(value, "unknown")
+
+
 class WindowsNotifier:
     """Invoke the installed Windows toast helper with one bounded JSON message."""
 
@@ -156,9 +192,15 @@ class MacOSNotifier(WindowsNotifier):
         return result
 
 
-def macos_notification_capability() -> NotificationCapability:
+def macos_notification_capability(
+    helper_path: Path | str | None = None,
+) -> NotificationCapability:
     """Report the optional signed macOS helper honestly without claiming a post."""
-    configured = os.environ.get("AGENT_BRIDGE_MACOS_NOTIFY_HELPER", "").strip()
+    configured = (
+        str(helper_path)
+        if helper_path is not None
+        else os.environ.get("AGENT_BRIDGE_MACOS_NOTIFY_HELPER", "").strip()
+    )
     if not configured:
         return NotificationCapability(False, "", "native macOS notification helper is not installed", _macos_expiry_detail())
     helper = Path(configured)
@@ -374,9 +416,15 @@ def _failure(detail: str) -> NotificationResult:
     return NotificationResult(False, DeliveryStatus.FAILED, detail)
 
 
-def windows_notification_capability() -> NotificationCapability:
+def windows_notification_capability(
+    helper_path: Path | str | None = None,
+) -> NotificationCapability:
     """Report the optional packaged helper honestly without probing or registering it."""
-    configured = os.environ.get("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", "").strip()
+    configured = (
+        str(helper_path)
+        if helper_path is not None
+        else os.environ.get("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", "").strip()
+    )
     if not configured:
         return NotificationCapability(False, "", "native Windows toast helper is not installed")
     helper = Path(configured)
@@ -385,7 +433,13 @@ def windows_notification_capability() -> NotificationCapability:
     if os.name != "nt":
         return NotificationCapability(False, str(helper), "native Windows toast helper is unavailable on this platform")
     result = WindowsNotifier(helper, timeout_seconds=1.0).status()
-    return NotificationCapability(result.ok, str(helper), result.detail)
+    signing = windows_signing_assessment(helper)
+    return NotificationCapability(
+        result.ok,
+        str(helper),
+        "{0}; signing={1}".format(result.detail, signing),
+        signing_status=signing,
+    )
 
 
 class WindowsNotificationChannel:

@@ -7,6 +7,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
@@ -358,6 +359,26 @@ class BridgeService:
             )
         return DeliveryEvidence(DeliveryStatus.QUEUED.value)
 
+    def snooze_delivery(self, task_id: str, seconds: int = 300) -> DeliveryEvidence:
+        """Durably delay a fresh recipient delivery after a native snooze action."""
+        if type(seconds) is not int or not 1 <= seconds <= 86_400:
+            raise ValueError("snooze duration must be between 1 and 86400 seconds")
+        with self.store.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT sender, assignee, revision FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError("unknown task: {0}".format(task_id))
+            due_at = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            enqueue(
+                connection,
+                "{0}:{1}:task.snooze:{2}".format(task_id, row["revision"], uuid.uuid4().hex),
+                "task.snooze",
+                {"actor": str(row["sender"]), "delivery_status": DeliveryStatus.QUEUED.value,
+                 "recipient": str(row["assignee"]), "task_id": task_id}, due_at,
+            )
+        return DeliveryEvidence(DeliveryStatus.RETRY_WAIT.value, detail="snoozed for {0} seconds".format(seconds))
+
     def open_terminal(self, task_id: str, adapter: object = None) -> OpenResult:
         """Open the selected task through the safe terminal-opening service boundary."""
         task = self.show(task_id)
@@ -367,7 +388,23 @@ class BridgeService:
         workspace = Path(str(row["path"])) if row is not None else Path()
         if not workspace.is_dir():
             return OpenResult(False, "instructions", instructions="workspace is unavailable for task " + task.id)
-        return open_task_terminal(adapter, task.id, workspace)
+        if adapter is None:
+            try:
+                from .adapters import adapter_for
+                profile = json.loads(
+                    (self.store.path.parent / "agents" / task.assignee / "agent.json").read_text(encoding="utf-8")
+                )
+                home = Path(str(profile["home"])).expanduser().resolve()
+                adapter = adapter_for(task.assignee, home)
+            except (OSError, ValueError, KeyError, TypeError):
+                adapter = None
+        return open_task_terminal(
+            adapter,
+            task.id,
+            workspace,
+            data_root=self.store.path.parent,
+            actor=task.assignee,
+        )
 
     def _artifact_paths(self, task_id: str) -> Tuple[str, ...]:
         rows = self.store.connection.execute(

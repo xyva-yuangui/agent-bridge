@@ -95,13 +95,14 @@ class CliV2Tests(unittest.TestCase):
             home = Path(directory)
             sent = run_module(
                 "agent_bridge.cli", "--as", "codex", "--json", "send", "--to", "zcode",
-                "--subject", "Review", "--body", "Please review", home=home,
+                "--subject", "Review", "--body", "Please review", "--no-wake", home=home,
             )
             self.assertEqual(sent.returncode, 0, sent.stderr)
             task = json.loads(sent.stdout)["task"]
 
             claimed = run_module(
-                "agent_bridge.cli", "--as", "zcode", "--json", "claim", task["id"], home=home,
+                "agent_bridge.cli", "--as", "zcode", "--json", "claim", task["id"], "--no-wake",
+                home=home,
             )
             self.assertEqual(claimed.returncode, 0, claimed.stderr)
             self.assertEqual(json.loads(claimed.stdout)["task"]["state"], "working")

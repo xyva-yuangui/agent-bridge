@@ -20,16 +20,16 @@ class EndToEndWorkflowTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 return json.loads(result.stdout)
 
-            task = invoke("alice", "send", "--to", "bob", "--subject", "end-to-end")["task"]
-            invoke("bob", "claim", task["id"])
-            invoke("bob", "question", task["id"], "--body", "Need a decision")
-            invoke("alice", "answer", task["id"], "--body", "Use option A")
-            invoke("bob", "claim", task["id"])
-            invoke("bob", "review", task["id"])
-            changed = invoke("alice", "review", task["id"], "--verdict", "changes", "--body", "Revise")
+            task = invoke("alice", "send", "--to", "bob", "--subject", "end-to-end", "--no-wake")["task"]
+            invoke("bob", "claim", task["id"], "--no-wake")
+            invoke("bob", "question", task["id"], "--body", "Need a decision", "--no-wake")
+            invoke("alice", "answer", task["id"], "--body", "Use option A", "--no-wake")
+            invoke("bob", "claim", task["id"], "--no-wake")
+            invoke("bob", "review", task["id"], "--no-wake")
+            changed = invoke("alice", "review", task["id"], "--verdict", "changes", "--body", "Revise", "--no-wake")
             self.assertEqual(changed["task"]["state"], "changes_requested")
-            invoke("bob", "claim", task["id"])
-            complete = invoke("bob", "done", task["id"], "--result", "Done", "--files", "src/a.py,src/a.py")
+            invoke("bob", "claim", task["id"], "--no-wake")
+            complete = invoke("bob", "done", task["id"], "--result", "Done", "--files", "src/a.py,src/a.py", "--no-wake")
             self.assertEqual(complete["task"]["state"], "completed")
             self.assertEqual(complete["task"]["artifacts"], ["src/a.py"])
 

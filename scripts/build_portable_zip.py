@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 from pathlib import Path
 import shutil
@@ -41,14 +42,21 @@ def _add_tree(payload: dict[str, bytes], target_prefix: str, source: Path, suffi
         _add_file(payload, target_prefix + child.relative_to(source).as_posix(), child)
 
 
-def payload_for(source_root: Path, version: str, windows_helper: Path, macos_app: Path) -> dict[str, bytes]:
+def payload_for(
+    source_root: Path, version: str, windows_helper: Path, macos_app: Path,
+    bootstrap_root: Optional[Path] = None,
+) -> dict[str, bytes]:
     prefix = "agent-bridge-{}/".format(version)
     payload: dict[str, bytes] = {}
     for name in ("install.ps1", "install.sh", "LICENSE", "README.md", "README.zh-CN.md"):
         _add_file(payload, prefix + name, source_root / name)
     for name in ("windows.md", "macos.md", "migration-v1.md"):
         _add_file(payload, prefix + "docs/installation/" + name, source_root / "docs" / "installation" / name)
-    _add_tree(payload, prefix + "bootstrap/", source_root / "bootstrap", {".whl", ".json"})
+    # The release pipeline rebuilds this wheel after the Windows helper has
+    # been Authenticode-signed.  Do not silently substitute the checkout's
+    # bootstrap wheel, or the installed helper could differ from the signed
+    # helper visible at the top level of the portable ZIP.
+    _add_tree(payload, prefix + "bootstrap/", bootstrap_root or source_root / "bootstrap", {".whl", ".json"})
     _add_tree(payload, prefix + "integrations/", source_root / "src" / "agent_bridge" / "integrations", {".json", ".py"})
     _add_file(payload, prefix + "native/windows-x86_64/agent-bridge-windows-notify.exe", windows_helper)
     _add_tree(payload, prefix + "native/macos-universal2/AgentBridgeNotifier.app/", macos_app)
@@ -62,8 +70,11 @@ def _inventory(payload: dict[str, bytes]) -> tuple[bytes, bytes]:
     return inventory, checksums
 
 
-def build(output: Path, source_root: Path, version: str, windows_helper: Path, macos_app: Path) -> None:
-    payload = payload_for(source_root, version, windows_helper, macos_app)
+def build(
+    output: Path, source_root: Path, version: str, windows_helper: Path, macos_app: Path,
+    bootstrap_root: Optional[Path] = None,
+) -> None:
+    payload = payload_for(source_root, version, windows_helper, macos_app, bootstrap_root)
     prefix = "agent-bridge-{}/".format(version)
     inventory, checksums = _inventory(payload)
     payload[prefix + "inventory.json"] = inventory
@@ -99,6 +110,19 @@ def check(archive_path: Path, version: str) -> None:
             expected.append("{}  {}".format(item["sha256"], item["path"]))
         if checksums != expected:
             raise ValueError("portable ZIP checksums do not match inventory")
+        wheels = [
+            name for name in names
+            if name.startswith(prefix + "bootstrap/") and name.endswith(".whl")
+        ]
+        if len(wheels) != 1:
+            raise ValueError("portable ZIP must contain exactly one offline bootstrap wheel")
+        helper_name = prefix + "native/windows-x86_64/agent-bridge-windows-notify.exe"
+        with zipfile.ZipFile(io.BytesIO(archive.read(wheels[0]))) as wheel:
+            packaged_helper = "agent_bridge/native/windows-x86_64/agent-bridge-windows-notify.exe"
+            if packaged_helper not in wheel.namelist():
+                raise ValueError("bootstrap wheel is missing the Windows helper")
+            if wheel.read(packaged_helper) != archive.read(helper_name):
+                raise ValueError("bootstrap wheel Windows helper differs from the signed ZIP helper")
 
 
 def main() -> int:
@@ -108,6 +132,7 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--windows-helper", type=Path)
     parser.add_argument("--macos-app", type=Path)
+    parser.add_argument("--bootstrap-root", type=Path, help="signed bootstrap wheel directory from the Windows release job")
     parser.add_argument("--check", type=Path)
     arguments = parser.parse_args()
     if arguments.check:
@@ -115,7 +140,7 @@ def main() -> int:
     else:
         if not (arguments.output and arguments.windows_helper and arguments.macos_app):
             parser.error("--output, --windows-helper, and --macos-app are required when building")
-        build(arguments.output, arguments.source_root, arguments.version, arguments.windows_helper, arguments.macos_app)
+        build(arguments.output, arguments.source_root, arguments.version, arguments.windows_helper, arguments.macos_app, arguments.bootstrap_root)
     return 0
 
 

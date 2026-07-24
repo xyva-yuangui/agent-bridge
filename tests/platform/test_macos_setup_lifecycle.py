@@ -9,7 +9,15 @@ import unittest
 from unittest.mock import patch
 
 from agent_bridge.path_ownership import PosixPathBackend
-from agent_bridge.setup import apply_setup_plan, build_setup_plan, repair, status, uninstall
+from agent_bridge.setup import (
+    _install_macos_native,
+    _tree_hash,
+    apply_setup_plan,
+    build_setup_plan,
+    repair,
+    status,
+    uninstall,
+)
 
 
 class _Notifier:
@@ -41,9 +49,9 @@ class MacOSSetupLifecycleTests(unittest.TestCase):
         owned = json.loads(receipt.read_text(encoding="utf-8"))
         self.assertEqual("agent-bridge.macos-notify", owned["owner"])
         self.assertEqual(os.sys.executable, owned["activation_argv"][0])
-        self.assertEqual("--data-root", owned["activation_argv"][2])
+        self.assertEqual(["--as", "notification-action", "--data-root"], owned["activation_argv"][2:5])
         self.assertTrue(Path(owned["activation_argv"][1]).is_absolute())
-        self.assertTrue(Path(owned["activation_argv"][3]).is_absolute())
+        self.assertTrue(Path(owned["activation_argv"][5]).is_absolute())
         with patch("agent_bridge.setup.sys.platform", "darwin"):
             self.assertTrue(status(home=self.home, path_backend=self.backend)["notifications"]["available"])
         with patch("agent_bridge.setup.sys.platform", "darwin"), patch("agent_bridge.setup.MacOSNotifier", _Notifier), patch.dict(os.environ, {"AGENT_BRIDGE_MACOS_NOTIFY_APP": str(self.app)}, clear=False):
@@ -66,3 +74,49 @@ class MacOSSetupLifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "unowned macOS"):
                 uninstall(home=self.home, agent="codex", path_backend=self.backend)
         self.assertTrue(executable.exists())
+
+    def test_failed_native_upgrade_restores_the_previous_app_and_registration(self) -> None:
+        self._apply()
+        installed = self.home / ".agent-bridge" / "native" / "macos-universal2" / "AgentBridgeNotifier.app"
+        executable = installed / "Contents" / "MacOS" / "AgentBridgeNotifier"
+        receipt = installed.parent / "receipt.json"
+        before_executable = executable.read_bytes()
+        before_receipt = receipt.read_bytes()
+        self.assertEqual(
+            json.loads(before_receipt.decode("utf-8"))["app_sha256"],
+            _tree_hash(installed),
+        )
+        (self.app / "Contents" / "MacOS" / "AgentBridgeNotifier").write_bytes(
+            b"replacement-that-must-roll-back"
+        )
+        self.assertEqual(before_executable, executable.read_bytes())
+        self.assertEqual(
+            json.loads(before_receipt.decode("utf-8"))["app_sha256"],
+            _tree_hash(installed),
+        )
+
+        class FailUpgradeOnly(_Notifier):
+            attempts = 0
+
+            def register(self, argv):
+                type(self).attempts += 1
+                ok = type(self).attempts > 1
+                return type(
+                    "Result",
+                    (),
+                    {"ok": ok, "detail": "ready" if ok else "upgrade rejected"},
+                )()
+
+        with patch("agent_bridge.setup.sys.platform", "darwin"), patch(
+            "agent_bridge.setup.MacOSNotifier", FailUpgradeOnly
+        ), patch.dict(
+            os.environ,
+            {"AGENT_BRIDGE_MACOS_NOTIFY_APP": str(self.app)},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "upgrade rejected"):
+                _install_macos_native(self.home.resolve(strict=False))
+
+        self.assertEqual(before_executable, executable.read_bytes())
+        self.assertEqual(before_receipt, receipt.read_bytes())
+        self.assertEqual(2, FailUpgradeOnly.attempts)

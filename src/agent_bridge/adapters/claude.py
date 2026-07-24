@@ -41,7 +41,19 @@ class ClaudeAdapter(ManagedJsonAdapter):
         historical = dict(self._managed_metadata())
         historical["command"] = entrypoint[0]
         historical["args"] = entrypoint[1:]
-        hook = {"matcher": "", "hooks": [{"type": "command", "command": entrypoint[0], "args": entrypoint[1:]}]}
+        hook_entrypoint = list(entrypoint)
+        try:
+            hook_entrypoint[hook_entrypoint.index("serve")] = "hook"
+        except ValueError as error:
+            raise ValueError("owned Claude entrypoint is incompatible") from error
+        hook = {
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": hook_entrypoint[0],
+                "args": hook_entrypoint[1:],
+            }],
+        }
         def update(root: dict) -> None:
             hooks = root.get("hooks")
             if isinstance(hooks, dict) and isinstance(hooks.get("SessionStart"), list):
@@ -65,4 +77,6 @@ class ClaudeAdapter(ManagedJsonAdapter):
         return root.get("agent_bridge") == self._managed_metadata() and self._managed_hook() in hooks
 
     def _managed_hook(self) -> dict:
-        return {"matcher": "", "hooks": [{"type": "command", "command": sys.executable, "args": self._entrypoint()[1:]}]}
+        entrypoint = self._entrypoint()
+        entrypoint[entrypoint.index("serve")] = "hook"
+        return {"matcher": "", "hooks": [{"type": "command", "command": sys.executable, "args": entrypoint[1:]}]}

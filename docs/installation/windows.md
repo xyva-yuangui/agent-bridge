@@ -1,6 +1,9 @@
 # Windows installation
 
 Requirements: Windows 10/11, PowerShell 5.1 or later, and Python 3.9–3.13.
+The native notification helper is currently released for Windows x86-64.
+Windows on ARM is not a native release target and must be treated as degraded
+unless x86-64 emulation is independently verified.
 From a source checkout, run:
 
 ```powershell

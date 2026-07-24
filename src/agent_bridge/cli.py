@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import json
 import os
 import sys
@@ -15,9 +16,11 @@ from typing import Any, Dict, Optional, Sequence
 
 from . import dispatcher
 from .launchers import LaunchDeliveryChannel, launch_stored_agent
+from .host_delivery import HostDeliveryChannel
 from .migrate_v1 import export_json, import_v1
 from .notifications import (
     MacOSNotificationChannel,
+    NotificationCapability,
     WindowsNotificationChannel,
     macos_activation_argv,
     macos_notification_capability,
@@ -75,9 +78,10 @@ def _put_metadata(service: BridgeService, key: str, value: str) -> None:
         )
 
 
-def _delivery_result(task: Any) -> Dict[str, Any]:
+def _delivery_result(service: BridgeService, task: Any, *, dispatch_now: bool = True) -> Dict[str, Any]:
     """Render a committed task mutation, then request a detached delivery burst."""
-    dispatcher.request_dispatch()
+    if dispatch_now:
+        dispatcher.request_dispatch(service.store.path.parent)
     return {"task": task_view(task)}
 
 
@@ -87,17 +91,18 @@ def execute_command(
     """Execute one public command directly against the v2 service and store."""
     arguments = dict(arguments or {})
     project_id = _project(arguments)
-    if command != "dispatch":
+    if command not in ("dispatch", "open-action") and not bool(_argument(arguments, "no_wake", False)):
         # This is deliberately one indexed probe: a dispatcher never launches
         # another dispatcher while it is draining the outbox.
         dispatcher.tick(service.store)
     if command in UNAVAILABLE_COMMANDS:
         raise CommandUnavailable("{0} is unavailable in the v2 service layer".format(command))
     if command == "dispatch":
-        configured = service.store.scalar(
-            "SELECT 1 FROM agents WHERE execution_policy = 'auto' AND launch_argv_json <> '[]' LIMIT 1"
-        )
-        channels = {"launcher": LaunchDeliveryChannel(str(service.store.path))} if configured else {}
+        # Always configure recipient-specific host delivery.  Its applicability
+        # is determined by the target's owned receipt, not a global sender
+        # profile.  Launcher remains separately scoped by each target policy.
+        channels = {"host": HostDeliveryChannel(str(service.store.path))}
+        channels["launcher"] = LaunchDeliveryChannel(str(service.store.path))
         notification_capability, notification_channel = _native_notification_channel(service.store.path)
         if notification_capability.available:
             channels["notification"] = notification_channel
@@ -131,11 +136,20 @@ def execute_command(
         if row is None:
             raise KeyError("unknown native notification")
         task_id = str(row["task_id"])
+        task = service.show(task_id)
+        # Notification registration is process-wide, so its static argv cannot
+        # safely name a recipient.  The opaque mapping is the authority: bind
+        # the activation to the stored assignee, never a URI or tool argument.
+        action_identity = task.assignee
         if action == "claim":
-            task = service.claim(task_id, identity)
-        else:
-            task = service.show(task_id)
-        return {"open_action": {"action": action, "task": task_view(task)}}
+            task = service.claim(task_id, action_identity)
+            dispatcher.request_dispatch(service.store.path.parent)
+            return {"open_action": {"action": action, "task": task_view(task), "actor": action_identity}}
+        if action == "snooze":
+            evidence = service.snooze_delivery(task_id)
+            return {"open_action": {"action": action, "task": task_view(task), "actor": action_identity, "delivery": dataclasses.asdict(evidence)}}
+        opened = service.open_terminal(task_id)
+        return {"open_action": {"action": action, "task": task_view(task), "actor": action_identity, "open": dataclasses.asdict(opened)}}
     if command == "whoami":
         return {"identity": identity}
     if command == "send":
@@ -145,34 +159,46 @@ def execute_command(
         task = service.send_task(identity, str(assignee), str(_argument(arguments, "subject")), str(_argument(arguments, "body", "")), project_id)
         if _metadata(service, "coordinator:" + project_id) is None:
             _put_metadata(service, "coordinator:" + project_id, identity)
-        return _delivery_result(task)
+        return _delivery_result(service, task, dispatch_now=not bool(_argument(arguments, "no_wake", False)))
     if command == "claim":
-        return _delivery_result(service.claim(str(_argument(arguments, "task_id")), str(_argument(arguments, "actor", identity)), str(_argument(arguments, "body", ""))))
+        return _delivery_result(
+            service,
+            service.claim(str(_argument(arguments, "task_id")), identity, str(_argument(arguments, "body", ""))),
+            dispatch_now=not bool(_argument(arguments, "no_wake", False)),
+        )
     if command == "done":
         files = _argument(arguments, "files") or ""
         task = service.done(
-            str(_argument(arguments, "task_id")), str(_argument(arguments, "actor", identity)),
+            str(_argument(arguments, "task_id")), identity,
             str(_argument(arguments, "result", _argument(arguments, "body", ""))),
             artifacts=tuple(str(files).split(",")),
         )
-        return _delivery_result(task)
+        return _delivery_result(service, task, dispatch_now=not bool(_argument(arguments, "no_wake", False)))
     if command == "question":
-        return _delivery_result(service.question(str(_argument(arguments, "task_id")), str(_argument(arguments, "actor", identity)), str(_argument(arguments, "body", ""))))
+        return _delivery_result(
+            service,
+            service.question(str(_argument(arguments, "task_id")), identity, str(_argument(arguments, "body", ""))),
+            dispatch_now=not bool(_argument(arguments, "no_wake", False)),
+        )
     if command == "answer":
-        return _delivery_result(service.answer(str(_argument(arguments, "task_id")), str(_argument(arguments, "actor", identity)), str(_argument(arguments, "body", ""))))
+        return _delivery_result(
+            service,
+            service.answer(str(_argument(arguments, "task_id")), identity, str(_argument(arguments, "body", ""))),
+            dispatch_now=not bool(_argument(arguments, "no_wake", False)),
+        )
     if command == "review":
         task_id = str(_argument(arguments, "task_id"))
-        actor = str(_argument(arguments, "actor", identity))
+        actor = identity
         body = str(_argument(arguments, "body", ""))
         verdict = _argument(arguments, "verdict")
         task = service.request_review(task_id, actor, body) if verdict is None else service.review(task_id, actor, str(verdict), body)
-        return _delivery_result(task)
+        return _delivery_result(service, task, dispatch_now=not bool(_argument(arguments, "no_wake", False)))
     if command == "show":
         return {"task": task_view(service.show(str(_argument(arguments, "task_id"))))}
     if command == "status":
-        return tasks_view(service.status(str(_argument(arguments, "actor", identity))))
+        return tasks_view(service.status(identity))
     if command == "inbox":
-        page = service.inbox(str(_argument(arguments, "actor", identity)), int(_argument(arguments, "limit", 100)), _argument(arguments, "cursor"))
+        page = service.inbox(identity, int(_argument(arguments, "limit", 100)), _argument(arguments, "cursor"))
         return task_page(page)
     if command == "board":
         return tasks_view(service.board(project_id))
@@ -310,12 +336,96 @@ def execute_command(
 
 
 def _native_notification_channel(database_path: Path) -> tuple[Any, Any]:
-    """Select only the platform's helper; a configured foreign helper is degraded."""
+    """Select the data root's owned helper without relying on shell refresh."""
+    data_root = Path(database_path).resolve(strict=False).parent
     if sys.platform == "darwin":
-        capability = macos_notification_capability()
-        return capability, MacOSNotificationChannel(database_path, capability.helper_path, macos_activation_argv())
-    capability = windows_notification_capability()
+        helper, activation, issue = _owned_macos_notification_configuration(data_root)
+        if issue:
+            capability = NotificationCapability(
+                False, str(helper or ""), issue, signing_status="unknown", gatekeeper="unknown"
+            )
+        else:
+            capability = macos_notification_capability(helper) if helper is not None else macos_notification_capability()
+        return capability, MacOSNotificationChannel(
+            database_path,
+            capability.helper_path,
+            activation if helper is not None else macos_activation_argv(),
+        )
+    helper, issue = _owned_windows_notification_configuration(data_root)
+    if issue:
+        capability = NotificationCapability(False, str(helper or ""), issue)
+    else:
+        capability = windows_notification_capability(helper) if helper is not None else windows_notification_capability()
     return capability, WindowsNotificationChannel(database_path, capability.helper_path)
+
+
+def _owned_windows_notification_configuration(
+    data_root: Path,
+) -> tuple[Optional[Path], str]:
+    data_root = Path(data_root).resolve(strict=False)
+    helper = data_root / "native" / "agent-bridge-windows-notify.exe"
+    receipt = helper.parent / "receipt.json"
+    if not helper.exists() and not receipt.exists():
+        return None, ""
+    try:
+        owned = json.loads(receipt.read_text(encoding="utf-8-sig"))
+        activation = owned["activation_argv"]
+        if (
+            owned.get("owner") != "agent-bridge.windows-notify"
+            or Path(str(owned.get("helper_path", ""))).resolve(strict=False)
+            != helper.resolve(strict=False)
+            or not helper.is_file()
+            or helper.is_symlink()
+            or owned.get("sha256", "").lower()
+            != hashlib.sha256(helper.read_bytes()).hexdigest()
+            or not _fixed_activation_argv(activation, data_root)
+        ):
+            raise ValueError("invalid receipt")
+    except (OSError, ValueError, KeyError, TypeError):
+        return helper, "owned Windows notification helper receipt is invalid; run bridge setup --repair"
+    return helper, ""
+
+
+def _owned_macos_notification_configuration(
+    data_root: Path,
+) -> tuple[Optional[Path], tuple[str, ...], str]:
+    data_root = Path(data_root).resolve(strict=False)
+    app = data_root / "native" / "macos-universal2" / "AgentBridgeNotifier.app"
+    helper = app / "Contents" / "MacOS" / "AgentBridgeNotifier"
+    receipt = app.parent / "receipt.json"
+    if not app.exists() and not receipt.exists():
+        return None, (), ""
+    try:
+        owned = json.loads(receipt.read_text(encoding="utf-8"))
+        activation = owned["activation_argv"]
+        if (
+            owned.get("owner") != "agent-bridge.macos-notify"
+            or Path(str(owned.get("app_path", ""))).resolve(strict=False)
+            != app.resolve(strict=False)
+            or Path(str(owned.get("executable_path", ""))).resolve(strict=False)
+            != helper.resolve(strict=False)
+            or not helper.is_file()
+            or helper.is_symlink()
+            or owned.get("executable_sha256", "").lower()
+            != hashlib.sha256(helper.read_bytes()).hexdigest()
+            or not _fixed_activation_argv(activation, data_root)
+        ):
+            raise ValueError("invalid receipt")
+    except (OSError, ValueError, KeyError, TypeError):
+        return helper, (), "owned macOS notification helper receipt is invalid; run bridge setup --repair"
+    return helper, tuple(activation), ""
+
+
+def _fixed_activation_argv(value: object, data_root: Path) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 6
+        and all(isinstance(item, str) and item for item in value)
+        and Path(value[0]).is_absolute()
+        and Path(value[1]).is_absolute()
+        and value[2:5] == ["--as", "notification-action", "--data-root"]
+        and Path(value[5]).resolve(strict=False) == data_root.resolve(strict=False)
+    )
 
 
 def _activity_since(value: Any) -> Optional[str]:
@@ -366,13 +476,13 @@ def build_parser() -> argparse.ArgumentParser:
     command("status").add_argument("--oneliner", action="store_true")
     inbox = command("inbox"); inbox.add_argument("--limit", type=int, default=100); inbox.add_argument("--cursor")
     send = command("send"); send.add_argument("--to"); send.add_argument("--subject", required=True); send.add_argument("--body", default=""); send.add_argument("--project", default="default"); send.add_argument("--no-wake", action="store_true")
-    for name in ("claim", "show"):
-        item = command(name); item.add_argument("task_id")
-    done = command("done"); done.add_argument("task_id"); done.add_argument("--result", default=""); done.add_argument("--files")
+    claim = command("claim"); claim.add_argument("task_id"); claim.add_argument("--body", default=""); claim.add_argument("--no-wake", action="store_true")
+    show = command("show"); show.add_argument("task_id")
+    done = command("done"); done.add_argument("task_id"); done.add_argument("--result", default=""); done.add_argument("--files"); done.add_argument("--no-wake", action="store_true")
     board = command("board"); board.add_argument("--project", default="default")
     for name in ("question", "answer"):
-        item = command(name); item.add_argument("task_id"); item.add_argument("--body", required=True)
-    review = command("review"); review.add_argument("task_id"); review.add_argument("--verdict", choices=("approve", "changes")); review.add_argument("--body", default="")
+        item = command(name); item.add_argument("task_id"); item.add_argument("--body", required=True); item.add_argument("--no-wake", action="store_true")
+    review = command("review"); review.add_argument("task_id"); review.add_argument("--verdict", choices=("approve", "changes")); review.add_argument("--body", default=""); review.add_argument("--no-wake", action="store_true")
     wake = command("wake"); wake.add_argument("agent"); wake.add_argument("--project", default="default")
     command("agents")
     activity = command("activity"); activity.add_argument("--project", default="default"); activity.add_argument("--since")

@@ -17,12 +17,13 @@ EXCLUDED_MCP_COMMANDS = {"dispatch", "tui", "setup", "uninstall", "open-action"}
 
 
 class McpV2Tests(unittest.TestCase):
-    def exchange(self, home: Path, requests: List[Dict]) -> List[Dict]:
+    def exchange(self, home: Path, requests: List[Dict], identity: str = "codex") -> List[Dict]:
         environment = os.environ.copy()
         environment["AGENT_BRIDGE_HOME"] = str(home)
+        environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
         payload = "".join(json.dumps(request) + "\n" for request in requests)
         result = subprocess.run(
-            [sys.executable, str(MCP_PATH), "--as", "codex"], input=payload,
+            [sys.executable, str(MCP_PATH), "--as", identity], input=payload,
             capture_output=True, text=True, encoding="utf-8", errors="strict",
             env=environment, timeout=30,
         )
@@ -45,8 +46,8 @@ class McpV2Tests(unittest.TestCase):
 
             workflow = self.exchange(home, [
                 {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "bridge_show", "arguments": {"task_id": task["id"]}}},
-                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "bridge_claim", "arguments": {"task_id": task["id"], "actor": "zcode"}}},
-            ])
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "bridge_claim", "arguments": {"task_id": task["id"]}}},
+            ], identity="zcode")
             self.assertEqual(json.loads(workflow[0]["result"]["content"][0]["text"])["task"]["id"], task["id"])
             self.assertEqual(json.loads(workflow[1]["result"]["content"][0]["text"])["task"]["state"], "working")
 
@@ -99,13 +100,14 @@ class McpV2Tests(unittest.TestCase):
             ])
             task_id = json.loads(created[0]["result"]["content"][0]["text"])["task"]["id"]
             claimed = self.exchange(home, [
-                {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "bridge_claim", "arguments": {"task_id": task_id, "actor": "zcode"}}},
-                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "bridge_done", "arguments": {"task_id": task_id, "actor": "zcode"}}},
-            ])
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "bridge_claim", "arguments": {"task_id": task_id}}},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "bridge_done", "arguments": {"task_id": task_id}}},
+            ], identity="zcode")
             self.assertFalse(claimed[1]["result"]["isError"])
             self.assertEqual(json.loads(claimed[1]["result"]["content"][0]["text"])["task"]["state"], "completed")
             environment = os.environ.copy()
             environment["AGENT_BRIDGE_HOME"] = str(home)
+            environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
             result = subprocess.run(
                 [sys.executable, str(MCP_PATH), "--as", "codex"],
                 input="{bad json\n" + json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "bridge_whoami", "arguments": {}}}) + "\n",
@@ -115,6 +117,22 @@ class McpV2Tests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(responses[0]["error"]["code"], -32700)
         self.assertIn("codex", responses[1]["result"]["content"][0]["text"])
+
+    def test_tool_actor_cannot_override_the_bound_mcp_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            created = self.exchange(home, [
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "bridge_send", "arguments": {"to": "zcode", "subject": "Bound identity"}}},
+            ])
+            task_id = json.loads(created[0]["result"]["content"][0]["text"])["task"]["id"]
+            forged = self.exchange(home, [
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "bridge_claim", "arguments": {"task_id": task_id, "actor": "zcode"}}},
+            ])
+            self.assertEqual(-32602, forged[0]["error"]["code"])
+            actual = self.exchange(home, [
+                {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "bridge_claim", "arguments": {"task_id": task_id}}},
+            ], identity="zcode")
+            self.assertFalse(actual[0]["result"]["isError"])
 
 
 if __name__ == "__main__":

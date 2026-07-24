@@ -21,28 +21,39 @@ class OpenResult:
     pid: Optional[int] = None
 
 
-def open_task_terminal(adapter: Any, task_id: str, workspace: Union[Path, str]) -> OpenResult:
+def open_task_terminal(
+    adapter: Any,
+    task_id: str,
+    workspace: Union[Path, str],
+    *,
+    data_root: Optional[Union[Path, str]] = None,
+    actor: str = "unknown",
+) -> OpenResult:
     """Prefer a host terminal and otherwise use platform-safe argv fallbacks."""
     if not isinstance(task_id, str) or not task_id or "\x00" in task_id:
         raise ValueError("task ID must be a non-empty string")
     cwd = Path(workspace).expanduser().resolve()
     if not cwd.is_dir():
         raise ValueError("workspace must be an existing directory")
-    command = (sys.executable, "-m", "agent_bridge.cli", "show", task_id)
-    host_result = _open_host_terminal(adapter, command, str(cwd))
+    command = [sys.executable, "-m", "agent_bridge.cli"]
+    if data_root is not None:
+        command.extend(("--data-root", str(Path(data_root).expanduser().resolve())))
+    command.extend(("--as", actor, "show", task_id))
+    command_tuple = tuple(command)
+    host_result = _open_host_terminal(adapter, command_tuple, str(cwd))
     if host_result is not None:
         return host_result
     if _is_windows():
-        argv = ("wt.exe", "-d", str(cwd), "--", *command)
-        return _open_process(argv, cwd, "windows-terminal", command)
+        argv = ("wt.exe", "-d", str(cwd), "--", *command_tuple)
+        return _open_process(argv, cwd, "windows-terminal", command_tuple)
     if _is_macos():
-        argv = ("osascript", "-e", _MACOS_TERMINAL_PROGRAM, str(cwd), *command)
-        return _open_process(argv, cwd, "macos-terminal", command)
+        argv = ("osascript", "-e", _MACOS_TERMINAL_PROGRAM, str(cwd), *command_tuple)
+        return _open_process(argv, cwd, "macos-terminal", command_tuple)
     return OpenResult(
         False,
         "instructions",
-        command,
-        _instructions(cwd, command),
+        command_tuple,
+        _instructions(cwd, command_tuple),
     )
 
 

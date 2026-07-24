@@ -131,9 +131,11 @@ class LaunchDeliveryChannel:
         store = Store.open(Path(self.database_path))
         try:
             return load_agent_profile(store, recipient).execution_policy is ExecutionPolicy.AUTO
-        except (KeyError, LaunchPolicyError):
-            # Invalid routing/configuration is a real launch error, not an
-            # inapplicable manual target.
+        except KeyError:
+            return False
+        except LaunchPolicyError:
+            # A malformed local policy is an actionable delivery failure, not
+            # evidence that the channel does not apply.
             return True
         finally:
             store.close()
@@ -159,29 +161,45 @@ class LaunchDeliveryChannel:
 
 
 def load_agent_profile(store: Store, name: str) -> AgentProfile:
-    """Load only locally persisted target configuration into an immutable profile."""
+    """Load the recipient-owned public profile, with a v1 DB fallback."""
+    profile_path = store.path.parent / "agents" / name / "agent.json"
+    receipt_path = profile_path.with_name("agent-bridge-profile.json")
+    if profile_path.is_file() and receipt_path.is_file():
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            payload = json.loads(profile_path.read_text(encoding="utf-8"))
+            owned_profile = Path(str(receipt.get("profile", ""))).resolve(strict=False)
+            if receipt.get("owner") != "agent-bridge" or owned_profile != profile_path.resolve(strict=False) or payload.get("name") != name:
+                raise ValueError("unowned public profile")
+            return _profile_from_mapping(payload, name)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise LaunchPolicyError("invalid local launch profile") from error
     row = store.connection.execute("SELECT * FROM agents WHERE name = ?", (name,)).fetchone()
     if row is None:
         raise KeyError("unknown agent: {0}".format(name))
     try:
-        argv = _string_tuple(json.loads(row["launch_argv_json"]))
-        allowlist = _string_tuple(json.loads(row["workspace_allowlist_json"]))
-        policy = ExecutionPolicy(str(row["execution_policy"]))
-        max_concurrency = int(row["max_concurrency"])
-        cooldown_seconds = int(row["cooldown_seconds"])
-        if max_concurrency < 1 or cooldown_seconds < 0:
-            raise ValueError("invalid launch limits")
+        return _profile_from_mapping({
+            "name": row["name"], "execution_policy": row["execution_policy"],
+            "launch_argv": json.loads(row["launch_argv_json"]), "terminal_preference": row["terminal_preference"],
+            "max_concurrency": row["max_concurrency"], "cooldown_seconds": row["cooldown_seconds"],
+            "workspace_allowlist": json.loads(row["workspace_allowlist_json"]),
+        }, name)
     except (TypeError, ValueError, OverflowError, json.JSONDecodeError) as error:
         raise LaunchPolicyError("invalid local launch profile") from error
-    return AgentProfile(
-        name=str(row["name"]),
-        execution_policy=policy,
-        launch_argv=argv,
-        terminal_preference=str(row["terminal_preference"]),
-        max_concurrency=max_concurrency,
-        cooldown_seconds=cooldown_seconds,
-        workspace_allowlist=allowlist,
-    )
+
+
+def _profile_from_mapping(value: Any, expected_name: str) -> AgentProfile:
+    if not isinstance(value, dict) or value.get("name") != expected_name:
+        raise ValueError("profile identity mismatch")
+    argv = _string_tuple(value.get("launch_argv"))
+    allowlist = _string_tuple(value.get("workspace_allowlist"))
+    policy = ExecutionPolicy(str(value.get("execution_policy")))
+    terminal_preference = str(value.get("terminal_preference"))
+    max_concurrency = int(value.get("max_concurrency"))
+    cooldown_seconds = int(value.get("cooldown_seconds"))
+    if max_concurrency < 1 or cooldown_seconds < 0 or terminal_preference not in ("auto", "integrated", "fallback"):
+        raise ValueError("invalid launch limits")
+    return AgentProfile(expected_name, policy, argv, terminal_preference, max_concurrency, cooldown_seconds, allowlist)
 
 
 def launch_stored_agent(

@@ -103,6 +103,45 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(len(channel.effects), 1)
         self.assertEqual(self.store.scalar("SELECT COUNT(*) FROM outbox WHERE completed_at IS NULL"), 0)
 
+    def test_one_burst_increments_outbox_once_across_multiple_channels(self) -> None:
+        self._outbox_item()
+
+        report = Dispatcher(
+            self.store,
+            {"host": self._recording(), "notification": self._recording()},
+        ).run_burst()
+
+        self.assertEqual(1, report.delivered)
+        self.assertEqual(1, self.store.scalar("SELECT attempts FROM outbox"))
+        self.assertEqual(2, self.store.scalar("SELECT COUNT(*) FROM delivery_attempts"))
+        self.assertEqual(
+            2,
+            self.store.scalar(
+                "SELECT COUNT(*) FROM delivery_attempts WHERE attempts = 1"
+            ),
+        )
+
+    def test_one_successful_channel_completes_after_an_optional_channel_exhausts(self) -> None:
+        self._outbox_item()
+
+        report = Dispatcher(
+            self.store,
+            {"broken": FailingChannel(), "notification": self._recording()},
+            max_attempts=1,
+        ).run_burst()
+
+        self.assertEqual(1, report.delivered)
+        self.assertEqual(0, report.failed)
+        self.assertIsNotNone(self.store.scalar("SELECT completed_at FROM outbox"))
+        statuses = {
+            row["channel"]: row["status"]
+            for row in self.store.connection.execute(
+                "SELECT channel, status FROM delivery_attempts"
+            )
+        }
+        self.assertEqual(DeliveryStatus.FAILED.value, statuses["broken"])
+        self.assertEqual(DeliveryStatus.OS_POSTED.value, statuses["notification"])
+
     def test_absent_channel_is_not_recorded_as_delivery(self) -> None:
         self._outbox_item()
 
@@ -249,7 +288,7 @@ class DispatcherTests(unittest.TestCase):
             for child in multiprocessing.active_children()
         ))
 
-    def test_retry_preserves_existing_channel_evidence(self) -> None:
+    def test_retry_skips_a_channel_with_existing_delivery_evidence(self) -> None:
         self._outbox_item()
         Dispatcher(self.store, {"notification": self._recording()}).run_burst()
         with self.store.transaction(immediate=True) as connection:
@@ -261,7 +300,8 @@ class DispatcherTests(unittest.TestCase):
             "SELECT status, error FROM delivery_attempts WHERE channel = 'notification'"
         ).fetchone()
         self.assertEqual(row["status"], DeliveryStatus.OS_POSTED.value)
-        self.assertIn("temporary", row["error"])
+        self.assertIsNone(row["error"])
+        self.assertIsNotNone(self.store.scalar("SELECT completed_at FROM outbox"))
 
     def test_dispatch_command_executes_a_real_burst(self) -> None:
         self._outbox_item()

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -9,11 +11,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_bridge.models import DeliveryStatus
-from agent_bridge.cli import execute_command
+from agent_bridge.cli import execute_command, _owned_windows_notification_configuration
 from agent_bridge.notifications import NotificationNotice, WindowsNotificationChannel, WindowsNotifier, windows_notification_capability
 from agent_bridge.outbox import OutboxItem
 from agent_bridge.service import BridgeService
 from agent_bridge.store import Store
+from agent_bridge.terminals import OpenResult
 
 
 class WindowsNotifyProtocolTests(unittest.TestCase):
@@ -104,6 +107,36 @@ class WindowsNotifyProtocolTests(unittest.TestCase):
         self.assertFalse(capability.available)
         self.assertIn("not installed", capability.detail)
 
+    def test_dispatch_discovers_the_owned_helper_without_an_environment_refresh(self) -> None:
+        data_root = self.directory / "owned-data"
+        helper = data_root / "native" / "agent-bridge-windows-notify.exe"
+        helper.parent.mkdir(parents=True)
+        helper.write_bytes(b"owned helper fixture")
+        activation = [
+            sys.executable,
+            str(data_root / "skill" / "scripts" / "bridge.py"),
+            "--as",
+            "notification-action",
+            "--data-root",
+            str(data_root),
+        ]
+        (helper.parent / "receipt.json").write_text(
+            json.dumps(
+                {
+                    "owner": "agent-bridge.windows-notify",
+                    "helper_path": str(helper),
+                    "sha256": hashlib.sha256(helper.read_bytes()).hexdigest(),
+                    "activation_argv": activation,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        discovered, issue = _owned_windows_notification_configuration(data_root)
+
+        self.assertEqual(helper.resolve(), discovered)
+        self.assertEqual("", issue)
+
     def test_doctor_exposes_native_notification_degradation(self) -> None:
         store = Store.open(self.directory / "doctor.sqlite3")
         previous = os.environ.pop("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", None)
@@ -155,6 +188,83 @@ class WindowsNotifyProtocolTests(unittest.TestCase):
             store.close()
 
         self.assertEqual(result["open_action"]["task"]["id"], task.id)
+
+    def test_notification_actions_claim_snooze_and_open_the_mapped_task(self) -> None:
+        store = Store.open(self.directory / "all-actions.sqlite3")
+        try:
+            service = BridgeService(store)
+            viewed = service.send_task("sender", "receiver", "View", "body")
+            claimed = service.send_task("sender", "receiver", "Claim", "body")
+            snoozed = service.send_task("sender", "receiver", "Snooze", "body")
+            with store.transaction(immediate=True) as connection:
+                connection.executemany(
+                    "INSERT INTO notification_mappings(notification_id, task_id, action, created_at) "
+                    "VALUES (?, ?, 'view', '2026-01-01T00:00:00Z')",
+                    (
+                        ("notice-view", viewed.id),
+                        ("notice-claim", claimed.id),
+                        ("notice-snooze", snoozed.id),
+                    ),
+                )
+            with patch("agent_bridge.dispatcher.tick", return_value=False), patch(
+                "agent_bridge.dispatcher.request_dispatch", return_value=True
+            ) as dispatch_requested, patch.object(
+                BridgeService,
+                "open_terminal",
+                return_value=OpenResult(True, "windows-terminal", pid=7),
+            ) as opened:
+                view_result = execute_command(
+                    service,
+                    "untrusted-caller",
+                    "open-action",
+                    {"notification_id": "notice-view", "action": "view"},
+                )
+                claim_result = execute_command(
+                    service,
+                    "untrusted-caller",
+                    "open-action",
+                    {"notification_id": "notice-claim", "action": "claim"},
+                )
+                snooze_result = execute_command(
+                    service,
+                    "untrusted-caller",
+                    "open-action",
+                    {"notification_id": "notice-snooze", "action": "snooze"},
+                )
+
+            opened.assert_called_once_with(viewed.id)
+            self.assertEqual("receiver", view_result["open_action"]["actor"])
+            self.assertEqual("working", claim_result["open_action"]["task"]["state"])
+            self.assertEqual("receiver", claim_result["open_action"]["actor"])
+            dispatch_requested.assert_called_once_with(store.path.parent)
+            self.assertEqual(
+                "retry_wait", snooze_result["open_action"]["delivery"]["status"]
+            )
+            due_at = store.scalar(
+                "SELECT MAX(due_at) FROM outbox "
+                "WHERE json_extract(payload_json, '$.task_id') = ?",
+                (snoozed.id,),
+            )
+            self.assertGreater(str(due_at), "2026-01-01T00:00:00Z")
+        finally:
+            store.close()
+
+    def test_windows_registration_source_restores_prior_owners_and_checks_current_ownership(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "native"
+            / "windows-notify"
+            / "src"
+            / "registration.rs"
+        ).read_text(encoding="utf-8")
+        for token in (
+            "PreviousProtocolJson",
+            "verify_owned_registration()?",
+            "restore_registration(&classes)?",
+            "restore_start_menu_shortcut()?",
+            "refusing to remove a protocol no longer owned by Agent Bridge",
+        ):
+            self.assertIn(token, source)
 
 
 if __name__ == "__main__":
