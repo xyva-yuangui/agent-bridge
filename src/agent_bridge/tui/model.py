@@ -67,6 +67,8 @@ class DashboardTask:
     state: str
     delivery: str = ""
     artifacts: Tuple[str, ...] = ()
+    dependencies: Tuple[str, ...] = ()
+    review_result: str = ""
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,8 @@ class Dashboard:
     tasks: Tuple[DashboardTask, ...]
     selected: int = 0
     query: str = ""
+    page_label: str = "page 1"
+    sort_by: str = "updated"
 
     @property
     def selected_task(self) -> DashboardTask | None:
@@ -92,7 +96,7 @@ def build_dashboard(snapshot: Mapping[str, Any], selected: int = 0, query: str =
         tasks = tuple(task for task in tasks if needle in _searchable(task).casefold())
     counts = _counts(tasks)
     safe_selected = min(max(0, selected), max(0, len(tasks) - 1))
-    return Dashboard(agents, counts, tasks, safe_selected, query)
+    return Dashboard(agents, counts, tasks, safe_selected, query, sanitize_text(snapshot.get("page_label", "page 1")), sanitize_text(snapshot.get("sort_by", "updated")))
 
 
 def _task(value: Any) -> DashboardTask:
@@ -105,6 +109,7 @@ def _task(value: Any) -> DashboardTask:
         id=sanitize_text(field("id")), sender=sanitize_text(field("sender")), assignee=sanitize_text(field("assignee")),
         subject=sanitize_text(field("subject")), body=sanitize_text(field("body")), state=sanitize_text(getattr(state, "value", state)),
         delivery=sanitize_text(getattr(delivery, "value", delivery)), artifacts=tuple(sanitize_text(item) for item in artifacts),
+        dependencies=tuple(sanitize_text(item) for item in (field("dependencies", ()) or ())), review_result=sanitize_text(field("review_result", "")),
     )
 
 

@@ -16,7 +16,6 @@ from .render import render_compact, render_dashboard, truncate_cells
 
 REFRESH_SECONDS = 0.25
 PAGE_SIZE = 100
-PAGE_CAP = 300
 
 
 def run_tui(
@@ -29,19 +28,24 @@ def run_tui(
         and bool(getattr(input_adapter, "supported", True))
         and _supports_vt(output)
     )
+    _tick(dispatch_tick)
     if not interactive:
-        _write(output, render_compact(_dashboard(service, project_id), _terminal_size()[0]) + "\n")
+        dashboard, _ = _dashboard(service, project_id)
+        _write(output, render_compact(dashboard, _terminal_size()[0]) + "\n")
         return 0
     selected = 0
     query = ""
     notice = ""
+    cursor = None
+    history: list[Any] = []
+    sort_by = "updated"
     handlers = _install_signal_handlers()
     try:
         with input_adapter:
             _write(output, "\x1b[?1049h")
             while True:
                 _tick(dispatch_tick)
-                dashboard = _dashboard(service, project_id, selected, query)
+                dashboard, next_cursor = _dashboard(service, project_id, selected, query, sort_by, cursor, len(history) + 1)
                 selected = dashboard.selected
                 width, height = _terminal_size()
                 suffix = "\n" + truncate_cells(notice, width) if notice else ""
@@ -55,14 +59,24 @@ def run_tui(
                     selected = max(0, selected - 1)
                     continue
                 if action is Action.DOWN:
-                    selected = min(max(0, len(dashboard.tasks) - 1), selected + 1)
+                    if selected >= len(dashboard.tasks) - 1 and next_cursor is not None:
+                        history.append(cursor); cursor = next_cursor; selected = 0
+                    else:
+                        selected = min(max(0, len(dashboard.tasks) - 1), selected + 1)
                     continue
+                if action is Action.NEXT_PAGE and next_cursor is not None:
+                    history.append(cursor); cursor = next_cursor; selected = 0; continue
+                if action is Action.PREVIOUS_PAGE and history:
+                    cursor = history.pop(); selected = 0; continue
+                if action is Action.SORT:
+                    sort_by = {"updated": "subject", "subject": "state", "state": "updated"}[sort_by]
+                    notice = "sort: " + sort_by; continue
                 if action is Action.SEARCH:
                     reader = getattr(input_adapter, "read_line", None)
                     if callable(reader):
                         query = str(reader("filter: ") or "")
                         selected = 0
-                        notice = "filter: " + query
+                        notice = "filter current page: " + query
                     else:
                         notice = "filter input unavailable"
                     continue
@@ -87,24 +101,20 @@ def run_tui(
             _write(output, "\x1b[?1049l")
 
 
-def _dashboard(service: Any, project_id: str, selected: int = 0, query: str = "", sort_by: str = "updated") -> Dashboard:
-    cursor = None
+def _dashboard(service: Any, project_id: str, selected: int = 0, query: str = "", sort_by: str = "updated", cursor: Any = None, page_number: int = 1) -> tuple[Dashboard, Any]:
     tasks = []
-    while len(tasks) < PAGE_CAP:
-        page = service.board_page(project_id, limit=PAGE_SIZE, cursor=cursor)
-        for task in page.tasks:
+    page = service.board_page(project_id, limit=PAGE_SIZE, cursor=cursor)
+    for task in page.tasks:
             value = _as_mapping(task)
             evidence = service.delivery_evidence(str(value.get("id", "")))
             value["delivery"] = _evidence_text(evidence)
             tasks.append(value)
-        cursor = page.next_cursor
-        if cursor is None:
-            break
     if sort_by == "subject":
         tasks.sort(key=lambda task: str(task.get("subject", "")).casefold())
     elif sort_by == "state":
         tasks.sort(key=lambda task: (str(task.get("state", "")), str(task.get("id", ""))))
-    return build_dashboard({"agents": tuple(service.agents()), "tasks": tasks}, selected, query)
+    dashboard = build_dashboard({"agents": tuple(service.agents()), "tasks": tasks, "page_label": "page " + str(page_number) + ("+" if page.next_cursor else ""), "sort_by": sort_by}, selected, query)
+    return dashboard, page.next_cursor
 
 
 def _as_mapping(value: Any) -> dict[str, Any]:
@@ -117,7 +127,10 @@ def _as_mapping(value: Any) -> dict[str, Any]:
 def _evidence_text(value: Any) -> str:
     if isinstance(value, str):
         return value
-    return str(getattr(value, "status", value))
+    status = str(getattr(value, "status", value))
+    attempts = int(getattr(value, "attempts", 0) or 0)
+    detail = sanitize_text(getattr(value, "detail", ""))
+    return status + (" ({0} attempts)".format(attempts) if attempts else "") + (": " + detail if detail else "")
 
 
 def _result(action: str, result: Any) -> str:
@@ -127,7 +140,7 @@ def _result(action: str, result: Any) -> str:
 def _call(action: str, method: Any, *args: Any) -> str:
     try:
         return _result(action, method(*args))
-    except (PermissionError, ValueError, RuntimeError, OSError) as error:
+    except (KeyError, PermissionError, ValueError, RuntimeError, OSError) as error:
         return sanitize_text("{0} failed: {1}".format(action, error))
 
 

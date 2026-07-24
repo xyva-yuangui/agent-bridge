@@ -46,6 +46,12 @@ class TuiControllerTests(unittest.TestCase):
         self.assertIn("Agent Bridge tasks", output.getvalue())
         self.assertNotIn("\x1b[", output.getvalue())
 
+    def test_compact_fallback_ticks_once_before_rendering(self) -> None:
+        from agent_bridge.tui.controller import run_tui
+        ticks = []
+        self.assertEqual(run_tui(_Service(), _Input(()), _Output(False), dispatch_tick=lambda: ticks.append(1)), 0)
+        self.assertEqual(ticks, [1])
+
     def test_non_vt_terminal_uses_compact_fallback(self) -> None:
         from agent_bridge.tui.controller import run_tui
 

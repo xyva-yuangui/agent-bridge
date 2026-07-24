@@ -13,4 +13,7 @@ class Action(str, enum.Enum):
     RETRY = "retry"
     OPEN = "open"
     SEARCH = "search"
+    NEXT_PAGE = "next_page"
+    PREVIOUS_PAGE = "previous_page"
+    SORT = "sort"
     QUIT = "quit"

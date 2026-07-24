@@ -13,7 +13,7 @@ def parse_windows_key(first: str, second: str = "") -> Optional[Action]:
         return {"H": Action.UP, "P": Action.DOWN}.get(second)
     return {
         "\r": Action.VIEW, "c": Action.CLAIM, "r": Action.RETRY, "o": Action.OPEN,
-        "/": Action.SEARCH, "q": Action.QUIT, "\x03": Action.QUIT,
+        "/": Action.SEARCH, "n": Action.NEXT_PAGE, "p": Action.PREVIOUS_PAGE, "s": Action.SORT, "q": Action.QUIT, "\x03": Action.QUIT,
     }.get(first)
 
 

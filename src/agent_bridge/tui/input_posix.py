@@ -13,6 +13,8 @@ def parse_key(value: str) -> Optional[Action]:
     return {
         "\x1b[A": Action.UP, "\x1b[B": Action.DOWN, "\r": Action.VIEW, "\n": Action.VIEW,
         "c": Action.CLAIM, "r": Action.RETRY, "o": Action.OPEN, "/": Action.SEARCH,
+        "n": Action.NEXT_PAGE, "p": Action.PREVIOUS_PAGE, "s": Action.SORT,
+        "\x1b[5~": Action.PREVIOUS_PAGE, "\x1b[6~": Action.NEXT_PAGE,
         "q": Action.QUIT, "\x03": Action.QUIT,
     }.get(value)
 

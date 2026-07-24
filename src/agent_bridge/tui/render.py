@@ -65,7 +65,7 @@ def _wide(dashboard: Dashboard, width: int) -> list[str]:
     # Two " | " separators consume six terminal cells.
     right = width - left - middle - 6
     lines = [_title(dashboard), _columns(("AGENTS", "TASKS", "DETAILS"), (left, middle, right))]
-    agent_lines = ["{0} {1}".format(str(agent.get("name", "?")), str(agent.get("health", "unknown"))) for agent in dashboard.agents] or ["(none)"]
+    agent_lines = ["{0} {1} {2} {3}".format(str(agent.get("name", "?")), str(agent.get("health", "unknown")), str(agent.get("execution_policy", "manual")), ",".join(str(item) for item in agent.get("capabilities", ()))) for agent in dashboard.agents] or ["(none)"]
     task_lines = [_task_line(task, index == dashboard.selected, middle) for index, task in enumerate(dashboard.tasks)] or ["(none)"]
     detail_lines = _details(dashboard.selected_task, right)
     for row in range(max(len(agent_lines), len(task_lines), len(detail_lines))):
@@ -84,8 +84,8 @@ def _narrow(dashboard: Dashboard, width: int) -> list[str]:
 
 def _title(dashboard: Dashboard) -> str:
     counts = dashboard.counts
-    return "Agent Bridge | inbox {0} working {1} review {2} completed {3} failed {4}".format(
-        counts.inbox, counts.working, counts.review, counts.completed, counts.failed,
+    return "Agent Bridge {5} sort:{6} | inbox {0} working {1} review {2} completed {3} failed {4}".format(
+        counts.inbox, counts.working, counts.review, counts.completed, counts.failed, dashboard.page_label, dashboard.sort_by,
     )
 
 
@@ -106,6 +106,10 @@ def _details(task: DashboardTask | None, width: int) -> list[str]:
     ]
     if task.artifacts:
         values.append("artifacts: " + ", ".join(task.artifacts))
+    if task.dependencies:
+        values.append("depends: " + ", ".join(task.dependencies))
+    if task.review_result:
+        values.append("review: " + task.review_result)
     return [truncate_cells(value, width) for value in values]
 
 
