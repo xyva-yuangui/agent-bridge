@@ -45,6 +45,16 @@
 
 ## Platform limitation and evidence
 
+## Final Windows verification
+
+- Installed Rust 1.97.1 in the current user profile and built with a local
+  LLVM-MinGW linker because Visual Studio Build Tools were absent.
+- `cargo test --target x86_64-pc-windows-gnu` passed 4 tests; release build
+  passed and `scripts/verify-release.ps1` recorded `release_bytes=537088`.
+- Actual helper smoke succeeded: register, status, unregister. A real toast
+  post/action was not attempted because this automation session has no
+  verifiable interactive Notification Center evidence.
+
 `cargo` and `rustc` were unavailable on `PATH`; both
 `C:\\Users\\Administrator\\.cargo\\bin` and conventional `C:\\Program Files\\Rust`
 locations were absent. Consequently `cargo test`, `cargo build --release`, real

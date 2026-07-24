@@ -9,12 +9,14 @@ pub fn stable_notification_id(task_id: &str) -> String {
 
 #[cfg(windows)]
 pub fn post(request: &Request) -> Result<String, String> {
-    use windows::core::HSTRING;
+    use windows::core::{HSTRING, Interface};
+    use windows::Foundation::{DateTime, IReference, PropertyValue};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use windows::Data::Xml::Dom::XmlDocument;
     use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
     use crate::registration::{AUMID, PROTOCOL};
 
-    let Request::Post { title, body, task_id, actions, .. } = request else { return Err("post request expected".to_owned()); };
+    let Request::Post { title, body, task_id, actions, expires_in_seconds } = request else { return Err("post request expected".to_owned()); };
     let notification_id = stable_notification_id(task_id);
     let action_xml = actions.iter().map(|action| {
         let name = match action { Action::View => "view", Action::Claim => "claim", Action::Snooze => "snooze" };
@@ -29,6 +31,10 @@ pub fn post(request: &Request) -> Result<String, String> {
     // Tag/group make retries for the same logical task replace the native notification instead of duplicating it.
     toast.SetTag(&HSTRING::from(&notification_id)).map_err(|error| error.to_string())?;
     toast.SetGroup(&HSTRING::from("agent-bridge")).map_err(|error| error.to_string())?;
+    let unix_ticks = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64 * 10_000_000;
+    let expiry = DateTime { UniversalTime: 116_444_736_000_000_000i64 + unix_ticks + i64::from(*expires_in_seconds) * 10_000_000 };
+    let expiry_ref: IReference<DateTime> = PropertyValue::CreateDateTime(expiry).map_err(|error| error.to_string())?.cast().map_err(|error| error.to_string())?;
+    toast.SetExpirationTime(&expiry_ref).map_err(|error| error.to_string())?;
     let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(AUMID)).map_err(|error| error.to_string())?;
     notifier.Show(&toast).map_err(|error| error.to_string())?;
     Ok(notification_id)

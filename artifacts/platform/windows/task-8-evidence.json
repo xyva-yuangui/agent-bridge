@@ -1,10 +1,7 @@
 {
   "platform": "Windows",
   "date": "2026-07-24",
-  "native_helper_smoke": {
-    "attempted": false,
-    "reason": "Cargo and rustc were not installed or available on PATH, and the conventional local Rust locations were absent. No helper executable was produced."
-  },
+  "native_helper_smoke": {"attempted": true, "register_status_unregister": "passed", "post_action": "not attempted; no verifiable interactive Notification Center session"},
   "doctor": {
     "command": "PYTHONPATH=src py -3 -m agent_bridge.cli --json doctor --strict",
     "native_notifications": false,
@@ -12,8 +9,9 @@
     "strict_exit": "non-zero (honest degraded capability; source tree also has pre-existing schema-version constant/migration mismatch)"
   },
   "release_size": {
-    "measured": false,
-    "reason": "No release executable exists without Cargo."
+    "measured": true,
+    "bytes": 537088,
+    "limit_bytes": 5242880
   },
   "manual_notification_center_and_action_evidence": {
     "recorded": false,
