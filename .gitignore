@@ -1,5 +1,3 @@
+.worktrees/
 __pycache__/
 *.pyc
-reasonix.toml
-.DS_Store
---help

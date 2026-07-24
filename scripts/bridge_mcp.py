@@ -18,6 +18,7 @@ from pathlib import Path
 
 BRIDGE = str(Path(__file__).with_name("bridge.py"))
 PROTOCOL_VERSION = "2024-11-05"
+BRIDGE_VERSION = "1.3.0"
 
 # tool -> bridge subcommand spec. pos = positional argv, flags = --flag args.
 TOOLS = {
@@ -122,6 +123,37 @@ TOOLS = {
             "dry_run": {"type": "boolean", "description": "Preview without deleting"},
             "project": {"type": "string"}}},
     },
+    "bridge_doctor": {
+        "description": "Check agent-bridge storage, profiles, hooks, and application integration readiness.",
+        "sub": "doctor", "pos": [], "flags": ["strict"],
+        "schema": {"type": "object", "properties": {
+            "strict": {"type": "boolean"}}},
+    },
+    "bridge_project": {
+        "description": "Initialize, list, or show an agent-bridge project.",
+        "sub": "project", "pos": ["action"], "flags": ["name", "workspace", "goal"],
+        "schema": {"type": "object", "required": ["action"], "properties": {
+            "action": {"type": "string", "enum": ["init", "list", "show"]},
+            "name": {"type": "string"}, "workspace": {"type": "string"},
+            "goal": {"type": "string"}}},
+    },
+    "bridge_whoami": {
+        "description": "Show the identity used for agent-bridge calls.",
+        "sub": "whoami", "pos": [], "flags": [],
+        "schema": {"type": "object", "properties": {}},
+    },
+    "bridge_who_coordinates": {
+        "description": "Show the current coordinator for a project.",
+        "sub": "who-coordinates", "pos": [], "flags": ["project"],
+        "schema": {"type": "object", "properties": {
+            "project": {"type": "string"}}},
+    },
+    "bridge_log": {
+        "description": "Append a manual event to the shared activity feed.",
+        "sub": "log", "pos": [], "flags": ["what", "project"],
+        "schema": {"type": "object", "required": ["what"], "properties": {
+            "what": {"type": "string"}, "project": {"type": "string"}}},
+    },
 }
 
 
@@ -172,7 +204,7 @@ def handle(req: dict, identity: str):
         respond(rid, {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "agent-bridge", "version": "0.1.0"},
+            "serverInfo": {"name": "agent-bridge", "version": BRIDGE_VERSION},
         })
     elif method == "notifications/initialized":
         pass  # notification, no reply
@@ -192,8 +224,17 @@ def handle(req: dict, identity: str):
             respond(rid, error={"code": -32602, "message": f"unknown tool: {name}"})
             return
         try:
-            r = subprocess.run(build_argv(spec, args, identity),
-                               capture_output=True, text=True, timeout=40, env=os.environ)
+            env = os.environ.copy()
+            env.setdefault("PYTHONUTF8", "1")
+            r = subprocess.run(
+                build_argv(spec, args, identity),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=40,
+                env=env,
+            )
             out = ((r.stdout or "") + (r.stderr or "")).strip() or "(no output)"
             respond(rid, {"content": [{"type": "text", "text": out}], "isError": r.returncode != 0})
         except Exception as e:

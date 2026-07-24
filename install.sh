@@ -1,434 +1,361 @@
 #!/usr/bin/env bash
-# install.sh — install agent-bridge for a given agent
-# Usage: install.sh --agent zcode|reasonix|claude|codex --as <name> [--uninstall]
+set -eu
 
-set -euo pipefail
+auto=0
+agent=""
+identity=""
+python_requested=""
+wake_cmd=""
+uninstall=0
+install_root="${HOME}"
 
-AGENT=""
-AS_NAME=""
-SKILLS=""
-STRENGTHS=""
-UNINSTALL=false
-AUTO=false
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --agent) AGENT="$2"; shift 2 ;;
-        --as) AS_NAME="$2"; shift 2 ;;
-        --skills) SKILLS="$2"; shift 2 ;;
-        --strengths) STRENGTHS="$2"; shift 2 ;;
-        --auto) AUTO=true; shift ;;
-        --uninstall) UNINSTALL=true; shift ;;
-        *) echo "Unknown: $1"; exit 1 ;;
-    esac
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --auto) auto=1 ;;
+    --agent) agent="$2"; shift ;;
+    --as) identity="$2"; shift ;;
+    --python) python_requested="$2"; shift ;;
+    --wake-cmd) wake_cmd="$2"; shift ;;
+    --uninstall) uninstall=1 ;;
+    --install-root) install_root="$2"; shift ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
 done
 
-usage() {
-    echo "Usage:"
-    echo "  install.sh --auto [--as <name>]                 detect installed apps, install for each"
-    echo "  install.sh --agent <zcode|reasonix|claude|codex> --as <name> [options]"
-    echo "  install.sh --uninstall --agent <name>"
-    echo "Options:"
-    echo "  --strengths \"...\"   free-text strengths shown in 'bridge agents' (routing is the coordinator's call, not a fixed map)"
-    echo "  --skills a,b,c       optional capability tags (fallback auto-route only)"
+source_root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+bridge_home="${install_root}/.agent-bridge"
+skill_home="${bridge_home}/skill"
+launcher_home="${install_root}/.local/bin"
+
+resolve_python() {
+  if [ -n "$python_requested" ]; then
+    candidates="$python_requested"
+  else
+    candidates="python3 python"
+  fi
+  for candidate in $candidates; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      resolved="$(command -v "$candidate")"
+      if "$resolved" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)'; then
+        printf '%s\n' "$resolved"
+        return
+      fi
+    fi
+  done
+  echo "Python 3.9 or newer was not found; pass --python." >&2
+  exit 1
 }
-
-# --auto: detect which of the four apps exist and install for each present one.
-if $AUTO; then
-    # each tool gets its OWN identity (= tool name) so they can address each other.
-    declare -a detected
-    is_present() { command -v "$1" >/dev/null 2>&1 || [ -d "/Applications/$2" ]; }
-    is_present claude   Claude.app   && detected+=("claude")
-    is_present codex    Codex.app    && detected+=("codex")
-    is_present reasonix Reasonix.app && detected+=("reasonix")
-    is_present zcode    ZCode.app    && detected+=("zcode")
-    if [[ ${#detected[@]} -eq 0 ]]; then echo "No supported apps detected."; exit 1; fi
-    echo "Detected: ${detected[*]} — installing each with identity = its own name"
-    # sensible default strengths (descriptive only; routing is still the coordinator's call)
-    default_strengths() {
-        case "$1" in
-            codex)    echo "hard reasoning, system architecture, complex implementation (GPT-5.5, high effort)";;
-            claude)   echo "orchestration, code review, refactoring, large-context work, skills";;
-            reasonix) echo "planning, headless automation, diff review, multi-model";;
-            zcode)    echo "frontend/UI, Chinese-context work, cost-effective bulk edits";;
-        esac
-    }
-    for a in "${detected[@]}"; do
-        st="${STRENGTHS:-$(default_strengths "$a")}"
-        "$0" --agent "$a" --as "$a" ${SKILLS:+--skills "$SKILLS"} --strengths "$st" || true
-        echo "----"
-    done
-    exit 0
-fi
-
-if [[ -z "$AGENT" || -z "$AS_NAME" ]]; then
-    usage
-    exit 1
-fi
-
-SKILL_HOME="$HOME/.agent-bridge/skill"
-BRIDGE_BIN="$SKILL_HOME/scripts/bridge.py"
-MCP_BIN="$SKILL_HOME/scripts/bridge_mcp.py"
-SKILL_MD="$SKILL_HOME/SKILL.md"
-
-# ── shared skill install ──────────────────────────────────────────────────────
 
 install_shared() {
-    mkdir -p "$SKILL_HOME/scripts"
-    # bridge.py is deployed from the repo — copy
-    cp "$(dirname "$0")/scripts/bridge.py" "$BRIDGE_BIN" 2>/dev/null || {
-        echo "⚠️  bridge.py not found in repo — ensure it's deployed"
-    }
-    chmod +x "$BRIDGE_BIN"
-    cp "$(dirname "$0")/scripts/bridge_mcp.py" "$MCP_BIN" 2>/dev/null || true
-    chmod +x "$MCP_BIN"
-    cp "$(dirname "$0")/SKILL.md" "$SKILL_MD" 2>/dev/null || true
+  python_path="$1"
+  stage="${bridge_home}/.skill-stage-$$"
+  mkdir -p "${stage}/scripts" "$launcher_home" "${install_root}/.agents/skills"
+  # Copy bridge.py, bridge_mcp.py, notify_windows.ps1, and future helpers together.
+  cp -R "${source_root}/scripts/." "${stage}/scripts/"
+  for name in SKILL.md README.md README.zh-CN.md; do
+    if [ -f "${source_root}/${name}" ]; then
+      cp "${source_root}/${name}" "${stage}/${name}"
+    fi
+  done
+  if [ -e "$skill_home" ]; then
+    mv "$skill_home" "${bridge_home}/.skill-backup-$$"
+  fi
+  mv "$stage" "$skill_home"
+  rm -rf "${bridge_home}/.skill-backup-$$"
+  printf '#!/usr/bin/env sh\nexec "%s" "%s/scripts/bridge.py" "$@"\n' "$python_path" "$skill_home" > "${launcher_home}/bridge"
+  chmod +x "${launcher_home}/bridge" "${skill_home}/scripts/bridge.py" "${skill_home}/scripts/bridge_mcp.py"
+  rm -rf "${install_root}/.agents/skills/agent-bridge"
+  ln -s "$skill_home" "${install_root}/.agents/skills/agent-bridge"
+}
 
-    # universal skill discovery: symlink to ~/.agents/skills/ (works for ZCode, Reasonix, Codex)
-    mkdir -p "$HOME/.agents/skills"
-    ln -sf "$SKILL_HOME" "$HOME/.agents/skills/agent-bridge"
-
-    # bridge on PATH: try Homebrew bin first, then /usr/local/bin, then ~/.local/bin
-    for bin_dir in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin"; do
-        if [ -d "$bin_dir" ] && [ -w "$bin_dir" ]; then
-            ln -sf "$BRIDGE_BIN" "$bin_dir/bridge"
-            echo "✅ bridge on PATH: $bin_dir/bridge"
-            break
-        fi
-    done
-
-    # register agent capabilities if --skills provided
-    if [ -n "$SKILLS" ]; then
-        mkdir -p "$HOME/.agent-bridge/agents/$AS_NAME"
-        python3 -c "
+register_agent_profile() {
+  name="$1"
+  python_path="$2"
+  "$python_path" - "$bridge_home" "$name" "$wake_cmd" <<'PY'
 import json
-af = '$HOME/.agent-bridge/agents/$AS_NAME/agent.json'
-data = {}
-try: data = json.load(open(af))
-except: pass
-data['name'] = '$AS_NAME'
-data['skills'] = [s.strip() for s in '$SKILLS'.split(',')]
-json.dump(data, open(af, 'w'), indent=2)
-"
-        echo "✅ capabilities registered: $SKILLS"
-    fi
-
-    # register free-text strengths (descriptive; coordinator decides routing per project)
-    if [ -n "$STRENGTHS" ]; then
-        mkdir -p "$HOME/.agent-bridge/agents/$AS_NAME"
-        STRENGTHS="$STRENGTHS" AS_NAME="$AS_NAME" HOME="$HOME" python3 -c "
-import json, os
-af = os.path.expanduser('~/.agent-bridge/agents/%s/agent.json' % os.environ['AS_NAME'])
-try: data = json.load(open(af))
-except Exception: data = {}
-data['name'] = os.environ['AS_NAME']
-data['strengths'] = os.environ['STRENGTHS']
-json.dump(data, open(af, 'w'), indent=2)
-"
-        echo "✅ strengths registered: $STRENGTHS"
-    fi
-}
-
-# ── per-agent install ─────────────────────────────────────────────────────────
-
-install_zcode() {
-    echo "Installing for ZCode as '$AS_NAME'..."
-    install_shared
-
-    # 1. skill discovery: symlink into ~/.agents/skills/
-    ln -sf "$SKILL_HOME" "$HOME/.agents/skills/agent-bridge"
-    echo "✅ skill discoverable at ~/.agents/skills/agent-bridge"
-
-    # 2. plugin registration — ZCode uses the Claude-Code plugin format
-    #    (.claude-plugin/ + hooks/), tracked in installed_plugins.json.
-    local plugin_dir="$HOME/.zcode/cli/plugins/cache/local/agent-bridge/0.1.0"
-    rm -rf "$HOME/.zcode/cli/plugins/cache/local/agent-bridge/0.1.0/.zcode-plugin"  # drop old wrong manifest
-    mkdir -p "$plugin_dir/.claude-plugin" "$plugin_dir/hooks"
-
-    cat > "$plugin_dir/.claude-plugin/plugin.json" << PLUGINJSON
-{
-  "name": "agent-bridge",
-  "version": "0.1.0",
-  "description": "Cross-agent collaboration: UserPromptSubmit hook injects bridge status every turn.",
-  "author": { "name": "agent-bridge" },
-  "license": "MIT"
-}
-PLUGINJSON
-
-    # 3. UserPromptSubmit hook (fires every turn, stdout injected into context)
-    cat > "$plugin_dir/hooks/hooks.json" << 'HOOKJSON'
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "AGENT_BRIDGE_NAME=AS_NAME \"BRIDGE_BIN\" status --oneliner",
-            "async": false
-          }
-        ]
-      }
-    ]
-  }
-}
-HOOKJSON
-    # portable in-place replace (sed -i differs across macOS/Linux; use python3)
-    python3 - "$plugin_dir/hooks/hooks.json" "$AS_NAME" "$BRIDGE_BIN" <<'PY'
+import shlex
 import sys
-p, asn, binp = sys.argv[1:4]
-s = open(p).read().replace("AS_NAME", asn).replace("BRIDGE_BIN", binp)
-open(p, "w").write(s)
-PY
+from datetime import datetime, timezone
+from pathlib import Path
 
-    # 4. register the plugin in installed_plugins.json AND enable it in config.json
-    PLUGIN_DIR="$plugin_dir" python3 - <<'PY' 2>/dev/null && echo "✅ ZCode: plugin registered + enabled" || echo "⚠️  Could not register ZCode plugin — is ~/.zcode present? (open ZCode once)"
-import json, os, time
-home = os.path.expanduser("~")
-ip_path = os.path.join(home, ".zcode/cli/plugins/installed_plugins.json")
-cfg_path = os.path.join(home, ".zcode/cli/config.json")
-ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
-# installed_plugins.json
-ip = {"version": 1, "plugins": []}
-if os.path.exists(ip_path):
-    try: ip = json.load(open(ip_path))
-    except Exception: pass
-ip.setdefault("plugins", [])
-entry = {"id": "agent-bridge@local", "name": "agent-bridge", "marketplace": "local",
-         "version": "0.1.0", "installPath": os.environ["PLUGIN_DIR"],
-         "installedAt": ts, "updatedAt": ts, "scope": "user",
-         "source": {"source": "local", "path": os.environ["PLUGIN_DIR"]}}
-ip["plugins"] = [p for p in ip["plugins"] if p.get("id") != "agent-bridge@local"] + [entry]
-json.dump(ip, open(ip_path, "w"), indent=2)
-# config.json enabledPlugins
-cfg = {}
-if os.path.exists(cfg_path):
-    try: cfg = json.load(open(cfg_path))
-    except Exception: pass
-cfg.setdefault("plugins", {}).setdefault("enabledPlugins", {})["agent-bridge@local"] = True
-json.dump(cfg, open(cfg_path, "w"), indent=2)
+home = Path(sys.argv[1])
+name = sys.argv[2]
+wake = sys.argv[3]
+skills = {
+    "codex": ["architecture", "hard-reasoning", "complex-impl", "orchestrate"],
+    "claude": ["frontend", "ui", "writing", "analysis"],
+    "reasonix": ["review", "plan", "headless", "refactor"],
+    "zcode": ["review", "testing", "implementation", "acceptance"],
+}[name]
+path = home / "agents" / name / "agent.json"
+old = {}
+if path.exists():
+    try:
+        old = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        old = {}
+profile = {
+    "name": name,
+    "skills": skills,
+    "strengths": ", ".join(skills),
+    "last_seen": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+if wake:
+    profile["wake_argv"] = shlex.split(wake)
+elif isinstance(old.get("wake_argv"), list):
+    profile["wake_argv"] = old["wake_argv"]
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
 PY
-
-    echo "✅ ZCode: per-turn UserPromptSubmit hook wired (.claude-plugin format)"
-    echo "💡 Skill also discoverable via ~/.agents/skills. For MCP tools, add in Settings → MCP:"
-    echo "     command: python3   args: $MCP_BIN --as $AS_NAME"
 }
 
-install_reasonix() {
-    echo "Installing for Reasonix as '$AS_NAME'..."
-    install_shared
+set_managed_block() {
+  path="$1"
+  marker="$2"
+  body="$3"
+  python_path="$4"
+  "$python_path" - "$path" "$marker" "$body" <<'PY'
+import re
+import sys
+from pathlib import Path
 
-    # 1. skill discovery: already covered by install_shared (universal symlink)
-    echo "✅ skill discoverable at ~/.agents/skills/agent-bridge"
-
-    # 2. system_prompt_file directive (under [agent] section)
-    local prompt_file="$HOME/.reasonix/agent-bridge-directive.md"
-    cat > "$prompt_file" << PROMPT
-# agent-bridge awareness directive
-At the start of EVERY turn, before responding to the user, run:
-\`\`\`bash
-AGENT_BRIDGE_NAME=$AS_NAME $BRIDGE_BIN status --oneliner
-\`\`\`
-If it shows pending tasks, check them with \`bridge inbox\` and handle them before responding to the user.
-PROMPT
-
-    # 3. write the GLOBAL config ~/.reasonix/config.toml (system_prompt_file + MCP plugin
-    #    + sandbox allow_write). NOTE: `reasonix mcp add` writes ./reasonix.toml in the CWD,
-    #    which does NOT apply globally — so we write the global file directly.
-    local rc="$HOME/.reasonix/config.toml"
-    PROMPT_FILE="$prompt_file" MCP_BIN="$MCP_BIN" AS_NAME="$AS_NAME" RC="$rc" \
-    AGENT_BRIDGE_HOME_DIR="$HOME/.agent-bridge" python3 - <<'PY'
-import os
-rc = os.environ["RC"]
-existing = ""
-if os.path.exists(rc):
-    existing = open(rc).read()
-blocks = []
-if "system_prompt_file" not in existing:
-    blocks.append('[agent]\nsystem_prompt_file = "%s"\n' % os.environ["PROMPT_FILE"])
-if 'name    = "agent-bridge"' not in existing and 'name = "agent-bridge"' not in existing:
-    blocks.append('[[plugins]]\nname    = "agent-bridge"\ncommand = "python3"\nargs    = ["%s", "--as", "%s"]\n'
-                  % (os.environ["MCP_BIN"], os.environ["AS_NAME"]))
-if "allow_write" not in existing:
-    blocks.append('[sandbox]\nallow_write = ["%s"]\n' % os.environ["AGENT_BRIDGE_HOME_DIR"])
-if blocks:
-    os.makedirs(os.path.dirname(rc), exist_ok=True)
-    sep = "" if (not existing or existing.endswith("\n")) else "\n"
-    open(rc, "a").write(sep + "\n" + "\n".join(blocks))
-    print("✅ Reasonix global config written: system_prompt_file + MCP plugin + sandbox allow_write")
-else:
-    print("ℹ️  Reasonix global config already has agent-bridge")
+path = Path(sys.argv[1])
+name = sys.argv[2]
+body = sys.argv[3]
+start = f"# >>> agent-bridge:{name} >>>"
+end = f"# <<< agent-bridge:{name} <<<"
+text = path.read_text(encoding="utf-8") if path.exists() else ""
+text = re.sub(
+    rf"(?ms)^{re.escape(start)}.*?^{re.escape(end)}\s*",
+    "",
+    text,
+)
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(
+    text.rstrip() + "\n\n" + start + "\n" + body + "\n" + end + "\n",
+    encoding="utf-8",
+)
 PY
-    # 4. register Reasonix's headless wake command so other agents can push to it
-    mkdir -p "$HOME/.agent-bridge/agents/$AS_NAME"
-    AS_NAME="$AS_NAME" python3 - <<'PY'
-import json, os
-af = os.path.expanduser("~/.agent-bridge/agents/%s/agent.json" % os.environ["AS_NAME"])
-try: data = json.load(open(af))
-except Exception: data = {}
-data["name"] = os.environ["AS_NAME"]
-data["wake"] = "reasonix run"   # headless: `reasonix run "<prompt>"`
-json.dump(data, open(af, "w"), indent=2)
-PY
-    echo "✅ Reasonix wake command registered (headless push via 'reasonix run')"
-    echo "✅ Reasonix configured (loads on next session)"
 }
 
-install_claude() {
-    echo "Installing for Claude Code as '$AS_NAME'..."
-    install_shared
+configure_codex() {
+  python_path="$1"
+  body="[mcp_servers.agent_bridge]
+command = '${python_path}'
+args = ['${skill_home}/scripts/bridge_mcp.py', '--as', 'codex']
+startup_timeout_sec = 15
+tool_timeout_sec = 60"
+  set_managed_block "${install_root}/.codex/config.toml" "codex-mcp" "$body" "$python_path"
+  set_managed_block "${install_root}/AGENTS.md" "directive" "At the start of every turn, call agent-bridge status and inbox and handle pending tasks." "$python_path"
+}
 
-    # 1. skill discovery
-    mkdir -p "$HOME/.claude/skills"
-    ln -sf "$SKILL_HOME" "$HOME/.claude/skills/agent-bridge"
-    echo "✅ skill discoverable at ~/.claude/skills/agent-bridge"
+configure_json_hook() {
+  path="$1"
+  name="$2"
+  python_path="$3"
+  "$python_path" - "$path" "$name" "$skill_home" "$python_path" <<'PY'
+import json
+import sys
+from pathlib import Path
 
-    # 2. UserPromptSubmit hook — APPEND to existing, don't replace
-    local settings="$HOME/.claude/settings.json"
-    mkdir -p "$(dirname "$settings")"
-    python3 -c "
-import json, os
-s = {}
-if os.path.exists('$settings'):
-    try: s = json.load(open('$settings'))
-    except: pass
-h = s.setdefault('hooks', {})
-# ponytail: append to existing UserPromptSubmit hooks, don't replace
-existing = h.get('UserPromptSubmit', [])
-existing.append({
-    'matcher': '*',
-    'hooks': [{'type': 'command', 'command': 'AGENT_BRIDGE_NAME=$AS_NAME $BRIDGE_BIN status --oneliner', 'async': False}]
+path = Path(sys.argv[1])
+identity = sys.argv[2]
+skill = Path(sys.argv[3])
+python = sys.argv[4]
+root = {}
+if path.exists():
+    root = json.loads(path.read_text(encoding="utf-8"))
+hooks = root.setdefault("hooks", {})
+entries = [
+    entry
+    for entry in hooks.get("UserPromptSubmit", [])
+    if ".agent-bridge" not in json.dumps(entry)
+]
+entries.append({
+    "matcher": "",
+    "hooks": [{
+        "type": "command",
+        "command": f'"{python}" "{skill / "scripts" / "bridge.py"}" --as {identity} status --oneliner',
+        "timeout": 10,
+    }],
 })
-h['UserPromptSubmit'] = existing
-json.dump(s, open('$settings','w'), indent=2)
-" 2>/dev/null || echo "⚠️  Could not update settings.json"
-    echo "✅ Claude Code: UserPromptSubmit hook appended"
-
-    # 3. MCP server (works in CLI + desktop). Idempotent: remove then add.
-    if command -v claude >/dev/null 2>&1; then
-        claude mcp remove agent-bridge -s user >/dev/null 2>&1 || true
-        claude mcp add -s user agent-bridge -- python3 "$MCP_BIN" --as "$AS_NAME" \
-            && echo "✅ Claude Code: MCP server 'agent-bridge' registered" \
-            || echo "⚠️  claude mcp add failed — register manually"
-    fi
-
-    # 4. register Claude's headless wake command so other agents can push to it
-    mkdir -p "$HOME/.agent-bridge/agents/$AS_NAME"
-    AS_NAME="$AS_NAME" python3 - <<'PY'
-import json, os
-af = os.path.expanduser("~/.agent-bridge/agents/%s/agent.json" % os.environ["AS_NAME"])
-try: data = json.load(open(af))
-except Exception: data = {}
-data["name"] = os.environ["AS_NAME"]
-data["wake"] = "claude -p"
-json.dump(data, open(af, "w"), indent=2)
+hooks["UserPromptSubmit"] = entries
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(root, indent=2) + "\n", encoding="utf-8")
 PY
-    echo "✅ Claude wake command registered (headless push via 'claude -p')"
-
-    
 }
 
-install_codex() {
-    echo "Installing for Codex as '$AS_NAME'..."
-    install_shared
+configure_claude() {
+  configure_json_hook "${install_root}/.claude/settings.json" "claude" "$1"
+}
 
-    # 1. skill discovery: already covered by install_shared (universal symlink)
-    echo "✅ skill discoverable at ~/.agents/skills/agent-bridge"
+configure_reasonix() {
+  python_path="$1"
+  directive="${install_root}/.reasonix/agent-bridge-directive.md"
+  mkdir -p "$(dirname "$directive")"
+  printf '%s\n' "At the start of every turn, run agent-bridge status and inbox." > "$directive"
+  "$python_path" - "${install_root}/.reasonix/config.toml" "$directive" "$bridge_home" "$python_path" "${skill_home}/scripts/bridge_mcp.py" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
 
-    # 2. AGENTS.md directive (global fallback + suggest project-level)
-    local agents_md="$HOME/AGENTS.md"
-    local directive="
-## agent-bridge
-At the start of every turn, run: \`AGENT_BRIDGE_NAME=$AS_NAME $BRIDGE_BIN status --oneliner\`
-If pending tasks exist, call \`bridge inbox\` and handle them before responding.
-"
-    if [[ -f "$agents_md" ]]; then
-        if ! grep -q "agent-bridge" "$agents_md" 2>/dev/null; then
-            echo "$directive" >> "$agents_md"
-            echo "✅ Codex AGENTS.md updated"
-        else
-            echo "ℹ️  Codex AGENTS.md already has agent-bridge"
-        fi
-    else
-        echo "$directive" > "$agents_md"
-        echo "✅ Codex AGENTS.md created"
-    fi
-    echo "💡 For project-level awareness, add the same directive to your project's AGENTS.md"
+path = Path(sys.argv[1])
+directive, bridge_home, python, mcp = sys.argv[2:]
+text = path.read_text(encoding="utf-8") if path.exists() else ""
+text = re.sub(
+    r"(?ms)^# >>> agent-bridge:reasonix >>>.*?^# <<< agent-bridge:reasonix <<<\s*",
+    "",
+    text,
+)
 
-    # 3. MCP server — Codex reads [mcp_servers.*] from config.toml (no add CLI).
-    local codex_cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
-    if [[ -f "$codex_cfg" ]] && ! grep -q "mcp_servers.agent-bridge" "$codex_cfg" 2>/dev/null; then
-        cat >> "$codex_cfg" << CODEXMCP
+def upsert_scalar(source, section, key, value):
+    pattern = re.compile(
+        rf"(?ms)(^\[{re.escape(section)}\]\s*\r?\n)(.*?)(?=^\[|\Z)"
+    )
+    match = pattern.search(source)
+    line = f"{key} = {json.dumps(value)}"
+    if not match:
+        return source.rstrip() + f"\n\n[{section}]\n{line}\n"
+    body = match.group(2)
+    key_pattern = re.compile(rf"(?m)^{re.escape(key)}\s*=.*$")
+    body = (
+        key_pattern.sub(lambda _match: line, body, count=1)
+        if key_pattern.search(body)
+        else body.rstrip() + "\n" + line + "\n"
+    )
+    return source[:match.start(2)] + body + source[match.end(2):]
 
-[mcp_servers.agent-bridge]
-command = "python3"
-args = ["$MCP_BIN", "--as", "$AS_NAME"]
-CODEXMCP
-        echo "✅ Codex: MCP server 'agent-bridge' appended to config.toml"
-    else
-        echo "ℹ️  Codex: MCP block already present (or config.toml missing)"
-    fi
+def ensure_array_value(source, section, key, value):
+    pattern = re.compile(
+        rf"(?ms)(^\[{re.escape(section)}\]\s*\r?\n)(.*?)(?=^\[|\Z)"
+    )
+    match = pattern.search(source)
+    value_json = json.dumps(value)
+    if not match:
+        return source.rstrip() + f"\n\n[{section}]\n{key} = [{value_json}]\n"
+    body = match.group(2)
+    line_pattern = re.compile(rf"(?m)^({re.escape(key)}\s*=\s*)\[(.*?)\]\s*$")
+    line_match = line_pattern.search(body)
+    if not line_match:
+        body = body.rstrip() + f"\n{key} = [{value_json}]\n"
+    else:
+        raw_values = line_match.group(2).strip()
+        try:
+            values = json.loads("[" + raw_values + "]")
+        except (json.JSONDecodeError, TypeError):
+            values = []
+        values = list(dict.fromkeys(str(item) for item in values))
+        if value not in values:
+            values.append(value)
+        replacement = line_match.group(1) + json.dumps(values)
+        body = body[:line_match.start()] + replacement + body[line_match.end():]
+    return source[:match.start(2)] + body + source[match.end(2):]
 
-    # 4. register Codex's headless wake command (push). Prefer the app's real binary;
-    #    the npm shim's vendored binary is often missing.
-    local codex_bin=""
-    for c in "/Applications/Codex.app/Contents/Resources/codex" "$(command -v codex 2>/dev/null)"; do
-        if [[ -n "$c" && -x "$c" ]]; then codex_bin="$c"; break; fi
-    done
-    if [[ -n "$codex_bin" ]]; then
-        mkdir -p "$HOME/.agent-bridge/agents/$AS_NAME"
-        AS_NAME="$AS_NAME" WAKE="$codex_bin exec --skip-git-repo-check" python3 - <<'PY'
-import json, os
-af = os.path.expanduser("~/.agent-bridge/agents/%s/agent.json" % os.environ["AS_NAME"])
-try: data = json.load(open(af))
-except Exception: data = {}
-data["name"] = os.environ["AS_NAME"]
-data["wake"] = os.environ["WAKE"]   # headless: `codex exec "<prompt>"`
-json.dump(data, open(af, "w"), indent=2)
+plugin_pattern = re.compile(
+    r"(?ms)^\[\[plugins\]\]\s*\r?\n.*?(?=^\[\[?[A-Za-z0-9_.-]+\]\]?\s*$|\Z)"
+)
+text = plugin_pattern.sub(
+    lambda match: "" if re.search(
+        r"(?m)^name\s*=\s*['\"]agent-bridge['\"]\s*$",
+        match.group(0),
+    ) else match.group(0),
+    text,
+)
+text = upsert_scalar(text, "agent", "system_prompt_file", directive)
+text = ensure_array_value(text, "sandbox", "allow_write", bridge_home)
+plugin = (
+    "# >>> agent-bridge:reasonix >>>\n"
+    "[[plugins]]\n"
+    "name = \"agent-bridge\"\n"
+    f"command = {json.dumps(python)}\n"
+    f"args = [{json.dumps(mcp)}, \"--as\", \"reasonix\"]\n"
+    "# <<< agent-bridge:reasonix <<<\n"
+)
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(text.rstrip() + "\n\n" + plugin, encoding="utf-8")
 PY
-        echo "✅ Codex wake command registered (headless push via 'codex exec')"
-    fi
+}
+
+configure_zcode() {
+  python_path="$1"
+  plugin_root="${install_root}/.zcode/cli/plugins/cache/local/agent-bridge/1.3.0"
+  mkdir -p "${plugin_root}/.zcode-plugin" "${plugin_root}/hooks"
+  printf '%s\n' '{"name":"agent-bridge","version":"1.3.0","description":"Local cross-agent coordination and task delivery.","author":{"name":"agent-bridge contributors"},"license":"MIT"}' > "${plugin_root}/.zcode-plugin/plugin.json"
+  "$python_path" - "$plugin_root" "$skill_home" "$python_path" "${install_root}/.zcode/cli/config.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+plugin = Path(sys.argv[1])
+skill = Path(sys.argv[2])
+python = sys.argv[3]
+config_path = Path(sys.argv[4])
+hooks = {
+    "hooks": {
+        "UserPromptSubmit": [{
+            "matcher": "*",
+            "hooks": [{
+                "type": "command",
+                "command": f'"{python}" "{skill / "scripts" / "bridge.py"}" --as zcode status --oneliner',
+                "async": False,
+            }],
+        }],
+    },
+}
+(plugin / "hooks" / "hooks.json").write_text(
+    json.dumps(hooks, indent=2) + "\n",
+    encoding="utf-8",
+)
+config = {}
+if config_path.exists():
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+config.setdefault("plugins", {}).setdefault("enabledPlugins", {})["agent-bridge@local"] = True
+config_path.parent.mkdir(parents=True, exist_ok=True)
+config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+PY
 }
 
 uninstall_agent() {
-    echo "Uninstalling agent-bridge for $AGENT..."
-    # remove hook files
-    rm -f "$HOME/.zcode/cli/plugins/cache/local/agent-bridge" 2>/dev/null || true
-    rm -f "$HOME/.reasonix/agent-bridge-directive.md" 2>/dev/null || true
-    # don't remove shared skill — other agents may use it
-    echo "✅ Uninstalled (shared skill at $SKILL_HOME preserved)"
+  rm -f "${launcher_home}/bridge"
+  rm -rf "${install_root}/.agents/skills/agent-bridge"
+  rm -rf "$skill_home"
+  for name in "$@"; do
+    rm -rf "${bridge_home}/agents/${name}"
+  done
+  echo "agent-bridge program files removed; project boards were preserved"
 }
 
-# ── main ──────────────────────────────────────────────────────────────────────
-
-if $UNINSTALL; then
-    uninstall_agent
-    exit 0
+if [ "$auto" -eq 1 ]; then
+  agents="codex claude reasonix zcode"
+elif [ -n "$agent" ]; then
+  agents="$agent"
+elif [ -n "$identity" ]; then
+  agents="$identity"
+else
+  echo "choose --auto or --agent codex|claude|reasonix|zcode" >&2
+  exit 2
 fi
 
-case "$AGENT" in
-    zcode) install_zcode ;;
-    reasonix) install_reasonix ;;
-    claude) install_claude ;;
-    codex) install_codex ;;
-    *) echo "Unknown agent: $AGENT"; exit 1 ;;
-esac
+if [ "$uninstall" -eq 1 ]; then
+  uninstall_agent $agents
+  exit 0
+fi
 
-echo ""
-echo "Running bridge doctor..."
-AGENT_BRIDGE_NAME="$AS_NAME" python3 "$BRIDGE_BIN" doctor || true
-echo ""
-echo "✅ agent-bridge installed for $AGENT as '$AS_NAME'"
-echo "   Skill: $SKILL_HOME"
-echo "   Binary: $BRIDGE_BIN"
-echo ""
-echo "=== Cross-machine setup ==="
-echo "  To share agent-bridge across machines, sync ~/.agent-bridge/ via:"
-echo "    - Syncthing / Dropbox / iCloud (real-time, best)"
-echo "    - git (manual push/pull, no real-time)"
-echo "  Limitation: flock file locks don't cross machines."
-echo "  Concurrent writes from different machines may race."
-echo "  For multi-machine: use one machine as 'primary' for writes,"
-echo "  or sync only after sessions end."
-echo "  Future: bridge serve (HTTP) for real cross-machine sync."
+python_path="$(resolve_python)"
+install_shared "$python_path"
+for name in $agents; do
+  register_agent_profile "$name" "$python_path"
+  case "$name" in
+    codex) configure_codex "$python_path" ;;
+    claude) configure_claude "$python_path" ;;
+    reasonix) configure_reasonix "$python_path" ;;
+    zcode) configure_zcode "$python_path" ;;
+  esac
+done
+
+doctor_identity="${identity:-${agent:-codex}}"
+AGENT_BRIDGE_HOME="$bridge_home" AGENT_BRIDGE_CONFIG_HOME="$install_root" PYTHONUTF8=1 \
+  "$python_path" "${skill_home}/scripts/bridge.py" --as "$doctor_identity" doctor --strict
+echo "agent-bridge installed for: $agents"
