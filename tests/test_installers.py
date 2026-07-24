@@ -79,6 +79,14 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
         powershell = shutil.which("powershell.exe")
         self.assertIsNotNone(powershell)
         isolated_env = self.isolated_subprocess_env()
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as environment_key:
+                prior_user_helper = winreg.QueryValueEx(
+                    environment_key, "AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER"
+                )[0]
+        except FileNotFoundError:
+            prior_user_helper = ""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "AGENTS.md").write_text("", encoding="utf-8")
@@ -192,8 +200,6 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
             self.assertTrue(json.loads(status.stdout)["ok"])
-            import winreg
-
             with winreg.OpenKey(
                 winreg.HKEY_CURRENT_USER,
                 r"Software\Classes\agent-bridge",
@@ -318,7 +324,9 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
                 env=isolated_env,
                 timeout=15,
             )
-            self.assertEqual(user_helper.stdout.strip(), "")
+            # An isolated installer run must restore, rather than overwrite,
+            # any pre-existing user helper setting from another installation.
+            self.assertEqual(user_helper.stdout.strip(), prior_user_helper)
             dist_helper = (
                 ROOT
                 / "native"

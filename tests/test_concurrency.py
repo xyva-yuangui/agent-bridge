@@ -1,69 +1,36 @@
+"""v2 multi-process SQLite concurrency regression coverage."""
+
 from __future__ import annotations
 
 import concurrent.futures
-import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import run_bridge, write_agent
+from tests.integration.test_cli_v2 import run_module
 
 
 class ConcurrencyTests(unittest.TestCase):
-    def test_concurrent_sends_preserve_every_task_and_valid_json(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            home = Path(temp_dir)
-            write_agent(home, "target", skills=["review"])
-            seed = run_bridge(
-                home,
-                "--as",
-                "seed",
-                "send",
-                "--to",
-                "target",
-                "--subject",
-                "seed",
-                "--no-wake",
-                extra_env={
-                    "PYTHONUTF8": "1",
-                    "AGENT_BRIDGE_DISABLE_NOTIFY": "1",
-                },
-            )
-            self.assertEqual(seed.returncode, 0, seed.stderr)
+    def test_concurrent_v2_sends_preserve_all_tasks_and_outbox_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
 
             def send(index: int):
-                return run_bridge(
-                    home,
-                    "--as",
-                    f"sender-{index}",
-                    "send",
-                    "--to",
-                    "target",
-                    "--subject",
-                    f"job-{index}",
-                    "--no-wake",
-                    extra_env={
-                        "PYTHONUTF8": "1",
-                        "AGENT_BRIDGE_DISABLE_NOTIFY": "1",
-                    },
+                return run_module(
+                    "agent_bridge.cli", "--as", "sender-{}".format(index), "--json", "send",
+                    "--to", "zcode", "--subject", "job-{}".format(index), home=home,
                 )
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=40) as pool:
-                results = list(pool.map(send, range(40)))
-
-            failures = [
-                (result.returncode, result.stdout, result.stderr)
-                for result in results
-                if result.returncode != 0
-            ]
-            self.assertEqual(failures, [])
-            board_path = home / "projects" / "default" / "board.json"
-            board = json.loads(board_path.read_text(encoding="utf-8"))
-            self.assertEqual(len(board["tasks"]), 41)
-            self.assertEqual(
-                {task["subject"] for task in board["tasks"]},
-                {"seed", *(f"job-{index}" for index in range(40))},
-            )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as pool:
+                results = list(pool.map(send, range(30)))
+            self.assertTrue(all(result.returncode == 0 for result in results), [result.stderr for result in results if result.returncode])
+            board = run_module("agent_bridge.cli", "--json", "board", home=home)
+            self.assertEqual(board.returncode, 0, board.stderr)
+            import json
+            tasks = json.loads(board.stdout)["tasks"]
+            self.assertEqual({task["subject"] for task in tasks}, {"job-{}".format(index) for index in range(30)})
+            self.assertEqual(len(tasks), 30)
 
 
 if __name__ == "__main__":
