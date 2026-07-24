@@ -6,6 +6,8 @@ import hashlib
 import os
 import re
 import tempfile
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -119,6 +121,28 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+@contextmanager
+def _exchange_lock(target: Path):
+    """Portable fallback when an OS exchange primitive is unavailable.
+
+    It never overwrites an observed racer: writers serialize through a sibling
+    lock, then re-check the expected content before replacement.
+    """
+    lock = target.with_name(target.name + ".agent-bridge.exchange.lock")
+    deadline = time.monotonic() + 5
+    descriptor = None
+    while descriptor is None:
+        try: descriptor = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if time.monotonic() >= deadline: raise ConcurrentEdit("timed out waiting for atomic exchange")
+            time.sleep(.01)
+    try: yield
+    finally:
+        os.close(descriptor)
+        try: lock.unlink()
+        except OSError: pass
+
+
 def apply_atomic_edit(
     target: Path,
     edit: Callable[[bytes], bytes],
@@ -149,12 +173,14 @@ def apply_atomic_edit(
             stream.write(after)
             stream.flush()
             os.fsync(stream.fileno())
-        # Re-check immediately before replacing; this prevents blindly
-        # overwriting a writer that raced after the plan/read step.
-        current = target.read_bytes() if target.exists() else b""
-        if content_hash(current) != before_hash:
-            raise ConcurrentEdit("target changed during atomic edit: {0}".format(target))
-        os.replace(str(temporary), str(target))
+        # The lock is the portable Linux/macOS fallback for unavailable
+        # renameat2/renamex_np exchange support; it refuses conflicts instead
+        # of an unconditional non-Windows failure or a blind overwrite.
+        with _exchange_lock(target):
+            current = target.read_bytes() if target.exists() else b""
+            if content_hash(current) != before_hash:
+                raise ConcurrentEdit("target changed during atomic edit: {0}".format(target))
+            os.replace(str(temporary), str(target))
         _fsync_directory(target.parent)
         return AtomicEditResult(target, before_hash, content_hash(after))
     finally:

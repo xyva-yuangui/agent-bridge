@@ -429,6 +429,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
         if arguments.command == "uninstall":
             home = Path(arguments.home) if arguments.home else None
+            if arguments.purge_data:
+                from .setup import _data_root, _home
+                print("purging data root: {0}".format(_data_root(_home(home))), file=os.sys.stderr)
             result = {"uninstall": dataclasses.asdict(setup_lifecycle.uninstall(
                 home=home, agent=arguments.agent, purge_data=arguments.purge_data, dry_run=arguments.dry_run,
             ))}
