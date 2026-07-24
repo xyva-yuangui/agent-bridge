@@ -38,6 +38,7 @@ class SetupPlan:
     mutations: Tuple[ManagedMutation, ...]
     adapters: Tuple[HostAdapter, ...]
     scope: Tuple[str, ...]
+    effects: Tuple[ManagedMutation, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -209,7 +210,22 @@ def build_setup_plan(*, home: Optional[Path] = None, auto: bool = False, agent: 
             validation="adapter.detect().found",
             inverse="adapter.uninstall()",
         ))
-    return SetupPlan(user_home, tuple(mutations), selected, tuple(item.name for item in selected))
+    data = _data_root(user_home)
+    effects = []
+    for target, inverse in (
+        (data / "skill", "remove owned runtime"),
+        (user_home / ".local" / "bin" / ("bridge.cmd" if os.name == "nt" else "bridge"), "remove owned launcher"),
+        (data / "runtime-receipt.json", "remove runtime receipt"),
+        (data / "native" / "agent-bridge-windows-notify.exe", "unregister and remove owned native helper"),
+    ):
+        original = target.read_bytes() if target.is_file() else b""
+        effects.append(ManagedMutation(target, OWNER, MANAGED_CONFIG_VERSION, content_hash(original), None, "owned receipt validates", inverse))
+    for item in selected:
+        effects.extend((
+            ManagedMutation(item.installation_artifact_path, OWNER, MANAGED_CONFIG_VERSION, content_hash(item.installation_artifact_path.read_bytes() if item.installation_artifact_path.is_file() else b""), None, "adapter receipt validates", "remove adapter receipt"),
+            ManagedMutation(data / "agents" / item.name / "agent.json", OWNER, MANAGED_CONFIG_VERSION, content_hash(b""), None, "profile is owned", "remove profile"),
+        ))
+    return SetupPlan(user_home, tuple(mutations), selected, tuple(item.name for item in selected), tuple(effects))
 
 
 def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
@@ -222,14 +238,17 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
     applied = []
     backups = []
     rollback = []
+    inverses = []
     try:
         if os.name == "nt":
             expected, ignored_receipt = _native_paths(plan.home)
             configured = os.environ.get("AGENT_BRIDGE_WINDOWS_NOTIFY_HELPER", "")
             if configured and Path(configured).is_file() and Path(configured).absolute() != expected.absolute():
                 raise RuntimeError("refusing to overwrite an unrelated Windows notifier environment value")
+        inverses.append(("runtime", lambda: _remove_runtime(plan.home)))
         _install_runtime(plan.home)
         _install_profiles(plan.home, plan.scope)
+        inverses.append(("native", lambda: _remove_windows_native(plan.home)))
         _install_windows_native(plan.home)
         for mutation in plan.mutations:
             adapter = next(
@@ -243,21 +262,18 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
                 backups.append(str(backup))
             if not _host_application_present(adapter):
                 raise RuntimeError("requested host application is not detected: {0}".format(adapter.name))
+            inverses.append((adapter.name, adapter.uninstall))
             adapter.install()
             if not adapter.detect().found:
                 raise RuntimeError("post-install validation failed for host: {0}".format(adapter.name))
             applied.append(adapter)
     except BaseException as error:
-        for adapter in reversed(applied):
+        for name, inverse in reversed(inverses):
             try:
-                adapter.uninstall()
-                rollback.append({"host": adapter.name, "outcome": "removed owned integration"})
+                inverse()
+                rollback.append({"host": name, "outcome": "inverse applied"})
             except BaseException as rollback_error:
-                rollback.append({"host": adapter.name, "outcome": "failed: {0}".format(rollback_error)})
-        try: _remove_windows_native(plan.home)
-        except BaseException as rollback_error: rollback.append({"host": "native", "outcome": "failed: {0}".format(rollback_error)})
-        try: _remove_runtime(plan.home)
-        except BaseException as rollback_error: rollback.append({"host": "runtime", "outcome": "failed: {0}".format(rollback_error)})
+                rollback.append({"host": name, "outcome": "failed: {0}".format(rollback_error)})
         raise RuntimeError("setup failed: {0}; rollback={1}".format(error, rollback)) from error
     return SetupReport(plan.scope, tuple(item.name for item in applied), backups=tuple(backups))
 
