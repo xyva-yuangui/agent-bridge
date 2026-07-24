@@ -188,6 +188,8 @@ PY
 
 configure_claude() {
   configure_json_hook "${install_root}/.claude/settings.json" "claude" "$1"
+  rm -rf "${install_root}/.claude/skills/agent-bridge"
+  ln -s "$skill_home" "${install_root}/.claude/skills/agent-bridge"
 }
 
 configure_reasonix() {
@@ -315,6 +317,8 @@ config.setdefault("plugins", {}).setdefault("enabledPlugins", {})["agent-bridge@
 config_path.parent.mkdir(parents=True, exist_ok=True)
 config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 PY
+  rm -rf "${install_root}/.zcode/skills/agent-bridge"
+  ln -s "$skill_home" "${install_root}/.zcode/skills/agent-bridge"
 }
 
 uninstall_agent() {
