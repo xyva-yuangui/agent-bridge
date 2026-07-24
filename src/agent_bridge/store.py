@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Generator, Iterable, Optional
+from typing import Callable, Generator, Iterable, Optional
 
 
 @dataclass(frozen=True)
@@ -23,12 +23,21 @@ class IntegrityReport:
 class Store:
     """A single SQLite connection with schema migration support."""
 
-    def __init__(self, path: Path, connection: sqlite3.Connection) -> None:
+    def __init__(
+        self, path: Path, connection: sqlite3.Connection,
+        fault_hook: Optional[Callable[[str], None]] = None,
+    ) -> None:
         self.path = path
         self.connection = connection
+        # Deliberately injected only by tests or a diagnostic harness.  The
+        # production path leaves this unset, so fault points are zero-policy
+        # observability seams rather than a hidden recovery mechanism.
+        self.fault_hook = fault_hook
 
     @classmethod
-    def open(cls, path: Path) -> "Store":
+    def open(
+        cls, path: Path, *, fault_hook: Optional[Callable[[str], None]] = None,
+    ) -> "Store":
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + 5.0
@@ -39,7 +48,7 @@ class Store:
                 connection.execute("PRAGMA busy_timeout=5000")
                 connection.execute("PRAGMA foreign_keys=ON")
                 connection.execute("PRAGMA journal_mode=WAL")
-                store = cls(path, connection)
+                store = cls(path, connection, fault_hook)
                 store.apply_migrations()
                 return store
             except sqlite3.OperationalError as error:
@@ -59,15 +68,32 @@ class Store:
         return None if row is None else row[0]
 
     @contextmanager
-    def transaction(self, immediate: bool = False) -> Generator[sqlite3.Connection, None, None]:
+    def transaction(
+        self, immediate: bool = False, *, before_commit: Optional[str] = None,
+        after_commit: Optional[str] = None,
+    ) -> Generator[sqlite3.Connection, None, None]:
         self.connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
         try:
             yield self.connection
+            if before_commit:
+                self.trigger_fault(before_commit)
+            self.connection.execute("COMMIT")
         except BaseException:
-            self.connection.execute("ROLLBACK")
+            if self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
             raise
         else:
-            self.connection.execute("COMMIT")
+            if after_commit:
+                self.trigger_fault(after_commit)
+
+    def trigger_fault(self, point: str) -> None:
+        """Invoke a deterministic diagnostic fault point when configured.
+
+        Keeping this seam on the store makes transaction-boundary crashes
+        reproducible without sleeps, signals, or wall-clock races.
+        """
+        if self.fault_hook is not None:
+            self.fault_hook(point)
 
     def integrity_report(self) -> IntegrityReport:
         message = str(self.scalar("PRAGMA integrity_check"))

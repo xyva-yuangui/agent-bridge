@@ -102,7 +102,11 @@ class BridgeService:
         """Create a pending task and its initial delivery intent atomically."""
         task_id = uuid.uuid4().hex
         timestamp = utc_now()
-        with self.store.transaction(immediate=True) as connection:
+        with self.store.transaction(
+            immediate=True,
+            before_commit="before_task_commit",
+            after_commit="after_task_commit",
+        ) as connection:
             self._ensure_participants(connection, project_id, sender, assignee)
             connection.execute(
                 "INSERT INTO tasks("

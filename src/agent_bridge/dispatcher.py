@@ -198,6 +198,7 @@ class Dispatcher:
                 if not self._mark_dispatching(item, channel, deadline_at):
                     self._lease_lost = True
                     return delivered, retried, failed
+            self.store.trigger_fault("after_attempt_recorded")
             remaining = deadline_at - time.monotonic()
             if remaining <= EFFECT_CLEANUP_RESERVE_SECONDS + SPAWN_RESERVE_SECONDS:
                 self._deadline_reached = True
@@ -225,6 +226,7 @@ class Dispatcher:
                 retried += retry_result[1]
                 failed += retry_result[2]
                 continue
+            self.store.trigger_fault(_effect_fault_point(channel))
             if self.after_effect is not None:
                 # This hook intentionally sits after the external effect and
                 # before durable completion so fault tests exercise that gap.
@@ -248,6 +250,7 @@ class Dispatcher:
                     return delivered, retried, failed
         if not retried and not failed:
             for item in group:
+                self.store.trigger_fault("before_outbox_complete")
                 if not self._complete(item, deadline_at):
                     self._lease_lost = True
                     return delivered, retried, failed
@@ -489,6 +492,11 @@ def _connection_can_mutate_item(connection: Any, owner: str, item_id: int) -> bo
 
 def _attempt_key(item: OutboxItem, channel: str) -> str:
     return "{0}:{1}".format(item.idempotency_key, channel)
+
+
+def _effect_fault_point(channel: str) -> str:
+    """Name the durable-effect gap without inferring delivery success."""
+    return "after_launch_effect" if channel == "launch" or channel.startswith("launch:") else "after_notification_effect"
 
 
 def _invoke(adapter: DeliveryChannel, item: OutboxItem, idempotency_key: str, timeout_seconds: float):
