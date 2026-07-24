@@ -13,6 +13,11 @@ agent-bridge 让 Codex、Claude Code、Reasonix 和 ZCode 使用同一个本地�
 
 ## 安装
 
+安装脚本只负责安全地安装包并调用 `bridge setup`；Python 生命周期负责受管
+运行时、启动器、配置、代理档案和 Windows 原生通知助手。`--auto` 只配置
+检测到的主机，`--agent` 可显式创建该主机的受管配置。`bridge uninstall`
+默认保留数据，只有 `--purge-data` 才删除显示出的精确数据目录。
+
 Windows PowerShell：
 
 ```powershell

@@ -82,6 +82,10 @@ class WindowsInstallerRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "AGENTS.md").write_text("", encoding="utf-8")
+            (root / ".codex").mkdir(); (root / ".codex" / "config.toml").write_text("", encoding="utf-8")
+            (root / ".claude").mkdir(); (root / ".claude" / "settings.json").write_text("{}\n", encoding="utf-8")
+            (root / ".reasonix").mkdir(); (root / ".reasonix" / "config.toml").write_text("", encoding="utf-8")
+            (root / ".zcode" / "cli").mkdir(parents=True); (root / ".zcode" / "cli" / "config.json").write_text("{}\n", encoding="utf-8")
             stale_profile = root / ".agent-bridge" / "agents" / "old-test" / "agent.json"
             stale_profile.parent.mkdir(parents=True)
             stale_profile.write_text(

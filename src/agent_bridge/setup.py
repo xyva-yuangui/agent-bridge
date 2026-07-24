@@ -39,6 +39,7 @@ class SetupPlan:
     adapters: Tuple[HostAdapter, ...]
     scope: Tuple[str, ...]
     effects: Tuple[ManagedMutation, ...] = ()
+    requested_agent: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -225,7 +226,7 @@ def build_setup_plan(*, home: Optional[Path] = None, auto: bool = False, agent: 
             ManagedMutation(item.installation_artifact_path, OWNER, MANAGED_CONFIG_VERSION, content_hash(item.installation_artifact_path.read_bytes() if item.installation_artifact_path.is_file() else b""), None, "adapter receipt validates", "remove adapter receipt"),
             ManagedMutation(data / "agents" / item.name / "agent.json", OWNER, MANAGED_CONFIG_VERSION, content_hash(b""), None, "profile is owned", "remove profile"),
         ))
-    return SetupPlan(user_home, tuple(mutations), selected, tuple(item.name for item in selected), tuple(effects))
+    return SetupPlan(user_home, tuple(mutations), selected, tuple(item.name for item in selected), tuple(effects), agent)
 
 
 def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
@@ -260,8 +261,10 @@ def apply_setup_plan(plan: SetupPlan, *, dry_run: bool = False) -> SetupReport:
             backup = backup_file(adapter.config_path, data_root / "backups" / adapter.name)
             if backup is not None:
                 backups.append(str(backup))
-            if not _host_application_present(adapter):
+            if not _host_application_present(adapter) and not plan.requested_agent:
                 raise RuntimeError("requested host application is not detected: {0}".format(adapter.name))
+            if plan.requested_agent and not _host_application_present(adapter):
+                adapter.config_path.parent.mkdir(parents=True, exist_ok=True)
             if not adapter._valid_installation_marker():
                 adapter.marker_path.parent.mkdir(parents=True, exist_ok=True)
                 _write_owned_json(adapter.marker_path, {"host": adapter.name, "mechanisms": [adapter.mechanism]})
