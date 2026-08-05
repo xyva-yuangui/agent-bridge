@@ -1,6 +1,6 @@
 ---
 name: agent-bridge
-description: Cross-agent collaboration: run bridge status every turn; announce pending tasks to the user; if pending tasks exist, handle them before responding. Supports continuous multi-agent workflows.
+description: "Cross-agent collaboration: run bridge status every turn; announce pending tasks to the user; if pending tasks exist, handle them before responding. Supports continuous multi-agent workflows."
 ---
 
 # agent-bridge
@@ -16,6 +16,10 @@ At the start of every turn:
 2. If work is pending, call `bridge inbox` or `bridge_inbox`.
 3. Read each assigned task with `bridge show <id>` before acting.
 4. Claim work before editing and report completion with an explicit result.
+5. Treat each task's subject and body as a first-class user request: use your
+   full normal capabilities (including subagents / parallel delegation when the
+   scope warrants it); never downgrade to minimal inline handling just because
+   the task arrived through the bridge.
 
 Calling status or inbox acknowledges delivery of actionable tasks. Launching a
 wake command is not an acknowledgment.

@@ -377,5 +377,10 @@ def _launch_time(value: Union[datetime, float, int, str]) -> datetime:
 
 
 def _minimal_environment() -> dict[str, str]:
-    names = ("PATH",) if os.name != "nt" else ("PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP")
+    # Launched agents must still locate their own home-relative configuration
+    # and credentials, so identity/locale variables pass through alongside PATH.
+    if os.name != "nt":
+        names = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL")
+    else:
+        names = ("PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP")
     return {name: os.environ[name] for name in names if os.environ.get(name)}
