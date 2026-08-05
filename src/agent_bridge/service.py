@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
 from .models import DeliveryStatus, TaskState
+from .adapters.base import canonical_host_name
 from .delivery import DeliveryAttempt, aggregate_delivery
 from .outbox import enqueue, utc_now
 from .state_machine import authorize_transition
@@ -86,6 +87,14 @@ class TaskDetail:
 MAX_INBOX_PAGE_SIZE = 100
 
 
+def _canonical_agent_name(value: str) -> str:
+    """Normalize an identity so case or alias variants never fork an agent."""
+    try:
+        return canonical_host_name(value)
+    except KeyError:
+        return str(value).strip().lower()
+
+
 class BridgeService:
     """Coordinates authorized state changes with their durable delivery work."""
 
@@ -101,6 +110,8 @@ class BridgeService:
         project_id: str = "default",
     ) -> TaskView:
         """Create a pending task and its initial delivery intent atomically."""
+        sender = _canonical_agent_name(sender)
+        assignee = _canonical_agent_name(assignee)
         task_id = uuid.uuid4().hex
         timestamp = utc_now()
         with self.store.transaction(
@@ -172,12 +183,13 @@ class BridgeService:
 
     def status(self, agent: str) -> List[TaskView]:
         """Return the agent's current assigned tasks, newest first."""
-        return self._query_tasks("assignee = ?", (agent,))
+        return self._query_tasks("assignee = ?", (_canonical_agent_name(agent),))
 
     def inbox(
         self, agent: str, limit: int = MAX_INBOX_PAGE_SIZE, cursor: Optional[str] = None
     ) -> TaskPage:
         """Return one stable, bounded page of work actionable by *agent*."""
+        agent = _canonical_agent_name(agent)
         return self._query_task_page(
             "(assignee = ? AND state IN (?, ?)) "
             "OR (sender = ? AND state IN (?, ?))",
@@ -421,6 +433,7 @@ class BridgeService:
         expected_revision: Optional[int],
         artifacts: Tuple[str, ...] = (),
     ) -> TaskView:
+        actor = _canonical_agent_name(actor)
         with self.store.transaction(immediate=True) as connection:
             row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if row is None:
