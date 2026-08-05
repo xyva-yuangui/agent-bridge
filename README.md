@@ -15,6 +15,8 @@ ZCode. It uses Python's standard library, keeps data under `~/.agent-bridge`,
 and has no resident daemon, network listener, cloud synchronization, or default
 telemetry.
 
+Created and maintained by **圆规 (Yuangui)** · [@xyva-yuangui](https://github.com/xyva-yuangui)
+
 [License](LICENSE) (Apache-2.0) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) ·
 [Architecture](docs/architecture/v2.md) · [Windows](docs/installation/windows.md) ·
 [macOS](docs/installation/macos.md) · [Migration](docs/installation/migration-v1.md) ·

@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = []
 license = "Apache-2.0"
-authors = [{name = "Agent Bridge contributors"}]
+authors = [{name = "圆规 (xyva-yuangui)"}]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Operating System :: OS Independent",

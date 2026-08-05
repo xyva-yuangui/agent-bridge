@@ -12,6 +12,8 @@
 
 Agent Bridge 为 Codex、Claude Code、Reasonix 和 ZCode 提供同一份本地任务看板。它只使用 Python 标准库，数据保存在 `~/.agent-bridge`；没有常驻守护进程、网络监听器、云同步或默认遥测。
 
+作者：**圆规** · [@xyva-yuangui](https://github.com/xyva-yuangui)
+
 [许可证](LICENSE)（Apache-2.0） · [安全报告](SECURITY.md) · [贡献指南](CONTRIBUTING.md) · [架构](docs/architecture/v2.md) · [Windows 安装](docs/installation/windows.md) · [macOS 安装](docs/installation/macos.md) · [v1 迁移](docs/installation/migration-v1.md) · [发布清单](docs/release/checklist.md)
 
 ## 环境与支持范围
